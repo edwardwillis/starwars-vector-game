@@ -11,7 +11,7 @@ pipeline.
 ## Current milestone
 
 Step 6: an original, hand-authored twin-panel fighter plus a scene-object layer
-for independently transformed, multipart wireframe objects.
+and catalog for independently transformed, multipart wireframe objects.
 
 ## Prerequisites
 
@@ -42,6 +42,14 @@ The scene architecture supports additional ships, projectiles, laser cannons,
 and compound Death Star geometry through the same rendering pipeline. The next
 milestone animates object transforms. Culling remains off by default to preserve
 the arcade-like visual style.
+
+Later milestones add named camera anchors for cockpit, chase, spectator, and
+Death Star viewpoints, followed by an authoritative Go server for a shared live
+simulation containing autonomous and user-controlled objects.
+
+A pluggable controller architecture will support static objects, human input,
+deterministic rule-driven behavior, and asynchronous external AI agents such as
+MCP-backed controllers without granting them authority over simulation state.
 
 ## License
 
