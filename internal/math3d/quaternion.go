@@ -44,6 +44,10 @@ func (q Quaternion) Mul(other Quaternion) Quaternion {
 	}
 }
 
+func (q Quaternion) Conjugate() Quaternion {
+	return Quaternion{W: q.W, X: -q.X, Y: -q.Y, Z: -q.Z}
+}
+
 func QuaternionFromAxisAngle(axis Vec3, radians float64) Quaternion {
 	axis = axis.Normalize()
 	if axis == (Vec3{}) {

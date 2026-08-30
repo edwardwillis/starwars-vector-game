@@ -11,6 +11,7 @@ import (
 
 func TestObjectValidation(t *testing.T) {
 	object := Object{
+		ID:   1,
 		Name: "test cube",
 		Pose: kinematics.Pose{
 			Position:    math3d.Vec3{X: 1, Y: 2, Z: 3},
@@ -21,6 +22,9 @@ func TestObjectValidation(t *testing.T) {
 			Color:     color.RGBA{R: 255, A: 255},
 			LineWidth: 2,
 		}},
+		Anchors: map[string]kinematics.Pose{
+			"top": {Position: math3d.Vec3{Y: 1}},
+		},
 	}
 	if err := object.Validate(); err != nil {
 		t.Fatalf("valid object was rejected: %v", err)
@@ -28,6 +32,10 @@ func TestObjectValidation(t *testing.T) {
 	transformedOrigin := object.WorldMatrix().TransformPoint(math3d.Vec3{})
 	if transformedOrigin != object.Pose.Position {
 		t.Fatalf("WorldMatrix transformed origin to %+v, want %+v", transformedOrigin, object.Pose.Position)
+	}
+	anchor, ok := object.Anchor("top")
+	if !ok || anchor.Position != (math3d.Vec3{X: 1, Y: 3, Z: 3}) {
+		t.Fatalf("resolved anchor is %+v, %v", anchor, ok)
 	}
 
 	object.Parts[0].LineWidth = 0

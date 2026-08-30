@@ -19,20 +19,40 @@ type Part struct {
 	LineWidth float32
 }
 
+type ObjectID uint64
+
+type Anchor struct {
+	Name string
+	Pose kinematics.Pose
+}
+
 // Object is an independently transformable item in the game world. Ships,
 // projectiles, emplacements, celestial bodies, and scenery share this type.
 type Object struct {
-	Name   string
-	Pose   kinematics.Pose
-	Motion kinematics.Motion
-	Parts  []Part
+	ID      ObjectID
+	Name    string
+	Pose    kinematics.Pose
+	Motion  kinematics.Motion
+	Parts   []Part
+	Anchors map[string]kinematics.Pose
 }
 
 func (o Object) WorldMatrix() math3d.Mat4 {
 	return o.Pose.Matrix()
 }
 
+func (o Object) Anchor(name string) (kinematics.Pose, bool) {
+	anchor, ok := o.Anchors[name]
+	if !ok {
+		return kinematics.Pose{}, false
+	}
+	return kinematics.Compose(o.Pose, anchor), true
+}
+
 func (o Object) Validate() error {
+	if o.ID == 0 {
+		return fmt.Errorf("scene object must have a non-zero ID")
+	}
 	if o.Name == "" {
 		return fmt.Errorf("scene object must have a name")
 	}

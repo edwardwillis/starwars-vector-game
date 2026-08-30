@@ -339,8 +339,8 @@ controllers remain the baseline for tests and offline play.
 5. First fighter model — hardcoded original verts/edges, render wireframe
 6. Scene objects — transforms, multipart styling, multiple object instances
 7. Kinematics — pose, quaternion orientation, signed axial speed, yaw/pitch/roll
-8. Input — mouse/keys rotate and zoom model
-9. Multi-axis rotation, camera transform, multiple objects on screen
+8. Input — manual intent, signed throttle, yaw/pitch/roll, pause/reset, camera zoom
+9. Camera system — stable object IDs, fixed/chase/cockpit/orbit views, anchors
 10. Object catalog — additional ships, laser bolt, cannon emplacement
 11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
 12. Starfield background, ship movement (WASD)

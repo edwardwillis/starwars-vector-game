@@ -8,7 +8,7 @@ import (
 )
 
 func TestCubeReturnsValidObject(t *testing.T) {
-	cube := Cube(2, kinematics.Pose{Position: math3d.Vec3{X: 1, Y: 2, Z: 3}})
+	cube := Cube(1, 2, kinematics.Pose{Position: math3d.Vec3{X: 1, Y: 2, Z: 3}})
 	if err := cube.Validate(); err != nil {
 		t.Fatalf("Cube returned an invalid object: %v", err)
 	}
@@ -18,7 +18,7 @@ func TestCubeReturnsValidObject(t *testing.T) {
 }
 
 func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
-	fighter := TwinPanelFighter(kinematics.Pose{})
+	fighter := TwinPanelFighter(1, kinematics.Pose{})
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TwinPanelFighter returned an invalid object: %v", err)
 	}
@@ -27,5 +27,10 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	}
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
+	}
+	for _, name := range []string{"center", "cockpit", "chase"} {
+		if _, ok := fighter.Anchor(name); !ok {
+			t.Fatalf("fighter is missing %q camera anchor", name)
+		}
 	}
 }

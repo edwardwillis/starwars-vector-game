@@ -45,6 +45,20 @@ func TestFixedStepSubdivisionIsStable(t *testing.T) {
 	}
 }
 
+func TestComposeAndViewMatrix(t *testing.T) {
+	parent := Pose{
+		Position:    math3d.Vec3{X: 10},
+		Orientation: math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, math.Pi/2),
+	}
+	local := Pose{Position: math3d.Vec3{Z: 2}, Orientation: math3d.IdentityQuaternion()}
+	world := Compose(parent, local)
+	assertVec3(t, world.Position, math3d.Vec3{X: 12})
+
+	pointInFrontOfCamera := world.Position.Add(world.Forward().Scale(3))
+	cameraPoint := world.ViewMatrix().TransformPoint(pointInFrontOfCamera)
+	assertVec3(t, cameraPoint, math3d.Vec3{Z: 3})
+}
+
 func assertVec3(t *testing.T, got, want math3d.Vec3) {
 	t.Helper()
 	if got.Sub(want).Length() > 1e-9 {

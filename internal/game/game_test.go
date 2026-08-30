@@ -1,6 +1,11 @@
 package game
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+)
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
 	g := New()
@@ -23,5 +28,21 @@ func TestUpdateMovesAndRotatesFighter(t *testing.T) {
 	}
 	if after.Orientation == before.Orientation {
 		t.Fatal("Update did not rotate the fighter")
+	}
+}
+
+func TestResetFighterRestoresInitialPoseAndStopsManualMotion(t *testing.T) {
+	g := New()
+	g.mode = modeManual
+	g.objects[0].Pose.Position = math3d.Vec3{X: 100}
+	g.objects[0].Motion = kinematics.Motion{Speed: 1, YawRate: 1}
+
+	g.resetFighter()
+
+	if g.objects[0].Pose != g.initialPose {
+		t.Fatalf("reset pose is %+v, want %+v", g.objects[0].Pose, g.initialPose)
+	}
+	if g.objects[0].Motion != (kinematics.Motion{}) {
+		t.Fatalf("reset manual motion is %+v, want zero", g.objects[0].Motion)
 	}
 }

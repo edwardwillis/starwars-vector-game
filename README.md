@@ -10,9 +10,8 @@ pipeline.
 
 ## Current milestone
 
-Step 7: pose-based kinematics with quaternion orientation, signed axial speed,
-and local yaw/pitch/roll rates. The twin-panel fighter moves along a gentle
-curved path while yawing and rolling.
+Step 9: interactive manual flight plus fixed, chase, cockpit, and orbit cameras
+targeted through stable object IDs and catalog-defined camera anchors.
 
 ## Prerequisites
 
@@ -37,6 +36,18 @@ go run .
 
 You should see a 960×540 dark window with a red, low-poly twin-panel fighter
 moving along a gentle curved path while yawing and rolling.
+
+## Controls
+
+- `M`: switch between autopilot and manual flight
+- `V`: cycle fixed, chase, cockpit, and orbit views
+- `W` / `S`: increase forward or backward speed
+- Arrow keys: yaw and pitch
+- `Q` / `E`: roll
+- `Space`: stop
+- `P`: pause or resume simulation
+- `R`: reset fighter pose and motion
+- `+` / `-` or mouse wheel: camera zoom
 
 ## Roadmap
 

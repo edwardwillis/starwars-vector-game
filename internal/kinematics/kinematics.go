@@ -20,6 +20,22 @@ func (p Pose) Matrix() math3d.Mat4 {
 		Mul(p.Orientation.Matrix())
 }
 
+// Compose returns a world pose formed by applying local relative to parent.
+func Compose(parent, local Pose) Pose {
+	parentOrientation := parent.Orientation.Normalize()
+	return Pose{
+		Position:    parent.Position.Add(parentOrientation.Rotate(local.Position)),
+		Orientation: parentOrientation.Mul(local.Orientation.Normalize()).Normalize(),
+	}
+}
+
+// ViewMatrix returns the inverse of the pose's world transform.
+func (p Pose) ViewMatrix() math3d.Mat4 {
+	inverseRotation := p.Orientation.Normalize().Conjugate().Matrix()
+	inverseTranslation := math3d.Translation(-p.Position.X, -p.Position.Y, -p.Position.Z)
+	return inverseRotation.Mul(inverseTranslation)
+}
+
 type Motion struct {
 	Speed     float64
 	YawRate   float64
