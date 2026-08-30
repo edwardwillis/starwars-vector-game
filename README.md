@@ -49,6 +49,10 @@ Future visibility modes will switch at runtime between drawing every edge,
 backface culling, and full depth-based hidden-line removal. The all-edges mode
 remains the default arcade presentation.
 
+An interactive realism slider will progress from transparent arcade wireframes
+through backface rejection, per-object hidden-line removal, scene-wide
+occlusion, and distance-based depth cues.
+
 Later milestones add named camera anchors for cockpit, chase, spectator, and
 Death Star viewpoints, followed by an authoritative Go server for a shared live
 simulation containing autonomous and user-controlled objects.

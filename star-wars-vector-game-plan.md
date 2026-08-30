@@ -112,6 +112,55 @@ edges, since one edge may be visible in several separated pieces. The initial
 implementation can use a small software depth buffer; later implementations may
 use Ebitengine shaders without changing the visibility setting or caller API.
 
+### Interactive Realism Profiles
+
+The user can change rendering realism at runtime with a slider or equivalent
+keyboard control. The slider uses discrete, named levels rather than blending
+incompatible algorithms continuously. Moving it to the right cumulatively
+enables more pipeline processing:
+
+| Level | Name | Enabled behavior |
+|---:|---|---|
+| 0 | Arcade/X-ray | Draw every clipped wireframe edge |
+| 1 | Facing surfaces | Add backface rejection |
+| 2 | Solid objects | Add hidden-line removal within each object |
+| 3 | Solid scene | Add depth occlusion between different objects |
+| 4 | Depth cues | Add distance-based brightness and line-width attenuation |
+
+Near-plane and screen clipping remain enabled at every level because they are
+rendering correctness requirements rather than realism effects. The default is
+level 0, preserving the transparent vector-arcade presentation.
+
+```go
+type RealismLevel int
+
+const (
+    RealismArcade RealismLevel = iota
+    RealismFacingSurfaces
+    RealismSolidObjects
+    RealismSolidScene
+    RealismDepthCues
+)
+
+type PipelineProfile struct {
+    BackfaceCulling bool
+    SelfOcclusion   bool
+    SceneOcclusion  bool
+    DepthCues       bool
+}
+```
+
+`RealismLevel.Profile()` maps each slider position to a complete immutable
+pipeline configuration. The UI changes only the selected level; it does not
+directly wire individual rendering stages. This makes levels easy to test,
+serialize in settings, synchronize for demonstrations, and extend later.
+
+The renderer displays the active level name beside the slider and permits
+switching while objects are moving. This makes the visual contribution and
+performance cost of each stage directly observable. Advanced settings may
+eventually expose individual stage toggles, but the ordered slider remains the
+primary user-facing control.
+
 ## Scene and Object Scope
 
 The renderer is object-agnostic. Every visible world item is an independently
@@ -293,7 +342,7 @@ controllers remain the baseline for tests and offline play.
 8. Input — mouse/keys rotate and zoom model
 9. Multi-axis rotation, camera transform, multiple objects on screen
 10. Object catalog — additional ships, laser bolt, cannon emplacement
-11. Visibility modes — model faces, backface culling, hidden-line depth resolver
+11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
 12. Starfield background, ship movement (WASD)
 13. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
 14. Death Star — reusable surface modules, trench, towers, targeting reticle
