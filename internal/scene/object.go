@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 
+	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
 )
@@ -21,9 +22,14 @@ type Part struct {
 // Object is an independently transformable item in the game world. Ships,
 // projectiles, emplacements, celestial bodies, and scenery share this type.
 type Object struct {
-	Name      string
-	Transform math3d.Mat4
-	Parts     []Part
+	Name   string
+	Pose   kinematics.Pose
+	Motion kinematics.Motion
+	Parts  []Part
+}
+
+func (o Object) WorldMatrix() math3d.Mat4 {
+	return o.Pose.Matrix()
 }
 
 func (o Object) Validate() error {

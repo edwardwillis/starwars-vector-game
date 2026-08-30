@@ -12,25 +12,32 @@ Non-commercial learning project. Homage to 1983 Atari arcade "Star Wars". Wirefr
 ```
 Scene (independent objects)
   -> Object (transform + styled model parts)
-  -> Model (verts + edges)
+  -> Model (verts + edges + optional faces)
   -> Transform (object world matrix)
   -> Camera (view matrix)
+  -> Backface Cull (optional, camera space)
   -> Project (perspective -> screen)
   -> Clip (near plane, screen bounds)
-  -> Cull (optional: backface/HSR toggle)
+  -> Hidden-Line Resolve (optional, projected depth)
   -> Draw (line draw)
 ```
 
-Each stage is an interface. Renderer holds pipeline config, runs stages in order. Stages toggle on/off independently (e.g. culling off = original arcade look, culling on = later upgrade).
+The renderer holds pipeline configuration and runs these operations in order.
+Visibility processing is selected by a feature setting and defaults to drawing
+all edges for the original arcade look.
 
 Core types:
 
 ```go
 type Vec3 struct{ X, Y, Z float64 }
 type Edge struct{ A, B int } // vertex indices
+type Face struct {
+    Vertices []int // ordered vertex indices for one polygonal surface
+}
 type Model struct {
     Verts []Vec3
     Edges []Edge
+    Faces []Face // optional until a visibility mode requires surfaces
 }
 
 type Part struct {
@@ -40,21 +47,70 @@ type Part struct {
 }
 
 type Object struct {
-    Name      string
-    Transform Mat4
-    Parts     []Part
+    Name   string
+    Pose   Pose
+    Motion Motion
+    Parts  []Part
 }
 
-type Culler interface {
-    Cull(verts []Vec3, edges []Edge) []Edge
-}
+type VisibilityMode int
+
+const (
+    VisibilityAll VisibilityMode = iota
+    VisibilityBackfaces
+    VisibilityHiddenLines
+)
 
 type Pipeline struct {
-    Culler Culler // nil = disabled
+    Visibility VisibilityMode
 }
 ```
 
-New stages (e.g. `BackfaceCull`, `PainterAlgoHSR`) implement the interface and slot in later without touching rest of code.
+## Switchable Visibility and Hidden-Line Removal
+
+“Optional stage” means the pipeline always has a defined visibility decision,
+but its configured mode determines which implementation runs:
+
+```go
+switch pipeline.Visibility {
+case VisibilityAll:
+    // Bypass visibility processing and draw every clipped edge.
+case VisibilityBackfaces:
+    // Remove geometry belonging only to camera-facing-away surfaces.
+case VisibilityHiddenLines:
+    // Resolve each line against projected face depth and return visible pieces.
+}
+```
+
+Switching this setting does not require game code, scene objects, controllers,
+camera code, or networking to change. They continue submitting the same models
+and poses to `Pipeline.Render`. Only the pipeline's conversion of geometry into
+final line segments changes. That stable caller contract is what it means for
+the architecture to support the feature cleanly.
+
+The three modes provide different results:
+
+- `VisibilityAll` ignores `Faces` and draws every edge. This is the default and
+  preserves the transparent original-arcade wireframe style.
+- `VisibilityBackfaces` uses camera-space face normals to omit surfaces facing
+  away from the camera. It is inexpensive but cannot hide an edge behind a
+  different front-facing surface.
+- `VisibilityHiddenLines` performs a face-depth prepass, compares projected line
+  depth against that surface depth, and splits partially occluded edges into
+  visible line segments. This is full hidden-line removal.
+
+The existing edge-only `Culler` hook is sufficient only for basic whole-edge
+filtering and will be replaced by these visibility modes. Models can continue to
+omit faces while using `VisibilityAll`; catalog entries must provide valid faces
+before selecting either surface-aware mode. Face indices and winding are
+validated with the rest of each model.
+
+Hidden-line removal operates after projection and clipping because it compares
+screen-space coverage, while retaining interpolated depth for every projected
+endpoint. Its output is a list of drawable line segments rather than model
+edges, since one edge may be visible in several separated pieces. The initial
+implementation can use a small software depth buffer; later implementations may
+use Ebitengine shaders without changing the visibility setting or caller API.
 
 ## Scene and Object Scope
 
@@ -76,6 +132,58 @@ enemy squadrons and repeated laser bolts do not duplicate geometry.
 Catalog constructors assemble geometry, default vector styling, and multipart
 details into ready-to-place scene objects. Game code selects catalog entries and
 supplies transforms instead of knowing how each object is built.
+
+## Object Coordinates and Kinematics
+
+Directional catalog models use a shared local coordinate convention:
+
+- `+Z` is forward (the front or nose of the object);
+- `-Z` is backward;
+- `+Y` is up;
+- `+X` is right.
+
+The current twin-panel fighter follows this convention: its cockpit window faces
+`+Z`. Models that have no meaningful front, such as the Death Star or a static
+piece of scenery, still use the convention for consistency but may never move.
+
+An object's simulation state is represented independently from its render
+matrix:
+
+```go
+type Pose struct {
+    Position    Vec3
+    Orientation Quaternion
+}
+
+type Motion struct {
+    Speed     float64 // signed units per second along the local forward axis
+    YawRate   float64 // rotation about local +Y
+    PitchRate float64 // rotation about local +X
+    RollRate  float64 // rotation about local +Z
+}
+```
+
+Orientation is stored as a normalized quaternion to avoid Euler-angle gimbal
+lock. Manual controls and controller intents remain intuitive yaw, pitch, and
+roll values. Each fixed simulation tick applies angular rates to orientation,
+derives the forward direction by rotating local `+Z`, and advances position by:
+
+```text
+position += forward * speed * tickDuration
+```
+
+The render transform is then derived from `Pose` as translation multiplied by
+orientation. Geometry, rendering, and networking do not independently maintain
+position or rotation. Server snapshots transmit pose and motion state, while
+clients interpolate poses for display.
+
+Positive speed moves an object front-first along local `+Z`; negative speed
+moves it backward along local `-Z`; zero speed is stationary. Yaw and pitch
+redirect the object's local axes and therefore either direction of travel. Roll
+changes the object's up/right frame without directly changing its current
+position. Static objects use zero speed and zero angular rates. Later flight
+models may add acceleration, inertia, or strafing without changing the pose or
+controller boundaries.
 
 ## Viewpoints and Camera Anchors
 
@@ -181,26 +289,28 @@ controllers remain the baseline for tests and offline play.
 4. Static wireframe cube — validate pipeline end to end
 5. First fighter model — hardcoded original verts/edges, render wireframe
 6. Scene objects — transforms, multipart styling, multiple object instances
-7. Rotate fighter on Y axis, per-frame update
+7. Kinematics — pose, quaternion orientation, signed axial speed, yaw/pitch/roll
 8. Input — mouse/keys rotate and zoom model
 9. Multi-axis rotation, camera transform, multiple objects on screen
 10. Object catalog — additional ships, laser bolt, cannon emplacement
-11. Starfield background, ship movement (WASD)
-12. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
-13. Death Star — reusable surface modules, trench, towers, targeting reticle
-14. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
-15. Simulation extraction — stable IDs and renderer-independent world updates
-16. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
-17. Controller interface — intents, registry, static and manual strategies
-18. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
-19. Multiplayer client — control input, interpolation, ownership, view switching
-20. External agent adapter — asynchronous AI/MCP decisions and safe fallback
-21. Score, game states, sound
-22. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
-23. Stretch: controller evaluation, tournaments, and strategy hot-loading
-24. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)
+11. Visibility modes — model faces, backface culling, hidden-line depth resolver
+12. Starfield background, ship movement (WASD)
+13. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
+14. Death Star — reusable surface modules, trench, towers, targeting reticle
+15. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
+16. Simulation extraction — stable IDs and renderer-independent world updates
+17. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
+18. Controller interface — intents, registry, static and manual strategies
+19. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
+20. Multiplayer client — control input, interpolation, ownership, view switching
+21. External agent adapter — asynchronous AI/MCP decisions and safe fallback
+22. Score, game states, sound
+23. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
+24. Stretch: controller evaluation, tournaments, and strategy hot-loading
+25. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)
 
 ## Notes
 - Step 5 is first visually demonstrable milestone (target early win).
 - Keep each step in its own commit/branch for incremental review.
-- Culling/HSR stays off until step 8+ to match original arcade look; toggle exists from step 3 onward.
+- Visibility defaults to `VisibilityAll`; backface and hidden-line modes arrive in
+  step 11 and remain runtime-switchable features.

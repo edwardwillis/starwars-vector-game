@@ -10,8 +10,9 @@ pipeline.
 
 ## Current milestone
 
-Step 6: an original, hand-authored twin-panel fighter plus a scene-object layer
-and catalog for independently transformed, multipart wireframe objects.
+Step 7: pose-based kinematics with quaternion orientation, signed axial speed,
+and local yaw/pitch/roll rates. The twin-panel fighter moves along a gentle
+curved path while yawing and rolling.
 
 ## Prerequisites
 
@@ -34,14 +35,19 @@ go test ./...
 go run .
 ```
 
-You should see a 960×540 dark window with a red, low-poly twin-panel fighter.
+You should see a 960×540 dark window with a red, low-poly twin-panel fighter
+moving along a gentle curved path while yawing and rolling.
 
 ## Roadmap
 
 The scene architecture supports additional ships, projectiles, laser cannons,
 and compound Death Star geometry through the same rendering pipeline. The next
-milestone animates object transforms. Culling remains off by default to preserve
-the arcade-like visual style.
+milestone adds manual input for movement and rotation. Surface visibility
+processing remains off by default to preserve the arcade-like visual style.
+
+Future visibility modes will switch at runtime between drawing every edge,
+backface culling, and full depth-based hidden-line removal. The all-edges mode
+remains the default arcade presentation.
 
 Later milestones add named camera anchors for cockpit, chase, spectator, and
 Death Star viewpoints, followed by an authoritative Go server for a shared live
@@ -50,6 +56,11 @@ simulation containing autonomous and user-controlled objects.
 A pluggable controller architecture will support static objects, human input,
 deterministic rule-driven behavior, and asynchronous external AI agents such as
 MCP-backed controllers without granting them authority over simulation state.
+
+Directional objects use `+Z` as their front and support signed axial speed:
+positive moves forward and negative moves backward. Pose and yaw/pitch/roll
+rates use quaternion orientation to avoid gimbal lock while preserving intuitive
+flight controls.
 
 ## License
 

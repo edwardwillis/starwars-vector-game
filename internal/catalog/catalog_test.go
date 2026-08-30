@@ -3,11 +3,12 @@ package catalog
 import (
 	"testing"
 
+	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 )
 
 func TestCubeReturnsValidObject(t *testing.T) {
-	cube := Cube(2, math3d.Translation(1, 2, 3))
+	cube := Cube(2, kinematics.Pose{Position: math3d.Vec3{X: 1, Y: 2, Z: 3}})
 	if err := cube.Validate(); err != nil {
 		t.Fatalf("Cube returned an invalid object: %v", err)
 	}
@@ -17,7 +18,7 @@ func TestCubeReturnsValidObject(t *testing.T) {
 }
 
 func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
-	fighter := TwinPanelFighter(math3d.Identity())
+	fighter := TwinPanelFighter(kinematics.Pose{})
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TwinPanelFighter returned an invalid object: %v", err)
 	}

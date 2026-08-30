@@ -4,7 +4,7 @@ package catalog
 import (
 	"image/color"
 
-	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
@@ -18,10 +18,10 @@ const standardLineWidth float32 = 2
 
 // Cube returns a styled cube object suitable for pipeline demonstrations and
 // scene-layout tests.
-func Cube(size float64, transform math3d.Mat4) scene.Object {
+func Cube(size float64, pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		Name:      "cube",
-		Transform: transform,
+		Name: "cube",
+		Pose: pose,
 		Parts: []scene.Part{{
 			Mesh:      model.Cube(size),
 			Color:     vectorRed,
@@ -32,10 +32,10 @@ func Cube(size float64, transform math3d.Mat4) scene.Object {
 
 // TwinPanelFighter returns the complete multipart fighter with its contrasting
 // cockpit window.
-func TwinPanelFighter(transform math3d.Mat4) scene.Object {
+func TwinPanelFighter(pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		Name:      "twin-panel fighter",
-		Transform: transform,
+		Name: "twin-panel fighter",
+		Pose: pose,
 		Parts: []scene.Part{
 			{
 				Mesh:      model.TwinPanelFighter(),
