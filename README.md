@@ -10,7 +10,8 @@ pipeline.
 
 ## Current milestone
 
-Step 2 prototype: open an Ebitengine window and draw a single vector-style line.
+Step 6: an original, hand-authored twin-panel fighter plus a scene-object layer
+for independently transformed, multipart wireframe objects.
 
 ## Prerequisites
 
@@ -33,13 +34,14 @@ go test ./...
 go run .
 ```
 
-You should see a 960×540 dark window with a horizontal red vector line.
+You should see a 960×540 dark window with a red, low-poly twin-panel fighter.
 
 ## Roadmap
 
-The next milestone introduces the custom `Vec3`/`Mat4` math package and renders
-a static wireframe cube through the stage-based pipeline. Culling remains off by
-default to preserve the arcade-like visual style.
+The scene architecture supports additional ships, projectiles, laser cannons,
+and compound Death Star geometry through the same rendering pipeline. The next
+milestone animates object transforms. Culling remains off by default to preserve
+the arcade-like visual style.
 
 ## License
 
