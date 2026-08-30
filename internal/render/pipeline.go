@@ -14,6 +14,12 @@ type Line struct {
 	Y2 float64
 }
 
+type Point struct {
+	X     float64
+	Y     float64
+	Depth float64
+}
+
 // Culler can remove edges after world and camera transformations. A nil Culler
 // keeps every edge, matching the original arcade-like wireframe appearance.
 type Culler interface {
@@ -82,6 +88,28 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 		}
 	}
 	return lines
+}
+
+// ProjectPoint transforms a world-space point through the active camera and
+// perspective matrices. It reports false for points behind the near plane or
+// outside the screen.
+func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
+	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 {
+		return Point{}, false
+	}
+	cameraPoint := p.View.TransformPoint(world)
+	if cameraPoint.Z > -p.Near {
+		return Point{}, false
+	}
+	projected := p.Projection.TransformPoint(cameraPoint)
+	if projected.X < -1 || projected.X > 1 || projected.Y < -1 || projected.Y > 1 {
+		return Point{}, false
+	}
+	return Point{
+		X:     (projected.X + 1) * 0.5 * float64(p.Width),
+		Y:     (1 - projected.Y) * 0.5 * float64(p.Height),
+		Depth: -cameraPoint.Z,
+	}, true
 }
 
 func clipNear(a, b math3d.Vec3, near float64) (math3d.Vec3, math3d.Vec3, bool) {

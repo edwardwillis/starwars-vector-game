@@ -57,3 +57,20 @@ func TestClipScreen(t *testing.T) {
 		t.Fatal("clipScreen accepted a line wholly outside the screen")
 	}
 }
+
+func TestProjectPoint(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	point, visible := pipeline.ProjectPoint(math3d.Vec3{Z: -2})
+	if !visible {
+		t.Fatal("ProjectPoint rejected a centered visible point")
+	}
+	if point.X != 400 || point.Y != 300 || point.Depth != 2 {
+		t.Fatalf("ProjectPoint returned %+v, want center at depth 2", point)
+	}
+	if _, visible := pipeline.ProjectPoint(math3d.Vec3{Z: 1}); visible {
+		t.Fatal("ProjectPoint accepted a point behind the camera")
+	}
+	if _, visible := pipeline.ProjectPoint(math3d.Vec3{X: 10, Z: -1}); visible {
+		t.Fatal("ProjectPoint accepted a point outside the screen")
+	}
+}

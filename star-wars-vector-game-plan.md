@@ -339,11 +339,11 @@ controllers remain the baseline for tests and offline play.
 5. First fighter model — hardcoded original verts/edges, render wireframe
 6. Scene objects — transforms, multipart styling, multiple object instances
 7. Kinematics — pose, quaternion orientation, signed axial speed, yaw/pitch/roll
-8. Input — manual intent, signed throttle, yaw/pitch/roll, pause/reset, camera zoom
+8. Input — keyboard/mouse intent, dead zone, reticle, throttle, yaw/pitch/roll
 9. Camera system — stable object IDs, fixed/chase/cockpit/orbit views, anchors
-10. Object catalog — additional ships, laser bolt, cannon emplacement
+10. Object catalog — fireable laser bolt with muzzle anchors, spin, and lifetime
 11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
-12. Starfield background, ship movement (WASD)
+12. Starfield — deterministic world points, wrapping, projection, motion reference
 13. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
 14. Death Star — reusable surface modules, trench, towers, targeting reticle
 15. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints

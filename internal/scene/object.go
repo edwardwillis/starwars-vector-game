@@ -14,9 +14,12 @@ import (
 // such as cockpit windows, laser cores, or target highlights to use distinct
 // vector colors without coupling model geometry to Ebitengine.
 type Part struct {
-	Mesh      model.Model
-	Color     color.RGBA
-	LineWidth float32
+	Name             string
+	Mesh             model.Model
+	Color            color.RGBA
+	LineWidth        float32
+	VisibleInCockpit bool
+	CockpitOnly      bool
 }
 
 type ObjectID uint64

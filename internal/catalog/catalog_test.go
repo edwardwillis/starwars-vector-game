@@ -22,15 +22,36 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TwinPanelFighter returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 2 {
-		t.Fatalf("TwinPanelFighter returned %d parts, want 2", len(fighter.Parts))
+	if len(fighter.Parts) != 4 {
+		t.Fatalf("TwinPanelFighter returned %d parts, want 4", len(fighter.Parts))
 	}
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
 	}
-	for _, name := range []string{"center", "cockpit", "chase"} {
+	if fighter.Parts[0].VisibleInCockpit || !fighter.Parts[1].VisibleInCockpit {
+		t.Fatal("fighter cockpit visibility does not hide hull and retain windscreen")
+	}
+	for _, part := range fighter.Parts[2:] {
+		if !part.VisibleInCockpit || !part.CockpitOnly {
+			t.Fatalf("cockpit furnishing %q has incorrect visibility", part.Name)
+		}
+	}
+	for _, name := range []string{"center", "cockpit", "chase", "muzzle-left", "muzzle-right"} {
 		if _, ok := fighter.Anchor(name); !ok {
 			t.Fatalf("fighter is missing %q camera anchor", name)
 		}
+	}
+}
+
+func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
+	bolt := LaserBolt(2, kinematics.Pose{})
+	if err := bolt.Validate(); err != nil {
+		t.Fatalf("LaserBolt returned an invalid object: %v", err)
+	}
+	if len(bolt.Parts) != 2 {
+		t.Fatalf("LaserBolt returned %d parts, want 2", len(bolt.Parts))
+	}
+	if bolt.Parts[0].Color == bolt.Parts[1].Color {
+		t.Fatal("laser rays and branches use the same color")
 	}
 }
