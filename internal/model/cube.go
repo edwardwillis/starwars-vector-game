@@ -21,5 +21,13 @@ func Cube(size float64) Model {
 			{A: 4, B: 5}, {A: 5, B: 6}, {A: 6, B: 7}, {A: 7, B: 4},
 			{A: 0, B: 4}, {A: 1, B: 5}, {A: 2, B: 6}, {A: 3, B: 7},
 		},
+		Faces: []Face{
+			{Vertices: []int{0, 1, 2, 3}},
+			{Vertices: []int{4, 7, 6, 5}},
+			{Vertices: []int{0, 4, 5, 1}},
+			{Vertices: []int{1, 5, 6, 2}},
+			{Vertices: []int{2, 6, 7, 3}},
+			{Vertices: []int{3, 7, 4, 0}},
+		},
 	}
 }

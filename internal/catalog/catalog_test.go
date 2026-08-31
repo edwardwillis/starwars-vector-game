@@ -29,7 +29,9 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
 	}
-	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 || !fighter.Destructible {
+	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
+		!fighter.Physical || !fighter.Hittable || !fighter.Destructible ||
+		fighter.DestructionStage != scene.DestructionIntact {
 		t.Fatalf("fighter has incorrect collision metadata")
 	}
 	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit {
@@ -52,8 +54,28 @@ func TestTwinPanelFighterFragmentIsNonCollidingDebris(t *testing.T) {
 		if err := fragment.Validate(); err != nil {
 			t.Fatalf("fragment %d is invalid: %v", index, err)
 		}
-		if fragment.CollisionRole != scene.CollisionDebris || fragment.Destructible {
+		if fragment.CollisionRole != scene.CollisionDebris || fragment.Physical ||
+			!fragment.Hittable || !fragment.Destructible ||
+			fragment.DestructionStage != scene.DestructionComponent {
 			t.Fatalf("fragment %d has incorrect collision metadata", index)
+		}
+	}
+}
+
+func TestTwinPanelFighterPolygonsAreFinalVisualDebris(t *testing.T) {
+	for component := range 3 {
+		count := TwinPanelFighterPolygonCount(component)
+		if count == 0 {
+			t.Fatalf("component %d has no constituent polygons", component)
+		}
+		polygon := TwinPanelFighterPolygon(1, component, 0, kinematics.Pose{})
+		if err := polygon.Validate(); err != nil {
+			t.Fatalf("component %d polygon is invalid: %v", component, err)
+		}
+		if polygon.CollisionRole != scene.CollisionDebris || polygon.Physical ||
+			polygon.Hittable || polygon.Destructible ||
+			polygon.DestructionStage != scene.DestructionPolygon {
+			t.Fatalf("component %d polygon has incorrect collision metadata", component)
 		}
 	}
 }

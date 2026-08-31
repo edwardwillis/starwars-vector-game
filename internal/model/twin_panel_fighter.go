@@ -59,6 +59,12 @@ func appendCockpit(mesh *Model) {
 			mesh.Edges = append(mesh.Edges, Edge{A: base + segment, B: base + next})
 			if ring < len(rings)-1 {
 				mesh.Edges = append(mesh.Edges, Edge{A: base + segment, B: base + segments + segment})
+				mesh.Faces = append(mesh.Faces, Face{Vertices: []int{
+					base + segment,
+					base + next,
+					base + segments + next,
+					base + segments + segment,
+				}})
 			}
 		}
 	}
@@ -71,6 +77,11 @@ func appendCockpit(mesh *Model) {
 		mesh.Edges = append(mesh.Edges,
 			Edge{A: leftCap, B: segment},
 			Edge{A: rightCap, B: (len(rings)-1)*segments + segment},
+		)
+		next := (segment + 1) % segments
+		mesh.Faces = append(mesh.Faces,
+			Face{Vertices: []int{leftCap, next, segment}},
+			Face{Vertices: []int{rightCap, (len(rings)-1)*segments + segment, (len(rings)-1)*segments + next}},
 		)
 	}
 
@@ -98,10 +109,12 @@ func TwinPanelFighterWindow() Model {
 	center := len(window.Verts)
 	window.Verts = append(window.Verts, math3d.Vec3{Z: cockpitRadius + 0.015})
 	for segment := range segments {
+		next := (segment + 1) % segments
 		window.Edges = append(window.Edges,
-			Edge{A: segment, B: (segment + 1) % segments},
+			Edge{A: segment, B: next},
 			Edge{A: segment, B: center},
 		)
+		window.Faces = append(window.Faces, Face{Vertices: []int{segment, next, center}})
 	}
 	return window
 }
@@ -124,6 +137,20 @@ func TwinPanelFighterFragments() [3]Model {
 			index = 2
 		}
 		fragments[index].Edges = append(fragments[index].Edges, edge)
+	}
+	for _, face := range hull.Faces {
+		centroidX := 0.0
+		for _, vertex := range face.Vertices {
+			centroidX += hull.Verts[vertex].X
+		}
+		centroidX /= float64(len(face.Vertices))
+		index := 1
+		if centroidX < -0.48 {
+			index = 0
+		} else if centroidX > 0.48 {
+			index = 2
+		}
+		fragments[index].Faces = append(fragments[index].Faces, face)
 	}
 	return fragments
 }
@@ -149,6 +176,15 @@ func appendBox(mesh *Model, centerX, centerY, centerZ, width, height, depth floa
 	for _, edge := range boxEdges {
 		mesh.Edges = append(mesh.Edges, Edge{A: base + edge.A, B: base + edge.B})
 	}
+	boxFaces := [...][4]int{
+		{0, 1, 2, 3}, {4, 7, 6, 5}, {0, 4, 5, 1},
+		{1, 5, 6, 2}, {2, 6, 7, 3}, {3, 7, 4, 0},
+	}
+	for _, face := range boxFaces {
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{
+			base + face[0], base + face[1], base + face[2], base + face[3],
+		}})
+	}
 	return base
 }
 
@@ -169,10 +205,12 @@ func appendPanel(mesh *Model, x float64, pylonFace []int) {
 	const corners = 6
 	hub := base + corners
 	for corner := range corners {
+		next := (corner + 1) % corners
 		mesh.Edges = append(mesh.Edges,
-			Edge{A: base + corner, B: base + (corner+1)%corners},
+			Edge{A: base + corner, B: base + next},
 			Edge{A: base + corner, B: hub},
 		)
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{hub, base + corner, base + next}})
 	}
 	for _, vertex := range pylonFace {
 		mesh.Edges = append(mesh.Edges, Edge{A: vertex, B: hub})

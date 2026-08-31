@@ -8,10 +8,28 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
+// Context is the read-only world information available to a controller tick.
+// Nearby contains physical objects other than Self.
+type Context struct {
+	Self        scene.Object
+	Target      scene.Object
+	Nearby      []scene.Object
+	Seconds     float64
+	MotionScale float64
+}
+
 // Strategy supplies motion for one autonomous object simulation tick. The
 // game owns poses and integration; strategies only decide how an object moves.
 type Strategy interface {
-	Step(self, target scene.Object, seconds float64) kinematics.Motion
+	Step(context Context) kinematics.Motion
+}
+
+// Attacker is an optional capability implemented by strategies that can ask
+// the simulation to fire after their movement decision. The simulation remains
+// authoritative over projectile creation and damage.
+type Attacker interface {
+	Strategy
+	AttackIntent() bool
 }
 
 type PursuitConfig struct {
@@ -34,6 +52,22 @@ type PursuitConfig struct {
 	SpeedVariation      float64
 	SpeedChangeInterval float64
 	SpeedBlendRate      float64
+	AvoidanceHorizon    float64
+	AvoidanceMargin     float64
+	AvoidanceMinTime    float64
+	AvoidanceMaxTime    float64
+	AvoidanceCooldown   float64
+	AvoidanceSlowdown   float64
+	AttackMinGap        float64
+	AttackMaxGap        float64
+	AttackMinTime       float64
+	AttackMaxTime       float64
+	AttackMinRadius     float64
+	AttackMaxRadius     float64
+	AttackFireMinGap    float64
+	AttackFireMaxGap    float64
+	AttackRange         float64
+	AttackAimDot        float64
 }
 
 func DefaultPursuitConfig() PursuitConfig {
@@ -57,6 +91,22 @@ func DefaultPursuitConfig() PursuitConfig {
 		SpeedVariation:      0.25,
 		SpeedChangeInterval: 5,
 		SpeedBlendRate:      0.65,
+		AvoidanceHorizon:    1.25,
+		AvoidanceMargin:     1.0,
+		AvoidanceMinTime:    0.55,
+		AvoidanceMaxTime:    0.9,
+		AvoidanceCooldown:   0.4,
+		AvoidanceSlowdown:   0.8,
+		AttackMinGap:        3,
+		AttackMaxGap:        8,
+		AttackMinTime:       2.5,
+		AttackMaxTime:       5,
+		AttackMinRadius:     4,
+		AttackMaxRadius:     10,
+		AttackFireMinGap:    0.55,
+		AttackFireMaxGap:    1.1,
+		AttackRange:         30,
+		AttackAimDot:        0.82,
 	}
 }
 
@@ -78,6 +128,20 @@ type Pursuit struct {
 	speedChangeTime    float64
 	speedOffset        float64
 	targetSpeedOffset  float64
+	avoidanceTime      float64
+	avoidanceCooldown  float64
+	avoidanceYaw       float64
+	avoidancePitch     float64
+	avoidanceRoll      float64
+	avoidanceObject    scene.ObjectID
+	attacking          bool
+	attackGap          float64
+	attackTime         float64
+	attackRadius       float64
+	attackAngle        float64
+	attackDirection    float64
+	attackFireGap      float64
+	attackFire         bool
 }
 
 func NewPursuit(seed uint64, config PursuitConfig) *Pursuit {
@@ -89,19 +153,36 @@ func NewPursuit(seed uint64, config PursuitConfig) *Pursuit {
 	pursuit.excursionGap = pursuit.randomRange(config.ExcursionMinGap, config.ExcursionMaxGap)
 	pursuit.targetSpeedOffset = pursuit.randomSigned() * config.SpeedVariation
 	pursuit.speedChangeTime = pursuit.randomUnit() * config.SpeedChangeInterval
+	pursuit.attackGap = pursuit.randomRange(config.AttackMinGap, config.AttackMaxGap)
 	return pursuit
 }
 
-func (p *Pursuit) Step(self, target scene.Object, seconds float64) kinematics.Motion {
+// AttackIntent reports whether the most recent Step selected a firing moment.
+func (p *Pursuit) AttackIntent() bool {
+	return p.attackFire
+}
+
+func (p *Pursuit) Step(context Context) kinematics.Motion {
+	self, target, seconds := context.Self, context.Target, context.Seconds
 	if seconds <= 0 {
 		return self.Motion
 	}
 	p.updateWander(seconds)
+	p.updateAttack(self, target, seconds)
 	p.updateExcursion(self, target, seconds)
 	p.updateSpeedVariation(seconds)
+	p.updateAvoidance(context)
 
 	toTarget := target.Pose.Position.Add(p.targetOffset).Sub(self.Pose.Position)
-	if p.excursion {
+	if p.attacking {
+		p.attackAngle += p.attackDirection * p.config.MaxSpeed / max(0.1, p.attackRadius) * seconds * max(1, context.MotionScale)
+		arcOffset := math3d.Vec3{
+			X: math.Cos(p.attackAngle) * p.attackRadius,
+			Y: math.Sin(p.attackAngle*0.7) * p.attackRadius * 0.22,
+			Z: math.Sin(p.attackAngle) * p.attackRadius,
+		}
+		toTarget = target.Pose.Position.Add(arcOffset).Sub(self.Pose.Position)
+	} else if p.excursion {
 		toTarget = p.excursionDirection
 	}
 	distance := toTarget.Length()
@@ -114,13 +195,137 @@ func (p *Pursuit) Step(self, target scene.Object, seconds float64) kinematics.Mo
 	if p.excursion {
 		desiredSpeed = p.config.MaxSpeed*0.85 + p.speedOffset
 	}
+	if p.avoidanceTime > 0 {
+		desiredSpeed *= p.config.AvoidanceSlowdown
+	}
 	desiredSpeed = clamp(desiredSpeed, p.config.MinSpeed, p.config.MaxSpeed)
 	motion := self.Motion
 	motion.Speed = moveToward(motion.Speed, desiredSpeed, p.config.Acceleration*seconds)
 	motion.YawRate = clamp(yawError*p.config.TurnGain+p.wanderYaw, -p.config.MaxYawRate, p.config.MaxYawRate)
 	motion.PitchRate = clamp(pitchError*p.config.TurnGain+p.wanderPitch, -p.config.MaxPitchRate, p.config.MaxPitchRate)
 	motion.RollRate = clamp(-motion.YawRate*0.7, -p.config.MaxRollRate, p.config.MaxRollRate)
+	if p.avoidanceTime > 0 {
+		fade := min(1, p.avoidanceTime/0.2)
+		motion.YawRate = blend(motion.YawRate, p.avoidanceYaw, 0.95*fade)
+		motion.PitchRate = blend(motion.PitchRate, p.avoidancePitch, 0.85*fade)
+		motion.RollRate = blend(motion.RollRate, p.avoidanceRoll, 0.95*fade)
+	}
 	return motion
+}
+
+func (p *Pursuit) updateAttack(self, target scene.Object, seconds float64) {
+	p.attackFire = false
+	if p.attacking {
+		p.attackTime -= seconds
+		p.attackFireGap -= seconds
+		if p.attackTime <= 0 {
+			p.attacking = false
+			p.attackGap = p.randomRange(p.config.AttackMinGap, p.config.AttackMaxGap)
+			p.targetOffset = p.randomOffset()
+			return
+		}
+		toTarget := target.Pose.Position.Sub(self.Pose.Position)
+		distance := toTarget.Length()
+		if p.attackFireGap <= 0 && distance <= p.config.AttackRange {
+			alignment := self.Pose.Forward().Dot(toTarget.Normalize())
+			if alignment >= p.config.AttackAimDot {
+				p.attackFire = true
+				p.attackFireGap = p.randomRange(p.config.AttackFireMinGap, p.config.AttackFireMaxGap)
+			}
+		}
+		return
+	}
+	p.attackGap -= seconds
+	if p.attackGap > 0 {
+		return
+	}
+	p.attacking = true
+	p.excursion = false
+	p.attackTime = p.randomRange(p.config.AttackMinTime, p.config.AttackMaxTime)
+	p.attackRadius = p.randomRange(p.config.AttackMinRadius, p.config.AttackMaxRadius)
+	p.attackAngle = p.randomRange(0, 2*math.Pi)
+	p.attackDirection = signOrRandom(p.randomSigned(), 1)
+	p.attackFireGap = p.randomRange(0, p.config.AttackFireMaxGap)
+}
+
+func (p *Pursuit) updateAvoidance(context Context) {
+	if p.avoidanceTime > 0 {
+		p.avoidanceTime -= context.Seconds
+		if p.avoidanceTime <= 0 {
+			p.avoidanceTime = 0
+			p.avoidanceCooldown = p.config.AvoidanceCooldown
+			p.avoidanceObject = 0
+		}
+		return
+	}
+	p.avoidanceCooldown = max(0, p.avoidanceCooldown-context.Seconds)
+	if p.avoidanceCooldown > 0 {
+		return
+	}
+
+	motionScale := context.MotionScale
+	if motionScale <= 0 {
+		motionScale = 1
+	}
+	selfVelocity := objectVelocity(context.Self).Scale(motionScale)
+	nearestTime := math.Inf(1)
+	var threat scene.Object
+	for _, nearby := range context.Nearby {
+		if nearby.ID == context.Self.ID || nearby.CollisionRole != scene.CollisionSolid {
+			continue
+		}
+		relativePosition := nearby.Pose.Position.Sub(context.Self.Pose.Position)
+		safeDistance := context.Self.CollisionRadius + nearby.CollisionRadius + p.config.AvoidanceMargin
+		if relativePosition.Length() < safeDistance {
+			nearestTime = 0
+			threat = nearby
+			break
+		}
+		relativeVelocity := objectVelocity(nearby).Scale(motionScale).Sub(selfVelocity)
+		speedSquared := relativeVelocity.Dot(relativeVelocity)
+		if speedSquared == 0 {
+			continue
+		}
+		closestTime := -relativePosition.Dot(relativeVelocity) / speedSquared
+		if closestTime <= 0 || closestTime > p.config.AvoidanceHorizon {
+			continue
+		}
+		closestOffset := relativePosition.Add(relativeVelocity.Scale(closestTime))
+		if closestOffset.Length() < safeDistance && closestTime < nearestTime {
+			nearestTime = closestTime
+			threat = nearby
+		}
+	}
+	if threat.ID == 0 {
+		return
+	}
+	p.beginAvoidance(context.Self, threat)
+}
+
+func (p *Pursuit) beginAvoidance(self, threat scene.Object) {
+	localThreat := self.Pose.Orientation.Normalize().Conjugate().Rotate(
+		threat.Pose.Position.Sub(self.Pose.Position).Normalize(),
+	)
+	yawSign := -signOrRandom(localThreat.X, p.randomSigned())
+	if math.Abs(localThreat.X) < 0.12 {
+		lower, upper := self.ID, threat.ID
+		if lower > upper {
+			lower, upper = upper, lower
+		}
+		yawSign = 1
+		if (uint64(lower)*31+uint64(upper))%2 == 0 {
+			yawSign = -1
+		}
+	}
+	pitchSign := signOrRandom(localThreat.Y, p.randomSigned())
+	p.avoidanceYaw = yawSign * p.config.MaxYawRate * p.randomRange(0.78, 0.98)
+	p.avoidancePitch = 0
+	if math.Abs(localThreat.Y) > 0.12 || p.randomUnit() > 0.45 {
+		p.avoidancePitch = pitchSign * p.config.MaxPitchRate * p.randomRange(0.5, 0.75)
+	}
+	p.avoidanceRoll = -yawSign * p.config.MaxRollRate * p.randomRange(0.7, 0.95)
+	p.avoidanceTime = p.randomRange(p.config.AvoidanceMinTime, p.config.AvoidanceMaxTime)
+	p.avoidanceObject = threat.ID
 }
 
 func (p *Pursuit) updateSpeedVariation(seconds float64) {
@@ -137,6 +342,9 @@ func (p *Pursuit) updateSpeedVariation(seconds float64) {
 }
 
 func (p *Pursuit) updateExcursion(self, target scene.Object, seconds float64) {
+	if p.attacking {
+		return
+	}
 	if p.excursion {
 		p.excursionTime -= seconds
 		if p.excursionTime <= 0 {
@@ -217,4 +425,19 @@ func moveToward(value, target, maximumDelta float64) float64 {
 		return min(value+maximumDelta, target)
 	}
 	return max(value-maximumDelta, target)
+}
+
+func objectVelocity(object scene.Object) math3d.Vec3 {
+	return object.Pose.Forward().Scale(object.Motion.Speed).Add(object.Motion.Velocity)
+}
+
+func signOrRandom(value, random float64) float64 {
+	if math.Abs(value) >= 0.1 {
+		return math.Copysign(1, value)
+	}
+	return math.Copysign(1, random)
+}
+
+func blend(from, to, amount float64) float64 {
+	return from + (to-from)*clamp(amount, 0, 1)
 }

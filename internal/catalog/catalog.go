@@ -17,11 +17,12 @@ var (
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
-	twinPanelHull   = model.TwinPanelFighter()
-	twinPanelWindow = model.TwinPanelFighterWindow()
-	twinPanelDebris = model.TwinPanelFighterFragments()
-	laserBoltRays   = model.LaserBoltRays()
-	laserBoltTips   = model.LaserBoltBranches()
+	twinPanelHull          = model.TwinPanelFighter()
+	twinPanelWindow        = model.TwinPanelFighterWindow()
+	twinPanelDebris        = model.TwinPanelFighterFragments()
+	laserBoltRays          = model.LaserBoltRays()
+	laserBoltTips          = model.LaserBoltBranches()
+	twinPanelPolygonShards = buildTwinPanelPolygonShards()
 )
 
 const standardLineWidth float32 = 2
@@ -65,12 +66,65 @@ func TwinPanelFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose
 		})
 	}
 	return scene.Object{
-		ID:              id,
-		Name:            "twin-panel fighter debris",
-		Pose:            pose,
-		Parts:           parts,
-		CollisionRole:   scene.CollisionDebris,
-		CollisionRadius: 0.8,
+		ID:               id,
+		Name:             "twin-panel fighter debris",
+		Pose:             pose,
+		Parts:            parts,
+		CollisionRole:    scene.CollisionDebris,
+		CollisionRadius:  1.25,
+		Hittable:         true,
+		Destructible:     true,
+		DestructionStage: scene.DestructionComponent,
+	}
+}
+
+type polygonShardTemplate struct {
+	mesh  model.Model
+	color color.RGBA
+}
+
+func buildTwinPanelPolygonShards() [3][]polygonShardTemplate {
+	var shards [3][]polygonShardTemplate
+	for component := range twinPanelDebris {
+		for _, polygon := range twinPanelDebris[component].PolygonModels() {
+			shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: vectorGreen})
+		}
+		if component == 1 {
+			for _, polygon := range twinPanelWindow.PolygonModels() {
+				shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: windowAmber})
+			}
+		}
+	}
+	return shards
+}
+
+func TwinPanelFighterPolygonCount(component int) int {
+	if component < 0 || component >= len(twinPanelPolygonShards) {
+		return 0
+	}
+	return len(twinPanelPolygonShards[component])
+}
+
+// TwinPanelFighterPolygon returns one final, non-targetable polygon shard.
+func TwinPanelFighterPolygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
+	if component < 0 || component >= len(twinPanelPolygonShards) ||
+		polygon < 0 || polygon >= len(twinPanelPolygonShards[component]) {
+		panic("catalog: twin-panel fighter polygon index out of range")
+	}
+	template := twinPanelPolygonShards[component][polygon]
+	return scene.Object{
+		ID:   id,
+		Name: "twin-panel fighter polygon shard",
+		Pose: pose,
+		Parts: []scene.Part{{
+			Name:      "polygon",
+			Mesh:      template.mesh,
+			Color:     template.color,
+			LineWidth: standardLineWidth,
+		}},
+		CollisionRole:    scene.CollisionDebris,
+		CollisionRadius:  0.15,
+		DestructionStage: scene.DestructionPolygon,
 	}
 }
 
@@ -124,9 +178,12 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 				Orientation: math3d.IdentityQuaternion(),
 			},
 		},
-		CollisionRole:   scene.CollisionSolid,
-		CollisionRadius: 1.8,
-		Destructible:    true,
+		CollisionRole:    scene.CollisionSolid,
+		CollisionRadius:  1.8,
+		Physical:         true,
+		Hittable:         true,
+		Destructible:     true,
+		DestructionStage: scene.DestructionIntact,
 	}
 }
 

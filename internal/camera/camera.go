@@ -61,6 +61,14 @@ func (c *Camera) Zoom() float64 {
 	return c.zoom[c.Mode]
 }
 
+// PullBack increases the orbit camera's distance without affecting the
+// player's normal zoom controls. It is used for short destruction cinematics.
+func (c *Camera) PullBack(amount float64) {
+	if c.Mode == Orbit && amount > 0 {
+		c.zoom[Orbit] -= amount
+	}
+}
+
 // View resolves the active viewpoint. If its target or required anchor is no
 // longer present, it safely switches to the fixed view.
 func (c *Camera) View(objects []scene.Object) math3d.Mat4 {

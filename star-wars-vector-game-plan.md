@@ -192,12 +192,26 @@ fallback may partition an object's existing parts or edges when bespoke
 fragments are not available.
 
 When a destructive hit is resolved, the simulation atomically removes the
-intact object and spawns two or three transient fragment objects at its pose.
-Each fragment inherits the object's motion, receives a different outward linear
-velocity and angular velocity, and spins away independently for exactly two
-seconds before being removed from the universe. Fragments are visual debris:
-they have no controller, cannot fire, do not receive damage, and do not produce
-further fragments. The laser bolt that caused the hit is consumed.
+intact object and spawns two or three transient component objects at its pose.
+Each component inherits the object's motion, receives a different outward
+linear velocity and angular velocity, and spins away independently for up to
+two seconds. Components have no controller, cannot fire, and do not participate
+in physical collisions, but remain laser targets.
+
+A laser hit on a component consumes the bolt and replaces that component with
+its constituent polygon faces. Each polygon becomes an independently moving and
+spinning final-stage shard with a fresh two-second lifetime, irrespective of how
+long the parent component had left. Polygon shards are non-physical,
+non-targetable visual debris and cannot disintegrate recursively. Catalog models
+therefore retain explicit face topology in addition to vertices and edges.
+Every disintegration piece preserves the parent's signed travel vector as its
+dominant velocity component, with a deterministic random blast perturbation added
+per piece so explosions spread naturally without breaking replay determinism.
+
+Opposing laser projectiles may also intercept one another in flight using swept
+segment collision tests. Intercepted bolts are both removed without affecting
+their owners or spawning destruction debris; projectiles from the same owner do
+not collide.
 
 Physical collisions are resolved symmetrically: when two participating objects
 collide, both objects disintegrate and each produces its own two or three
@@ -205,15 +219,40 @@ fragments. This includes collisions such as fighter against fighter. The
 collision system resolves each object at most once per simulation tick so a
 single pile-up cannot spawn duplicate fragment sets. Background-only items such
 as starfield points and non-physical navigation markers do not participate in
-collision detection. Transient disintegration fragments also do not collide.
+collision detection. Transient components and polygon shards also do not
+participate in physical collisions. Autonomous respawns are wave-based: pending
+swarm replacements wait until no autonomous controllers remain, then respawn
+together after their normal delay.
+
+Respawn placement favors a safe point well away from the nearest surviving swarm
+member, with the replacement oriented toward that member so it re-enters the
+engagement rather than appearing inside an existing dogfight.
 
 Fragment count, directions, speeds, and spin must be deterministic from stable
 simulation data such as the destroyed object ID and impact tick. This keeps
 local tests, replay, and the later authoritative server consistent. Networked
 clients receive the destruction and fragment spawn/removal events rather than
 generating authoritative debris locally. If a camera targets a destroyed
-object, it follows an explicitly selected fragment when supported or safely
-falls back to an appropriate spectator view.
+object, it follows an explicitly selected fragment when supported. Player
+destruction uses a three-second external pullback view of the disintegration,
+then follows a deterministic random surviving swarm fighter until respawn.
+
+## Player Shields
+
+The player fighter will have a shield strength that starts at 8, shown as eight
+mirrored segments on each side. A laser-bolt
+hit decrements the shield by 1, while a physical collision decrements it by 3.
+The shield recharges by 1 point after 20 seconds without receiving damage,
+without exceeding its maximum of 8. The player is destroyed when shield strength
+falls below zero; reaching exactly zero leaves the fighter barely operational.
+Damage resets the recharge timer, and a pending recharge is cancelled by any
+subsequent hit.
+
+In cockpit view, the current shield strength is displayed at the top center as a
+compact arcade-style `SHIELD` indicator with eight mirrored triangular segments per side, following the visual
+language of the original vector game. The shield state is simulation-owned and
+must be included in future snapshots, replay events, and difficulty-profile
+configuration even though the initial values are fixed.
 
 ## Object Coordinates and Kinematics
 
@@ -331,6 +370,42 @@ Initial controller strategies include:
 - `Agent`: delegates higher-level decisions to an external AI service, possibly
   through MCP, while retaining server-side authority and safety limits.
 
+The current rule-driven fighter strategy includes independently seeded attack
+runs against a designated target. Each run randomly selects its delay, duration,
+arc radius, orbit direction, and firing cadence. Independent schedules may
+overlap, allowing two or more swarm members to attack together without requiring
+a centrally scripted formation. Controllers request fire through an optional
+capability; the simulation remains responsible for spawning owned projectiles,
+resolving hits, and applying destruction. Autonomous shots include deterministic
+per-volley lateral and vertical aim error, preserving replayability while giving
+the designated target an opportunity to evade.
+
+If the designated player target is temporarily absent after destruction, swarm
+controllers continue to run their avoidance and motion updates against a neutral
+target; autonomous firing remains disabled until the player respawns.
+
+## Curated Difficulty Profiles
+
+Difficulty will be selectable rather than exposing dozens of independent tuning
+sliders. A profile is a named, versioned bundle applied when a session starts
+and recorded with the run for replay and multiplayer agreement. Profiles curate
+the parameters that most affect pressure:
+
+- swarm size and respawn policy;
+- fighter minimum/maximum speed and acceleration;
+- attack delay, attack duration, arc-radius range, and volley cadence;
+- autonomous aim-error radius and target lead time;
+- collision-avoidance strength and reaction horizon; and
+- player respawn clearance and invulnerability grace period.
+
+The initial presets should be `Cadet` (few, slower fighters with wide aim error),
+`Pilot` (the balanced default), `Ace` (faster attacks and tighter aim), and an
+optional `Nightmare` profile (full swarm pressure with minimal recovery time).
+Each profile must remain deterministic for a fixed seed, and all values should
+be validated at load time. A later settings screen can select a profile before
+starting a game; the authoritative server will reject mismatched profiles in a
+multiplayer session.
+
 The core boundary is intentionally small:
 
 ```go
@@ -378,7 +453,7 @@ controllers remain the baseline for tests and offline play.
 11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
 12. Starfield — deterministic world points, wrapping, projection, motion reference
 13. Cockpit targeting — pointer aim, right-button steering, firing cone, converging bolts
-14. Dogfight — multiple catalog fighter instances, deterministic pursuit/wander/excursion and variable-speed heuristics, symmetric collisions, two-second disintegration debris, player and swarm respawn lifecycle
+14. Dogfight — multiple catalog fighter instances, deterministic pursuit/wander/excursion, variable-radius overlapping attack runs, autonomous targeting and fire, variable-speed and predictive-avoidance heuristics, symmetric collisions, two-stage component-to-polygon disintegration, player and swarm respawn lifecycle
 15. Death Star — reusable surface modules, trench, towers, targeting reticle
 16. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
 17. Simulation extraction — stable IDs and renderer-independent world updates
@@ -387,7 +462,7 @@ controllers remain the baseline for tests and offline play.
 20. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
 21. Multiplayer client — control input, interpolation, ownership, view switching
 22. External agent adapter — asynchronous AI/MCP decisions and safe fallback
-23. Score, game states, sound
+23. Shields, score, game states, curated difficulty profiles, sound
 24. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
 25. Stretch: controller evaluation, tournaments, and strategy hot-loading
 26. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)

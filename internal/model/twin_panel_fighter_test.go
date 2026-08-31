@@ -47,6 +47,7 @@ func TestTwinPanelFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
 	hull := TwinPanelFighter()
 	fragments := TwinPanelFighterFragments()
 	edgeCount := 0
+	faceCount := 0
 	for index, fragment := range fragments {
 		if err := fragment.Validate(); err != nil {
 			t.Fatalf("fragment %d is invalid: %v", index, err)
@@ -55,9 +56,13 @@ func TestTwinPanelFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
 			t.Fatalf("fragment %d contains no edges", index)
 		}
 		edgeCount += len(fragment.Edges)
+		faceCount += len(fragment.Faces)
 	}
 	if edgeCount != len(hull.Edges) {
 		t.Fatalf("fragments contain %d edges, want hull's %d", edgeCount, len(hull.Edges))
+	}
+	if faceCount != len(hull.Faces) {
+		t.Fatalf("fragments contain %d faces, want hull's %d", faceCount, len(hull.Faces))
 	}
 }
 

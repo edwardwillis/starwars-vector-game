@@ -20,6 +20,115 @@ func TestLayoutUsesLogicalResolution(t *testing.T) {
 	}
 }
 
+func TestGameStartsInCockpitAtMaximumForwardSpeed(t *testing.T) {
+	g := New()
+	fighter := g.objectByID(fighterID)
+	if g.viewCamera.Mode != camera.Cockpit {
+		t.Fatalf("initial view is %v, want cockpit", g.viewCamera.Mode)
+	}
+	if fighter == nil {
+		t.Fatal("initial player fighter is missing")
+	}
+	if fighter.Motion.Speed != g.manualConfig.MaxForward {
+		t.Fatalf("initial fighter speed is %v, want maximum %v", fighter.Motion.Speed, g.manualConfig.MaxForward)
+	}
+	if err := g.Update(); err != nil {
+		t.Fatalf("initial update failed: %v", err)
+	}
+	fighter = g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("player was destroyed during the first update tick")
+	}
+	if fighter.Motion.Speed != g.manualConfig.MaxForward {
+		t.Fatalf("fighter speed after first update is %v, want maximum %v", fighter.Motion.Speed, g.manualConfig.MaxForward)
+	}
+}
+
+func TestShieldDamageAndRechargeRules(t *testing.T) {
+	g := New()
+	if g.shieldStrength != maxShieldStrength {
+		t.Fatalf("initial shield=%d, want %d", g.shieldStrength, maxShieldStrength)
+	}
+	if g.applyShieldDamage(1) || g.shieldStrength != 5 {
+		t.Fatalf("laser shield damage produced strength=%d", g.shieldStrength)
+	}
+	g.updateShield(shieldRechargeInterval - tickSeconds)
+	if g.shieldStrength != 5 {
+		t.Fatalf("shield recharged too early to %d", g.shieldStrength)
+	}
+	g.updateShield(tickSeconds)
+	if g.shieldStrength != 6 {
+		t.Fatalf("shield did not recharge to 6: %d", g.shieldStrength)
+	}
+	if g.applyShieldDamage(3) || g.shieldStrength != 3 {
+		t.Fatalf("collision shield damage produced strength=%d", g.shieldStrength)
+	}
+	if g.applyShieldDamage(3) || g.shieldStrength != 0 {
+		t.Fatalf("shield reached incorrect zero state: %d", g.shieldStrength)
+	}
+	if !g.applyShieldDamage(1) || g.shieldStrength != -1 {
+		t.Fatalf("shield did not destroy player below zero: %d", g.shieldStrength)
+	}
+}
+
+func TestCockpitThreatUrgencyUsesDistanceBands(t *testing.T) {
+	cases := []struct {
+		distance float64
+		want     threatUrgency
+	}{
+		{distance: 40, want: threatBlue},
+		{distance: 15, want: threatOrange},
+		{distance: 8, want: threatRed},
+		{distance: 3, want: threatFlashingRed},
+	}
+	for _, test := range cases {
+		if got := cockpitThreatUrgency(test.distance); got != test.want {
+			t.Fatalf("distance %v urgency=%v, want %v", test.distance, got, test.want)
+		}
+	}
+}
+
+func TestInitialSwarmIsDistantAndAheadOfPlayer(t *testing.T) {
+	g := New()
+	player := *g.objectByID(fighterID)
+	for id := scene.ObjectID(2); id <= autonomousFighters+1; id++ {
+		fighter := g.objectByID(id)
+		if fighter == nil {
+			t.Fatalf("swarm fighter %d is missing", id)
+		}
+		offset := fighter.Pose.Position.Sub(player.Pose.Position)
+		if offset.Length() < 35 || offset.Z <= 0 {
+			t.Fatalf("swarm fighter %d is not distant and ahead: position=%+v distance=%v", id, fighter.Pose.Position, offset.Length())
+		}
+		if player.Pose.Forward().Dot(offset.Normalize()) < 0.75 {
+			t.Fatalf("player is not initially aimed toward swarm fighter %d", id)
+		}
+	}
+}
+
+func TestSwarmControllersContinueAvoidingWhenPlayerIsDestroyed(t *testing.T) {
+	g := New()
+	player := *g.objectByID(fighterID)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: player}, nil)
+	if g.objectByID(fighterID) != nil {
+		t.Fatal("player was not destroyed for targetless swarm test")
+	}
+	before := make(map[scene.ObjectID]kinematics.Motion)
+	for id := scene.ObjectID(2); id <= autonomousFighters+1; id++ {
+		before[id] = g.objectByID(id).Motion
+	}
+	g.updateAutonomous(tickSeconds)
+	for id, motion := range before {
+		fighter := g.objectByID(id)
+		if fighter == nil {
+			t.Fatalf("swarm fighter %d disappeared while player was destroyed", id)
+		}
+		if fighter.Motion == motion {
+			t.Fatalf("swarm controller %d stopped updating without a player target", id)
+		}
+	}
+}
+
 func TestUpdateMovesAndRotatesFighter(t *testing.T) {
 	g := New()
 	before := g.objects[0].Pose
@@ -134,10 +243,78 @@ func TestNewCreatesIndependentAutonomousFighters(t *testing.T) {
 	}
 }
 
+func TestInitialFightersStartOutsideAvoidanceRange(t *testing.T) {
+	g := New()
+	const minimumSpacing = 12.0
+	for firstIndex, first := range g.objects {
+		if first.CollisionRole != scene.CollisionSolid {
+			continue
+		}
+		for _, second := range g.objects[firstIndex+1:] {
+			if second.CollisionRole != scene.CollisionSolid {
+				continue
+			}
+			distance := first.Pose.Position.Sub(second.Pose.Position).Length()
+			if distance < minimumSpacing {
+				t.Fatalf("fighters %d and %d start %v units apart, want at least %v", first.ID, second.ID, distance, minimumSpacing)
+			}
+		}
+	}
+}
+
+func TestInitialSwarmAvoidsImmediatePhysicalCollisions(t *testing.T) {
+	g := New()
+	minimumDistance := math.Inf(1)
+	minimumTick := 0
+	var minimumPlayer, minimumFighter scene.Object
+	for tick := range 300 {
+		player := g.objectByID(fighterID)
+		fighter := g.objectByID(5)
+		if player != nil && fighter != nil {
+			distance := player.Pose.Position.Sub(fighter.Pose.Position).Length()
+			if distance < minimumDistance {
+				minimumDistance = distance
+				minimumTick = tick
+				minimumPlayer, minimumFighter = *player, *fighter
+			}
+		}
+		if err := g.Update(); err != nil {
+			t.Fatalf("Update returned an error: %v", err)
+		}
+	}
+	if g.collisions != 0 {
+		missing := make([]scene.ObjectID, 0)
+		for id := scene.ObjectID(1); id <= autonomousFighters+1; id++ {
+			if g.objectByID(id) == nil {
+				missing = append(missing, id)
+			}
+		}
+		t.Fatalf("initial swarm produced %d physical collisions in five seconds; missing=%v closest=%v at tick=%d player=%+v fighter=%+v", g.collisions, missing, minimumDistance, minimumTick, minimumPlayer.Motion, minimumFighter.Motion)
+	}
+}
+
 func TestAutonomousSwarmUsesWideFastPursuitProfile(t *testing.T) {
 	config := autonomousPursuitConfig()
-	if config.PreferredDistance < 8 || config.MinSpeed < 0.5 || config.MaxSpeed <= 1.5 {
+	if config.PreferredDistance < 8 || config.MaxSpeed <= 1.5 ||
+		config.MinSpeed < config.MaxSpeed*0.8 {
 		t.Fatalf("autonomous pursuit profile is not wide and fast enough: %+v", config)
+	}
+}
+
+func TestAutonomousSwarmMaintainsNearMaximumForwardSpeed(t *testing.T) {
+	g := New()
+	config := autonomousPursuitConfig()
+	for range 600 {
+		g.updateAutonomous(tickSeconds)
+		for id := scene.ObjectID(2); id <= autonomousFighters+1; id++ {
+			fighter := g.objectByID(id)
+			if fighter == nil {
+				t.Fatalf("autonomous fighter %d is missing", id)
+			}
+			if fighter.Motion.Speed < config.MinSpeed-1e-9 {
+				t.Fatalf("autonomous fighter %d slowed to %v, minimum is %v", id, fighter.Motion.Speed, config.MinSpeed)
+			}
+		}
 	}
 }
 
@@ -148,6 +325,70 @@ func TestAutonomousUpdateChangesFighterMotion(t *testing.T) {
 	updated := g.objectByID(autonomous.ID)
 	if updated == nil || updated.Motion == autonomous.Motion {
 		t.Fatal("autonomous controller did not change fighter motion")
+	}
+}
+
+func TestAutonomousFighterFiresPairedBoltsAtPlayer(t *testing.T) {
+	g := New()
+	shooter := *g.objectByID(2)
+	target := *g.objectByID(fighterID)
+	before := len(g.objects)
+
+	if !g.fireAutonomousLaser(shooter, target) {
+		t.Fatal("autonomous fighter failed to fire")
+	}
+	if len(g.objects) != before+2 {
+		t.Fatalf("autonomous volley added %d objects, want 2", len(g.objects)-before)
+	}
+	for _, bolt := range g.objects[len(g.objects)-2:] {
+		if g.owners[bolt.ID] != shooter.ID || g.projectiles[bolt.ID] <= 0 {
+			t.Fatalf("autonomous bolt %d has incorrect ownership or lifetime", bolt.ID)
+		}
+		if bolt.Pose.Forward().Dot(target.Pose.Position.Sub(bolt.Pose.Position).Normalize()) < 0.9 {
+			t.Fatalf("autonomous bolt %d is not aimed toward the designated target", bolt.ID)
+		}
+	}
+}
+
+func TestAutonomousAimErrorVariesByShooterAndTick(t *testing.T) {
+	g := New()
+	shooter := *g.objectByID(2)
+	target := *g.objectByID(fighterID)
+	g.simulationTime = 1
+	if !g.fireAutonomousLaser(shooter, target) {
+		t.Fatal("first autonomous volley failed")
+	}
+	first := g.objects[len(g.objects)-2].Pose.Forward()
+	g.objects = g.objects[:len(g.objects)-2]
+	g.simulationTime = 2
+	if !g.fireAutonomousLaser(shooter, target) {
+		t.Fatal("second autonomous volley failed")
+	}
+	second := g.objects[len(g.objects)-2].Pose.Forward()
+	if first == second {
+		t.Fatal("autonomous aim error did not vary between firing ticks")
+	}
+}
+
+func TestOpposingLaserBoltsInterceptWithoutDisintegration(t *testing.T) {
+	g := New()
+	firstID := g.nextObjectID
+	secondID := firstID + 1
+	first := catalog.LaserBolt(firstID, kinematics.Pose{Position: math3d.Vec3{Z: 2}, Orientation: math3d.IdentityQuaternion()})
+	second := catalog.LaserBolt(secondID, kinematics.Pose{Position: math3d.Vec3{Z: -2}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)})
+	g.objects = append(g.objects, first, second)
+	g.projectiles[firstID], g.projectiles[secondID] = 1, 1
+	g.owners[firstID], g.owners[secondID] = fighterID, scene.ObjectID(2)
+	previous := objectPositions(g.objects)
+	previous[firstID] = math3d.Vec3{Z: -2}
+	previous[secondID] = math3d.Vec3{Z: 2}
+
+	g.resolveLaserCollisions(previous)
+	if g.objectByID(firstID) != nil || g.objectByID(secondID) != nil {
+		t.Fatal("opposing laser bolts survived interception")
+	}
+	if len(g.debris) != 0 {
+		t.Fatalf("bolt interception spawned %d debris objects", len(g.debris))
 	}
 }
 
@@ -188,19 +429,104 @@ func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	if len(g.respawns) != 1 || g.kills != 1 {
 		t.Fatalf("hit queued %d respawns and %d kills, want 1 and 1", len(g.respawns), g.kills)
 	}
-	for id, lifetime := range g.debris {
+	for id, transient := range g.debris {
 		fragment := g.objectByID(id)
 		if fragment == nil || fragment.CollisionRole != scene.CollisionDebris {
 			t.Fatalf("debris %d is missing or has the wrong role", id)
 		}
-		if lifetime != disintegrationTime || fragment.Motion.Velocity == (math3d.Vec3{}) {
+		if transient.remaining != disintegrationTime || transient.stage != scene.DestructionComponent ||
+			fragment.Physical || !fragment.Hittable || fragment.Motion.Velocity == (math3d.Vec3{}) {
 			t.Fatalf("debris %d has incorrect lifetime or velocity", id)
+		}
+	}
+}
+
+func TestLaserHitBreaksComponentIntoFreshPolygonShards(t *testing.T) {
+	g := New()
+	target := *g.objectByID(2)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{target.ID: target}, nil)
+
+	var componentID scene.ObjectID
+	var componentIndex int
+	for id, transient := range g.debris {
+		if transient.stage == scene.DestructionComponent {
+			componentID = id
+			componentIndex = transient.componentIndex
+			break
+		}
+	}
+	component := g.objectByID(componentID)
+	if component == nil {
+		t.Fatal("first-stage disintegration did not produce a component")
+	}
+	g.debris[componentID] = destructionTransient{
+		remaining:      0.2,
+		rootObjectID:   target.ID,
+		componentIndex: componentIndex,
+		stage:          scene.DestructionComponent,
+	}
+
+	boltID := g.nextObjectID
+	g.nextObjectID++
+	bolt := catalog.LaserBolt(boltID, kinematics.Pose{
+		Position:    component.Pose.Position.Add(math3d.Vec3{Z: 3}),
+		Orientation: math3d.IdentityQuaternion(),
+	})
+	g.objects = append(g.objects, bolt)
+	g.projectiles[boltID] = 1
+	g.owners[boltID] = fighterID
+	previous := objectPositions(g.objects)
+	previous[boltID] = component.Pose.Position.Add(math3d.Vec3{Z: -3})
+
+	g.resolveLaserCollisions(previous)
+
+	if g.objectByID(componentID) != nil || g.objectByID(boltID) != nil {
+		t.Fatal("component hit did not consume the component and projectile")
+	}
+	wantPolygons := catalog.TwinPanelFighterPolygonCount(componentIndex)
+	polygonCount := 0
+	componentCount := 0
+	for id, transient := range g.debris {
+		object := g.objectByID(id)
+		switch transient.stage {
+		case scene.DestructionComponent:
+			componentCount++
+		case scene.DestructionPolygon:
+			polygonCount++
+			if transient.remaining != disintegrationTime || object == nil ||
+				object.Hittable || object.Physical || object.Destructible {
+				t.Fatalf("polygon shard %d has incorrect lifetime or collision behavior", id)
+			}
+		}
+	}
+	if componentCount != 2 || polygonCount != wantPolygons {
+		t.Fatalf("second hit left %d components and made %d polygons, want 2 and %d", componentCount, polygonCount, wantPolygons)
+	}
+
+	for range 119 {
+		g.updateDebris(tickSeconds)
+	}
+	remainingPolygons := 0
+	for _, transient := range g.debris {
+		if transient.stage == scene.DestructionPolygon {
+			remainingPolygons++
+		}
+	}
+	if remainingPolygons != wantPolygons {
+		t.Fatalf("fresh polygon shards expired early: got %d, want %d", remainingPolygons, wantPolygons)
+	}
+	g.updateDebris(tickSeconds)
+	for _, transient := range g.debris {
+		if transient.stage == scene.DestructionPolygon {
+			t.Fatal("polygon shards remain after their fresh two-second lifetime")
 		}
 	}
 }
 
 func TestSweptFighterCollisionDisintegratesBothObjectsOnce(t *testing.T) {
 	g := New()
+	// Exhaust the player's shield so this collision exercises the lethal path.
+	g.shieldStrength = 0
 	player := g.objectByID(fighterID)
 	autonomous := g.objectByID(2)
 	for id := scene.ObjectID(3); id <= autonomousFighters+1; id++ {
@@ -230,8 +556,8 @@ func TestResetRespawnsDestroyedPlayerAndRestoresView(t *testing.T) {
 	g.viewCamera.Mode = camera.Cockpit
 	player := *g.objectByID(fighterID)
 	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: player}, nil)
-	if !g.playerDestroyed || g.viewCamera.Mode != camera.Fixed {
-		t.Fatal("destroying player did not enter fixed spectator view")
+	if !g.playerDestroyed || g.viewCamera.Mode != camera.Orbit || g.destructionViewRemaining != playerDestructionViewTime {
+		t.Fatal("destroying player did not enter the three-second external destruction view")
 	}
 	g.resetFighter()
 	if g.playerDestroyed || g.objectByID(fighterID) == nil {
@@ -240,24 +566,77 @@ func TestResetRespawnsDestroyedPlayerAndRestoresView(t *testing.T) {
 	if g.viewCamera.Mode != camera.Cockpit {
 		t.Fatalf("respawn restored view %v, want cockpit", g.viewCamera.Mode)
 	}
+	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Motion.Speed != g.manualConfig.MaxForward {
+		t.Fatalf("respawn speed is not maximum: %+v", fighter)
+	}
+}
+
+func TestManualRespawnStartsAtMaximumForwardSpeed(t *testing.T) {
+	g := New()
+	g.mode = modeManual
+	target := *g.objectByID(fighterID)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: target}, nil)
+	g.resetFighter()
+	fighter := g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("manual respawn did not restore the player")
+	}
+	if fighter.Motion.Speed != g.manualConfig.MaxForward {
+		t.Fatalf("manual respawn speed is %v, want %v", fighter.Motion.Speed, g.manualConfig.MaxForward)
+	}
+	if fighter.Motion.YawRate != 0 || fighter.Motion.PitchRate != 0 || fighter.Motion.RollRate != 0 {
+		t.Fatalf("manual respawn retained angular motion: %+v", fighter.Motion)
+	}
+}
+
+func TestPlayerRespawnAvoidsDisintegrationDebris(t *testing.T) {
+	g := New()
+	player := *g.objectByID(fighterID)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: player}, nil)
+	g.resetFighter()
+	respawned := g.objectByID(fighterID)
+	if respawned == nil {
+		t.Fatal("player did not respawn")
+	}
+	for _, object := range g.objects {
+		if object.ID == fighterID {
+			continue
+		}
+		if object.Pose.Position.Sub(respawned.Pose.Position).Length() < 10+object.CollisionRadius {
+			t.Fatalf("player respawned too close to object %d at distance %v", object.ID, object.Pose.Position.Sub(respawned.Pose.Position).Length())
+		}
+	}
 }
 
 func TestAutonomousFighterReturnsAfterRespawnDelay(t *testing.T) {
 	g := New()
-	target := *g.objectByID(2)
-	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{target.ID: target}, nil)
-	if len(g.controllers) != autonomousFighters-1 || len(g.respawns) != 1 {
-		t.Fatal("autonomous destruction did not queue one replacement")
+	for id := scene.ObjectID(2); id <= autonomousFighters+1; id++ {
+		target := *g.objectByID(id)
+		g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{target.ID: target}, nil)
+	}
+	if len(g.controllers) != 0 || len(g.respawns) != autonomousFighters {
+		t.Fatalf("autonomous destruction did not queue a complete replacement wave: active=%d pending=%d", len(g.controllers), len(g.respawns))
 	}
 	g.simulationTime += autonomousRespawnDelay - tickSeconds
 	g.updateRespawns()
-	if len(g.controllers) != autonomousFighters-1 {
+	if len(g.controllers) != 0 {
 		t.Fatal("autonomous fighter respawned too early")
 	}
 	g.simulationTime += tickSeconds
 	g.updateRespawns()
 	if len(g.controllers) != autonomousFighters || len(g.respawns) != 0 {
 		t.Fatalf("autonomous replacement failed: active=%d pending=%d", len(g.controllers), len(g.respawns))
+	}
+}
+
+func TestAutonomousRespawnWaitsForEntireSwarm(t *testing.T) {
+	g := New()
+	first := *g.objectByID(2)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{first.ID: first}, nil)
+	g.simulationTime += autonomousRespawnDelay + 1
+	g.updateRespawns()
+	if len(g.controllers) != autonomousFighters-1 || len(g.respawns) != 1 {
+		t.Fatalf("single destroyed fighter respawned before wave end: active=%d pending=%d", len(g.controllers), len(g.respawns))
 	}
 }
 
