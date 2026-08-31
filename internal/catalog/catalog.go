@@ -16,6 +16,12 @@ var (
 	vectorGreen = color.RGBA{R: 64, G: 255, B: 96, A: 255}
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
+
+	twinPanelHull   = model.TwinPanelFighter()
+	twinPanelWindow = model.TwinPanelFighterWindow()
+	twinPanelDebris = model.TwinPanelFighterFragments()
+	laserBoltRays   = model.LaserBoltRays()
+	laserBoltTips   = model.LaserBoltBranches()
 )
 
 const standardLineWidth float32 = 2
@@ -39,6 +45,35 @@ func Cube(id scene.ObjectID, size float64, pose kinematics.Pose) scene.Object {
 	}
 }
 
+// TwinPanelFighterFragment returns one of three non-colliding debris pieces.
+func TwinPanelFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
+	if index < 0 || index >= len(twinPanelDebris) {
+		panic("catalog: twin-panel fighter fragment index out of range")
+	}
+	parts := []scene.Part{{
+		Name:      "fragment-hull",
+		Mesh:      twinPanelDebris[index],
+		Color:     vectorGreen,
+		LineWidth: standardLineWidth,
+	}}
+	if index == 1 {
+		parts = append(parts, scene.Part{
+			Name:      "fragment-window",
+			Mesh:      twinPanelWindow,
+			Color:     windowAmber,
+			LineWidth: standardLineWidth,
+		})
+	}
+	return scene.Object{
+		ID:              id,
+		Name:            "twin-panel fighter debris",
+		Pose:            pose,
+		Parts:           parts,
+		CollisionRole:   scene.CollisionDebris,
+		CollisionRadius: 0.8,
+	}
+}
+
 // TwinPanelFighter returns the complete multipart fighter with its contrasting
 // cockpit window.
 func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
@@ -49,13 +84,13 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		Parts: []scene.Part{
 			{
 				Name:      "hull",
-				Mesh:      model.TwinPanelFighter(),
+				Mesh:      twinPanelHull,
 				Color:     vectorGreen,
 				LineWidth: standardLineWidth,
 			},
 			{
 				Name:      "windscreen",
-				Mesh:      model.TwinPanelFighterWindow(),
+				Mesh:      twinPanelWindow,
 				Color:     windowAmber,
 				LineWidth: standardLineWidth,
 			},
@@ -89,6 +124,9 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 				Orientation: math3d.IdentityQuaternion(),
 			},
 		},
+		CollisionRole:   scene.CollisionSolid,
+		CollisionRadius: 1.8,
+		Destructible:    true,
 	}
 }
 
@@ -102,13 +140,13 @@ func LaserBolt(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		Parts: []scene.Part{
 			{
 				Name:      "rays",
-				Mesh:      model.LaserBoltRays(),
+				Mesh:      laserBoltRays,
 				Color:     vectorRed,
 				LineWidth: standardLineWidth,
 			},
 			{
 				Name:      "branches",
-				Mesh:      model.LaserBoltBranches(),
+				Mesh:      laserBoltTips,
 				Color:     vectorBlue,
 				LineWidth: standardLineWidth,
 			},
@@ -116,5 +154,7 @@ func LaserBolt(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		Anchors: map[string]kinematics.Pose{
 			"center": {Orientation: math3d.IdentityQuaternion()},
 		},
+		CollisionRole:   scene.CollisionProjectile,
+		CollisionRadius: 0.12,
 	}
 }

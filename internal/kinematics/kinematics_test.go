@@ -15,6 +15,15 @@ func TestSignedSpeedMovesAlongForwardAxis(t *testing.T) {
 	assertVec3(t, backward.Position, math3d.Vec3{Z: -1})
 }
 
+func TestWorldSpaceVelocityAddsIndependentDrift(t *testing.T) {
+	pose := Pose{Orientation: math3d.IdentityQuaternion()}
+	result := Integrate(pose, Motion{
+		Speed:    2,
+		Velocity: math3d.Vec3{X: 1, Y: -0.5},
+	}, 2)
+	assertVec3(t, result.Position, math3d.Vec3{X: 2, Y: -1, Z: 4})
+}
+
 func TestYawRedirectsMovement(t *testing.T) {
 	pose := Pose{Orientation: math3d.IdentityQuaternion()}
 	result := Integrate(pose, Motion{Speed: 1, YawRate: math.Pi / 2}, 1)

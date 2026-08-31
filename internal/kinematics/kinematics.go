@@ -37,7 +37,10 @@ func (p Pose) ViewMatrix() math3d.Mat4 {
 }
 
 type Motion struct {
-	Speed     float64
+	Speed float64
+	// Velocity adds world-space linear motion for drifting debris and other
+	// objects that do not travel only along their local forward axis.
+	Velocity  math3d.Vec3
 	YawRate   float64
 	PitchRate float64
 	RollRate  float64
@@ -56,6 +59,7 @@ func Integrate(pose Pose, motion Motion, seconds float64) Pose {
 		motion.RollRate*seconds,
 	)
 	pose.Orientation = pose.Orientation.Normalize().Mul(delta).Normalize()
-	pose.Position = pose.Position.Add(pose.Forward().Scale(motion.Speed * seconds))
+	linearVelocity := pose.Forward().Scale(motion.Speed).Add(motion.Velocity)
+	pose.Position = pose.Position.Add(linearVelocity.Scale(seconds))
 	return pose
 }

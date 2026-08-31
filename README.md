@@ -10,8 +10,17 @@ pipeline.
 
 ## Current milestone
 
-Step 13: cockpit mouse targeting with right-button flight steering, a bounded
-firing cone, and paired laser bolts that converge on the selected aim point.
+Step 14 in progress: five autonomous instances of the existing fighter use
+independent deterministic pursuit heuristics, dispersed return positions,
+randomized pitch/yaw wander, and timed fly-away excursions before returning to
+the player's vicinity. Each fighter also selects a new cruising-speed variation
+every five seconds and accelerates smoothly toward it. Swept laser collision
+detection consumes a hitting bolt and replaces the struck fighter with three
+independently drifting and spinning fragments that disappear after two seconds.
+Fighter collisions disintegrate both participants. Destroyed autonomous fighters
+return after three seconds at safe positions; a destroyed player enters a fixed
+spectator view until `R` respawns the fighter. Flight, pursuit, firing,
+projectiles, and debris use fast arcade-tempo tuning.
 
 ## Prerequisites
 
@@ -34,8 +43,9 @@ go test ./...
 go run .
 ```
 
-You should see a 960×540 dark window with a red, low-poly twin-panel fighter
-moving along a gentle curved path while yawing and rolling.
+You should see a 960×540 dark window with green, low-poly twin-panel fighters.
+The player fighter moves along a gentle curved path while five autonomous
+fighters pursue its vicinity with varied steering.
 
 ## Controls
 
@@ -49,8 +59,9 @@ moving along a gentle curved path while yawing and rolling.
 - Move the mouse in cockpit view to aim the targeting crosshairs
 - Hold right mouse in cockpit view to steer toward the pointer
 - `F` or left mouse: fire alternating paired laser bolts toward the crosshairs
+  (maximum three paired volleys in any 1.5-second window)
 - `P`: pause or resume simulation
-- `R`: reset fighter pose and motion
+- `R`: reset the fighter, or respawn after destruction
 - `+` / `-` or mouse wheel: camera zoom
 
 ## Roadmap

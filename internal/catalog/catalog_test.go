@@ -5,6 +5,7 @@ import (
 
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
 func TestCubeReturnsValidObject(t *testing.T) {
@@ -28,6 +29,9 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
 	}
+	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 || !fighter.Destructible {
+		t.Fatalf("fighter has incorrect collision metadata")
+	}
 	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit {
 		t.Fatal("fighter hull or windscreen is visible from inside the cockpit")
 	}
@@ -42,6 +46,29 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
+func TestTwinPanelFighterFragmentIsNonCollidingDebris(t *testing.T) {
+	for index := range 3 {
+		fragment := TwinPanelFighterFragment(scene.ObjectID(index+1), index, kinematics.Pose{})
+		if err := fragment.Validate(); err != nil {
+			t.Fatalf("fragment %d is invalid: %v", index, err)
+		}
+		if fragment.CollisionRole != scene.CollisionDebris || fragment.Destructible {
+			t.Fatalf("fragment %d has incorrect collision metadata", index)
+		}
+	}
+}
+
+func TestTwinPanelFighterInstancesShareImmutableGeometry(t *testing.T) {
+	first := TwinPanelFighter(1, kinematics.Pose{})
+	second := TwinPanelFighter(2, kinematics.Pose{})
+	if &first.Parts[0].Mesh.Verts[0] != &second.Parts[0].Mesh.Verts[0] {
+		t.Fatal("fighter instances do not share catalog hull geometry")
+	}
+	if &first.Parts[1].Mesh.Verts[0] != &second.Parts[1].Mesh.Verts[0] {
+		t.Fatal("fighter instances do not share catalog window geometry")
+	}
+}
+
 func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
 	bolt := LaserBolt(2, kinematics.Pose{})
 	if err := bolt.Validate(); err != nil {
@@ -52,5 +79,8 @@ func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
 	}
 	if bolt.Parts[0].Color == bolt.Parts[1].Color {
 		t.Fatal("laser rays and branches use the same color")
+	}
+	if bolt.CollisionRole != scene.CollisionProjectile || bolt.CollisionRadius <= 0 {
+		t.Fatal("laser bolt has incorrect collision metadata")
 	}
 }

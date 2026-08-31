@@ -43,6 +43,24 @@ func TestTwinPanelFighterWindowIsValid(t *testing.T) {
 	}
 }
 
+func TestTwinPanelFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
+	hull := TwinPanelFighter()
+	fragments := TwinPanelFighterFragments()
+	edgeCount := 0
+	for index, fragment := range fragments {
+		if err := fragment.Validate(); err != nil {
+			t.Fatalf("fragment %d is invalid: %v", index, err)
+		}
+		if len(fragment.Edges) == 0 {
+			t.Fatalf("fragment %d contains no edges", index)
+		}
+		edgeCount += len(fragment.Edges)
+	}
+	if edgeCount != len(hull.Edges) {
+		t.Fatalf("fragments contain %d edges, want hull's %d", edgeCount, len(hull.Edges))
+	}
+}
+
 func TestPanelIsARegularHexagon(t *testing.T) {
 	mesh := Model{}
 	appendPanel(&mesh, 0, nil)

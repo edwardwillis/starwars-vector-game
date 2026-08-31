@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	LaserSpeed    = 10.0
-	LaserSpinRate = 5.5
+	LaserSpeed    = 18.0
+	LaserSpinRate = 8.0
 	LaserLifetime = 2.0
 )
 

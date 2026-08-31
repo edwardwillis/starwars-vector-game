@@ -182,6 +182,39 @@ Catalog constructors assemble geometry, default vector styling, and multipart
 details into ready-to-place scene objects. Game code selects catalog entries and
 supplies transforms instead of knowing how each object is built.
 
+## Destruction and Disintegration
+
+Objects that are destroyed by a laser hit or a physical object-to-object
+collision may disintegrate instead of disappearing immediately. Destructible
+catalog entries define two or three reusable fragment meshes that together
+preserve the recognizable outline of the intact object. A deterministic
+fallback may partition an object's existing parts or edges when bespoke
+fragments are not available.
+
+When a destructive hit is resolved, the simulation atomically removes the
+intact object and spawns two or three transient fragment objects at its pose.
+Each fragment inherits the object's motion, receives a different outward linear
+velocity and angular velocity, and spins away independently for exactly two
+seconds before being removed from the universe. Fragments are visual debris:
+they have no controller, cannot fire, do not receive damage, and do not produce
+further fragments. The laser bolt that caused the hit is consumed.
+
+Physical collisions are resolved symmetrically: when two participating objects
+collide, both objects disintegrate and each produces its own two or three
+fragments. This includes collisions such as fighter against fighter. The
+collision system resolves each object at most once per simulation tick so a
+single pile-up cannot spawn duplicate fragment sets. Background-only items such
+as starfield points and non-physical navigation markers do not participate in
+collision detection. Transient disintegration fragments also do not collide.
+
+Fragment count, directions, speeds, and spin must be deterministic from stable
+simulation data such as the destroyed object ID and impact tick. This keeps
+local tests, replay, and the later authoritative server consistent. Networked
+clients receive the destruction and fragment spawn/removal events rather than
+generating authoritative debris locally. If a camera targets a destroyed
+object, it follows an explicitly selected fragment when supported or safely
+falls back to an appropriate spectator view.
+
 ## Object Coordinates and Kinematics
 
 Directional catalog models use a shared local coordinate convention:
@@ -345,19 +378,19 @@ controllers remain the baseline for tests and offline play.
 11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
 12. Starfield — deterministic world points, wrapping, projection, motion reference
 13. Cockpit targeting — pointer aim, right-button steering, firing cone, converging bolts
-14. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
+14. Dogfight — multiple catalog fighter instances, deterministic pursuit/wander/excursion and variable-speed heuristics, symmetric collisions, two-second disintegration debris, player and swarm respawn lifecycle
 15. Death Star — reusable surface modules, trench, towers, targeting reticle
 16. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
 17. Simulation extraction — stable IDs and renderer-independent world updates
 18. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
 19. Controller interface — intents, registry, static and manual strategies
 20. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
-20. Multiplayer client — control input, interpolation, ownership, view switching
-21. External agent adapter — asynchronous AI/MCP decisions and safe fallback
-22. Score, game states, sound
-23. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
-24. Stretch: controller evaluation, tournaments, and strategy hot-loading
-25. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)
+21. Multiplayer client — control input, interpolation, ownership, view switching
+22. External agent adapter — asynchronous AI/MCP decisions and safe fallback
+23. Score, game states, sound
+24. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
+25. Stretch: controller evaluation, tournaments, and strategy hot-loading
+26. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)
 
 ## Notes
 - Step 5 is first visually demonstrable milestone (target early win).

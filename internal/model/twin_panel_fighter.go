@@ -106,6 +106,28 @@ func TwinPanelFighterWindow() Model {
 	return window
 }
 
+// TwinPanelFighterFragments partitions the fighter's edges into left, center,
+// and right debris meshes. Together the three fragments reconstruct the hull.
+func TwinPanelFighterFragments() [3]Model {
+	hull := TwinPanelFighter()
+	fragments := [3]Model{
+		{Verts: hull.Verts},
+		{Verts: hull.Verts},
+		{Verts: hull.Verts},
+	}
+	for _, edge := range hull.Edges {
+		midpointX := (hull.Verts[edge.A].X + hull.Verts[edge.B].X) * 0.5
+		index := 1
+		if midpointX < -0.48 {
+			index = 0
+		} else if midpointX > 0.48 {
+			index = 2
+		}
+		fragments[index].Edges = append(fragments[index].Edges, edge)
+	}
+	return fragments
+}
+
 func appendBox(mesh *Model, centerX, centerY, centerZ, width, height, depth float64) int {
 	base := len(mesh.Verts)
 	halfWidth, halfHeight, halfDepth := width/2, height/2, depth/2

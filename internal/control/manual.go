@@ -24,12 +24,12 @@ type ManualConfig struct {
 
 func DefaultManualConfig() ManualConfig {
 	return ManualConfig{
-		Acceleration: 0.75,
-		MaxForward:   1.5,
-		MaxReverse:   1.0,
-		MaxYawRate:   0.9,
-		MaxPitchRate: 0.75,
-		MaxRollRate:  1.1,
+		Acceleration: 2.0,
+		MaxForward:   3.6,
+		MaxReverse:   2.0,
+		MaxYawRate:   1.5,
+		MaxPitchRate: 1.25,
+		MaxRollRate:  1.8,
 	}
 }
 

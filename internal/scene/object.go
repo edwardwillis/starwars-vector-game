@@ -24,6 +24,15 @@ type Part struct {
 
 type ObjectID uint64
 
+type CollisionRole uint8
+
+const (
+	CollisionNone CollisionRole = iota
+	CollisionSolid
+	CollisionProjectile
+	CollisionDebris
+)
+
 type Anchor struct {
 	Name string
 	Pose kinematics.Pose
@@ -32,12 +41,15 @@ type Anchor struct {
 // Object is an independently transformable item in the game world. Ships,
 // projectiles, emplacements, celestial bodies, and scenery share this type.
 type Object struct {
-	ID      ObjectID
-	Name    string
-	Pose    kinematics.Pose
-	Motion  kinematics.Motion
-	Parts   []Part
-	Anchors map[string]kinematics.Pose
+	ID              ObjectID
+	Name            string
+	Pose            kinematics.Pose
+	Motion          kinematics.Motion
+	Parts           []Part
+	Anchors         map[string]kinematics.Pose
+	CollisionRole   CollisionRole
+	CollisionRadius float64
+	Destructible    bool
 }
 
 func (o Object) WorldMatrix() math3d.Mat4 {
@@ -61,6 +73,9 @@ func (o Object) Validate() error {
 	}
 	if len(o.Parts) == 0 {
 		return fmt.Errorf("scene object %q must contain at least one part", o.Name)
+	}
+	if o.CollisionRole != CollisionNone && o.CollisionRadius <= 0 {
+		return fmt.Errorf("scene object %q has a collision role but no positive radius", o.Name)
 	}
 	for index, part := range o.Parts {
 		if err := part.Mesh.Validate(); err != nil {
