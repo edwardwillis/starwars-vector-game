@@ -16,11 +16,11 @@ func TestFireLaserUsesMuzzlePoseAndInheritedSpeed(t *testing.T) {
 	})
 	shooter.Motion.Speed = -0.5
 
-	spawn, err := FireLaser(shooter, 2, "muzzle-left")
+	spawn, err := FireLaser(shooter, 2, "muzzle-upper-left")
 	if err != nil {
 		t.Fatalf("FireLaser returned an error: %v", err)
 	}
-	wantPose, _ := shooter.Anchor("muzzle-left")
+	wantPose, _ := shooter.Anchor("muzzle-upper-left")
 	if spawn.Object.Pose != wantPose {
 		t.Fatalf("bolt pose is %+v, want %+v", spawn.Object.Pose, wantPose)
 	}
@@ -39,5 +39,18 @@ func TestFireLaserRejectsMissingMuzzle(t *testing.T) {
 	shooter := scene.Object{ID: 1}
 	if _, err := FireLaser(shooter, 2, "missing"); err == nil {
 		t.Fatal("FireLaser accepted a missing muzzle")
+	}
+}
+
+func TestFireLaserTowardOrientsBoltAtConvergencePoint(t *testing.T) {
+	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	target := math3d.Vec3{X: 4, Y: 2, Z: 20}
+	spawn, err := FireLaserToward(shooter, 2, "muzzle-upper-left", target)
+	if err != nil {
+		t.Fatalf("FireLaserToward returned an error: %v", err)
+	}
+	want := target.Sub(spawn.Object.Pose.Position).Normalize()
+	if spawn.Object.Pose.Forward().Sub(want).Length() > 1e-9 {
+		t.Fatalf("bolt points %+v, want %+v", spawn.Object.Pose.Forward(), want)
 	}
 }

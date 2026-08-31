@@ -54,27 +54,10 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 				LineWidth: standardLineWidth,
 			},
 			{
-				Name:             "windscreen",
-				Mesh:             model.TwinPanelFighterWindow(),
-				Color:            windowAmber,
-				LineWidth:        standardLineWidth,
-				VisibleInCockpit: true,
-			},
-			{
-				Name:             "cockpit-console",
-				Mesh:             model.CockpitConsole(),
-				Color:            vectorGreen,
-				LineWidth:        standardLineWidth,
-				VisibleInCockpit: true,
-				CockpitOnly:      true,
-			},
-			{
-				Name:             "cockpit-cannons",
-				Mesh:             model.CockpitCannons(),
-				Color:            vectorGreen,
-				LineWidth:        standardLineWidth,
-				VisibleInCockpit: true,
-				CockpitOnly:      true,
+				Name:      "windscreen",
+				Mesh:      model.TwinPanelFighterWindow(),
+				Color:     windowAmber,
+				LineWidth: standardLineWidth,
 			},
 		},
 		Anchors: map[string]kinematics.Pose{
@@ -89,12 +72,20 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 				Position:    math3d.Vec3{Y: 0.8, Z: -3},
 				Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0),
 			},
-			"muzzle-left": {
-				Position:    math3d.Vec3{X: -0.42, Y: -0.08, Z: 0.82},
+			"muzzle-upper-left": {
+				Position:    math3d.Vec3{X: -0.42, Y: 0.18, Z: 0.82},
 				Orientation: math3d.IdentityQuaternion(),
 			},
-			"muzzle-right": {
-				Position:    math3d.Vec3{X: 0.42, Y: -0.08, Z: 0.82},
+			"muzzle-upper-right": {
+				Position:    math3d.Vec3{X: 0.42, Y: 0.18, Z: 0.82},
+				Orientation: math3d.IdentityQuaternion(),
+			},
+			"muzzle-lower-left": {
+				Position:    math3d.Vec3{X: -0.42, Y: -0.28, Z: 0.82},
+				Orientation: math3d.IdentityQuaternion(),
+			},
+			"muzzle-lower-right": {
+				Position:    math3d.Vec3{X: 0.42, Y: -0.28, Z: 0.82},
 				Orientation: math3d.IdentityQuaternion(),
 			},
 		},

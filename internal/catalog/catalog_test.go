@@ -22,21 +22,20 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TwinPanelFighter returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 4 {
-		t.Fatalf("TwinPanelFighter returned %d parts, want 4", len(fighter.Parts))
+	if len(fighter.Parts) != 2 {
+		t.Fatalf("TwinPanelFighter returned %d parts, want 2", len(fighter.Parts))
 	}
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
 	}
-	if fighter.Parts[0].VisibleInCockpit || !fighter.Parts[1].VisibleInCockpit {
-		t.Fatal("fighter cockpit visibility does not hide hull and retain windscreen")
+	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit {
+		t.Fatal("fighter hull or windscreen is visible from inside the cockpit")
 	}
-	for _, part := range fighter.Parts[2:] {
-		if !part.VisibleInCockpit || !part.CockpitOnly {
-			t.Fatalf("cockpit furnishing %q has incorrect visibility", part.Name)
-		}
-	}
-	for _, name := range []string{"center", "cockpit", "chase", "muzzle-left", "muzzle-right"} {
+	for _, name := range []string{
+		"center", "cockpit", "chase",
+		"muzzle-upper-left", "muzzle-upper-right",
+		"muzzle-lower-left", "muzzle-lower-right",
+	} {
 		if _, ok := fighter.Anchor(name); !ok {
 			t.Fatalf("fighter is missing %q camera anchor", name)
 		}

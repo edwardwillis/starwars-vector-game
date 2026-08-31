@@ -1,10 +1,12 @@
 package game
 
 import (
+	"math"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
@@ -50,29 +52,40 @@ func TestResetFighterRestoresInitialPoseAndStopsManualMotion(t *testing.T) {
 func TestFireLaserSpawnsTrackedBolt(t *testing.T) {
 	g := New()
 	g.fireLaser()
-	if len(g.objects) != 2 || len(g.projectiles) != 1 {
-		t.Fatalf("fire produced %d objects and %d projectiles, want 2 and 1", len(g.objects), len(g.projectiles))
+	if len(g.objects) != 3 || len(g.projectiles) != 2 {
+		t.Fatalf("fire produced %d objects and %d projectiles, want 3 and 2", len(g.objects), len(g.projectiles))
 	}
 	bolt := g.objects[1]
 	if bolt.ID != 2 || g.owners[bolt.ID] != fighterID {
 		t.Fatalf("unexpected bolt identity or owner: id=%d owner=%d", bolt.ID, g.owners[bolt.ID])
+	}
+	if g.nextMuzzlePair != 1 || g.laserBeamPair != 0 || g.laserBeamTime != laserBeamTime {
+		t.Fatal("first volley did not activate the upper beam pair and queue the lower pair")
+	}
+	g.fireLaser()
+	if len(g.objects) != 5 || g.nextMuzzlePair != 0 || g.laserBeamPair != 1 {
+		t.Fatal("second volley did not fire the lower pair and alternate back to upper")
 	}
 }
 
 func TestProjectileExpiresAndIsRemoved(t *testing.T) {
 	g := New()
 	g.fireLaser()
-	boltID := g.objects[1].ID
-	g.projectiles[boltID] = tickSeconds / 2
+	boltIDs := []scene.ObjectID{g.objects[1].ID, g.objects[2].ID}
+	for _, boltID := range boltIDs {
+		g.projectiles[boltID] = tickSeconds / 2
+	}
 	g.updateProjectiles(tickSeconds)
 	if len(g.objects) != 1 {
 		t.Fatalf("expiry left %d objects, want 1", len(g.objects))
 	}
-	if _, ok := g.projectiles[boltID]; ok {
-		t.Fatal("expired projectile remains tracked")
-	}
-	if _, ok := g.owners[boltID]; ok {
-		t.Fatal("expired projectile owner remains tracked")
+	for _, boltID := range boltIDs {
+		if _, ok := g.projectiles[boltID]; ok {
+			t.Fatal("expired projectile remains tracked")
+		}
+		if _, ok := g.owners[boltID]; ok {
+			t.Fatal("expired projectile owner remains tracked")
+		}
 	}
 }
 
@@ -90,5 +103,32 @@ func TestMouseFlightAxesUseDeadzoneAndClamp(t *testing.T) {
 	yaw, pitch = mouseFlightAxes(490, 275, 480, 270)
 	if yaw != 0 || pitch != 0 {
 		t.Fatalf("deadzone mouse produced yaw=%v pitch=%v", yaw, pitch)
+	}
+}
+
+func TestCockpitCannonMuzzleTopIsAboveEmitterCenter(t *testing.T) {
+	for _, cannon := range [][2]float32{{72, 152}, {888, 152}, {82, 432}, {878, 432}} {
+		top := cockpitCannonMuzzleTop(cannon[0], cannon[1], ScreenWidth/2, ScreenHeight/2)
+		dx, dy := float32(ScreenWidth/2)-cannon[0], float32(ScreenHeight/2)-cannon[1]
+		length := float32(math.Hypot(float64(dx), float64(dy)))
+		emitterCenterY := cannon[1] + dy/length*28
+		if top[1] >= emitterCenterY {
+			t.Fatalf("muzzle top y=%v is not above emitter center y=%v", top[1], emitterCenterY)
+		}
+	}
+}
+
+func TestClampCockpitTargetLimitsFiringCone(t *testing.T) {
+	x, y, inRange := clampCockpitTarget(ScreenWidth/2+50, ScreenHeight/2)
+	if !inRange || x != ScreenWidth/2+50 || y != ScreenHeight/2 {
+		t.Fatalf("in-range target was changed to %v,%v (inRange=%v)", x, y, inRange)
+	}
+	x, y, inRange = clampCockpitTarget(ScreenWidth, ScreenHeight)
+	if inRange {
+		t.Fatal("out-of-range target was accepted")
+	}
+	distance := math.Hypot(float64(x-ScreenWidth/2), float64(y-ScreenHeight/2))
+	if math.Abs(distance-aimRadius) > 1e-4 {
+		t.Fatalf("clamped target radius is %v, want %v", distance, aimRadius)
 	}
 }

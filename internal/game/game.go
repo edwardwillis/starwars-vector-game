@@ -27,11 +27,14 @@ const (
 	zoomSpeed        = 1.5
 	fighterID        = scene.ObjectID(1)
 	fireInterval     = 0.18
+	laserBeamTime    = 0.10
 	mouseDeadzone    = 0.08
 	mouseSensitivity = 1.25
 	starCount        = 500
 	starRadius       = 40.0
 	starSeed         = 42
+	aimRadius        = 190.0
+	aimConvergence   = 30.0
 )
 
 var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
@@ -52,23 +55,25 @@ func (mode flightMode) String() string {
 
 // Game owns the simulation state and wireframe rendering pipeline.
 type Game struct {
-	objects       []scene.Object
-	pipeline      render.Pipeline
-	initialPose   kinematics.Pose
-	autoMotion    kinematics.Motion
-	manualConfig  control.ManualConfig
-	mode          flightMode
-	paused        bool
-	viewCamera    *camera.Camera
-	nextObjectID  scene.ObjectID
-	projectiles   map[scene.ObjectID]float64
-	owners        map[scene.ObjectID]scene.ObjectID
-	fireCooldown  float64
-	nextMuzzle    int
-	mouseFlight   bool
-	mouseNeutralX int
-	mouseNeutralY int
-	starField     *starfield.Field
+	objects        []scene.Object
+	pipeline       render.Pipeline
+	initialPose    kinematics.Pose
+	autoMotion     kinematics.Motion
+	manualConfig   control.ManualConfig
+	mode           flightMode
+	paused         bool
+	viewCamera     *camera.Camera
+	nextObjectID   scene.ObjectID
+	projectiles    map[scene.ObjectID]float64
+	owners         map[scene.ObjectID]scene.ObjectID
+	fireCooldown   float64
+	nextMuzzlePair int
+	laserBeamTime  float64
+	laserBeamPair  int
+	mouseFlight    bool
+	mouseNeutralX  int
+	mouseNeutralY  int
+	starField      *starfield.Field
 }
 
 func New() *Game {
@@ -126,8 +131,16 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
 		g.toggleMouseFlight()
 	}
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight) && g.viewCamera.Mode == camera.Cockpit {
+		g.mode = modeManual
+		if g.mouseFlight {
+			g.mouseFlight = false
+			ebiten.SetCursorMode(ebiten.CursorModeVisible)
+		}
+	}
 
 	g.updateZoom()
+	g.laserBeamTime = max(0, g.laserBeamTime-tickSeconds)
 	if g.mode == modeManual {
 		if fighter := g.objectByID(fighterID); fighter != nil {
 			fighter.Motion = control.Apply(fighter.Motion, g.readIntent(), g.manualConfig, tickSeconds)
@@ -162,16 +175,31 @@ func (g *Game) fireLaser() {
 	if fighter == nil {
 		return
 	}
-	muzzles := [...]string{"muzzle-left", "muzzle-right"}
-	spawn, err := combat.FireLaser(*fighter, g.nextObjectID, muzzles[g.nextMuzzle])
-	if err != nil {
-		return
+	muzzlePairs := [...][2]string{
+		{"muzzle-upper-left", "muzzle-upper-right"},
+		{"muzzle-lower-left", "muzzle-lower-right"},
 	}
-	g.nextObjectID++
-	g.nextMuzzle = (g.nextMuzzle + 1) % len(muzzles)
-	g.objects = append(g.objects, spawn.Object)
-	g.projectiles[spawn.Object.ID] = spawn.Lifetime
-	g.owners[spawn.Object.ID] = spawn.OwnerID
+	pair := g.nextMuzzlePair
+	aimTarget, aimed := g.cockpitAimTarget()
+	for _, muzzle := range muzzlePairs[pair] {
+		var spawn combat.Spawn
+		var err error
+		if aimed {
+			spawn, err = combat.FireLaserToward(*fighter, g.nextObjectID, muzzle, aimTarget)
+		} else {
+			spawn, err = combat.FireLaser(*fighter, g.nextObjectID, muzzle)
+		}
+		if err != nil {
+			return
+		}
+		g.nextObjectID++
+		g.objects = append(g.objects, spawn.Object)
+		g.projectiles[spawn.Object.ID] = spawn.Lifetime
+		g.owners[spawn.Object.ID] = spawn.OwnerID
+	}
+	g.laserBeamPair = pair
+	g.laserBeamTime = laserBeamTime
+	g.nextMuzzlePair = (pair + 1) % len(muzzlePairs)
 	g.fireCooldown = fireInterval
 }
 
@@ -224,13 +252,210 @@ func (g *Game) readIntent() control.Intent {
 		Roll:     keyAxis(ebiten.KeyQ, ebiten.KeyE),
 		Stop:     ebiten.IsKeyPressed(ebiten.KeySpace),
 	}
-	if g.mouseFlight {
+	if g.viewCamera.Mode == camera.Cockpit && ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
+		mouseX, mouseY := ebiten.CursorPosition()
+		intent.Yaw, intent.Pitch = mouseFlightAxes(mouseX, mouseY, ScreenWidth/2, ScreenHeight/2)
+	} else if g.mouseFlight {
 		mouseX, mouseY := ebiten.CursorPosition()
 		mouseYaw, mousePitch := mouseFlightAxes(mouseX, mouseY, g.mouseNeutralX, g.mouseNeutralY)
 		intent.Yaw += mouseYaw
 		intent.Pitch += mousePitch
 	}
 	return intent
+}
+
+func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
+	cyan := color.RGBA{R: 40, G: 255, B: 224, A: 255}
+	amber := color.RGBA{R: 255, G: 176, B: 32, A: 255}
+	red := color.RGBA{R: 255, G: 36, B: 28, A: 255}
+	blue := color.RGBA{R: 32, G: 80, B: 255, A: 255}
+	cx, cy, targetInRange := g.cockpitTarget()
+	targetColor := color.Color(cyan)
+	if !targetInRange {
+		targetColor = amber
+	}
+
+	// Four small arrows point inward while leaving the exact aim point clear.
+	drawCockpitArrow(screen, cx-31, cy-23, cx-10, cy-7, targetColor)
+	drawCockpitArrow(screen, cx+31, cy-23, cx+10, cy-7, targetColor)
+	drawCockpitArrow(screen, cx-31, cy+23, cx-10, cy+7, targetColor)
+	drawCockpitArrow(screen, cx+31, cy+23, cx+10, cy+7, targetColor)
+
+	centerX, centerY := float32(ScreenWidth/2), float32(ScreenHeight/2)
+	vector.StrokeLine(screen, centerX-4, centerY, centerX+4, centerY, 1, cyan, true)
+	vector.StrokeLine(screen, centerX, centerY-4, centerX, centerY+4, 1, cyan, true)
+	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
+		vector.StrokeLine(screen, centerX, centerY, cx, cy, 1, color.RGBA{R: 24, G: 112, B: 112, A: 180}, true)
+	}
+
+	// Perspective wireframe cannons: red recessed housings surround three blue
+	// barrel rails, echoing the layered vector assemblies of the arcade cockpit.
+	cannons := [...][2]float32{{72, 152}, {888, 152}, {82, 432}, {878, 432}}
+	var muzzleTops [len(cannons)][2]float32
+	for index, cannon := range cannons {
+		drawCockpitCannon(screen, cannon[0], cannon[1], cx, cy, red, blue)
+		muzzleTops[index] = cockpitCannonMuzzleTop(cannon[0], cannon[1], cx, cy)
+	}
+
+	if g.laserBeamTime <= 0 {
+		return
+	}
+	beamColor := color.RGBA{R: 80, G: 255, B: 240, A: uint8(255 * g.laserBeamTime / laserBeamTime)}
+	start := 0
+	if g.laserBeamPair == 1 {
+		start = 2
+	}
+	vector.StrokeLine(screen, muzzleTops[start][0], muzzleTops[start][1], cx-5, cy, 3, beamColor, true)
+	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
+}
+
+func (g *Game) cockpitTarget() (float32, float32, bool) {
+	if g.mouseFlight {
+		return ScreenWidth / 2, ScreenHeight / 2, true
+	}
+	x, y := ebiten.CursorPosition()
+	return clampCockpitTarget(float32(x), float32(y))
+}
+
+func clampCockpitTarget(x, y float32) (float32, float32, bool) {
+	cx, cy := float32(ScreenWidth/2), float32(ScreenHeight/2)
+	dx, dy := x-cx, y-cy
+	distance := float32(math.Hypot(float64(dx), float64(dy)))
+	if distance <= aimRadius || distance == 0 {
+		return x, y, true
+	}
+	scale := float32(aimRadius) / distance
+	return cx + dx*scale, cy + dy*scale, false
+}
+
+func (g *Game) cockpitAimTarget() (math3d.Vec3, bool) {
+	if g.viewCamera.Mode != camera.Cockpit {
+		return math3d.Vec3{}, false
+	}
+	x, y, _ := g.cockpitTarget()
+	ray, ok := g.pipeline.ScreenRay(float64(x), float64(y))
+	if !ok {
+		return math3d.Vec3{}, false
+	}
+	return ray.Origin.Add(ray.Direction.Scale(aimConvergence)), true
+}
+
+func cockpitCannonMuzzleTop(x, y, targetX, targetY float32) [2]float32 {
+	dx, dy := targetX-x, targetY-y
+	length := float32(math.Hypot(float64(dx), float64(dy)))
+	if length == 0 {
+		return [2]float32{x, y}
+	}
+	forwardX, forwardY := dx/length, dy/length
+	sideX, sideY := -forwardY, forwardX
+	side := float32(3)
+	if sideY > 0 {
+		side = -side
+	}
+	return [2]float32{
+		x + forwardX*28 + sideX*side,
+		y + forwardY*28 + sideY*side,
+	}
+}
+
+func drawCockpitCannon(screen *ebiten.Image, x, y, targetX, targetY float32, housingColor, barrelColor color.Color) {
+	dx, dy := targetX-x, targetY-y
+	length := float32(math.Hypot(float64(dx), float64(dy)))
+	if length == 0 {
+		return
+	}
+	forwardX, forwardY := dx/length, dy/length
+	sideX, sideY := -forwardY, forwardX
+	point := func(forward, side float32) [2]float32 {
+		return [2]float32{
+			x + forwardX*forward + sideX*side,
+			y + forwardY*forward + sideY*side,
+		}
+	}
+
+	// The near and far housing profiles form an open, concave red shroud.
+	near := [...][2]float32{
+		point(-18, -15),
+		point(15, -11),
+		point(7, -4),
+		point(7, 4),
+		point(15, 11),
+		point(-18, 15),
+		point(-8, 5),
+		point(-8, -5),
+	}
+	localProfile := [...][2]float32{
+		{-18, -15}, {15, -11}, {7, -4}, {7, 4},
+		{15, 11}, {-18, 15}, {-8, 5}, {-8, -5},
+	}
+	var far [len(localProfile)][2]float32
+	for index, local := range localProfile {
+		far[index] = point(local[0]-7, local[1]+3)
+	}
+	drawClosedWireShape(screen, far[:], 2, color.RGBA{R: 128, G: 18, B: 28, A: 255})
+	drawClosedWireShape(screen, near[:], 3, housingColor)
+	for _, index := range []int{0, 1, 4, 5} {
+		vector.StrokeLine(
+			screen,
+			near[index][0], near[index][1], far[index][0], far[index][1],
+			2, housingColor, true,
+		)
+	}
+
+	// Three converging rails make the emitter read as a barrel with depth.
+	for _, offset := range []float32{-4, 0, 4} {
+		outer := point(-25, offset*1.35)
+		inner := point(28, offset*0.65)
+		vector.StrokeLine(
+			screen,
+			outer[0], outer[1], inner[0], inner[1],
+			3, barrelColor, true,
+		)
+	}
+	emitterA := point(28, -3)
+	emitterB := point(28, 3)
+	vector.StrokeLine(screen, emitterA[0], emitterA[1], emitterB[0], emitterB[1], 2, barrelColor, true)
+}
+
+func drawClosedWireShape(screen *ebiten.Image, points [][2]float32, width float32, shapeColor color.Color) {
+	for index := range points {
+		next := (index + 1) % len(points)
+		vector.StrokeLine(
+			screen,
+			points[index][0], points[index][1],
+			points[next][0], points[next][1],
+			width, shapeColor, true,
+		)
+	}
+}
+
+func drawCockpitArrow(screen *ebiten.Image, fromX, fromY, tipX, tipY float32, arrowColor color.Color) {
+	dx, dy := tipX-fromX, tipY-fromY
+	length := float32(math.Hypot(float64(dx), float64(dy)))
+	if length == 0 {
+		return
+	}
+	unitX, unitY := dx/length, dy/length
+	perpX, perpY := -unitY, unitX
+	const (
+		dartHalfWidth = float32(6)
+		notchDepth    = float32(8)
+	)
+	points := [...][2]float32{
+		{tipX, tipY},
+		{fromX + perpX*dartHalfWidth, fromY + perpY*dartHalfWidth},
+		{fromX + unitX*notchDepth, fromY + unitY*notchDepth},
+		{fromX - perpX*dartHalfWidth, fromY - perpY*dartHalfWidth},
+	}
+	for index := range points {
+		next := (index + 1) % len(points)
+		vector.StrokeLine(
+			screen,
+			points[index][0], points[index][1],
+			points[next][0], points[next][1],
+			2, arrowColor, true,
+		)
+	}
 }
 
 func (g *Game) toggleMouseFlight() {
@@ -293,6 +518,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 	}
+	if g.viewCamera.Mode == camera.Cockpit {
+		g.drawCockpitOverlay(screen)
+	}
 	if g.mouseFlight {
 		g.drawMouseReticle(screen)
 	}
@@ -328,12 +556,17 @@ func (g *Game) hudText() string {
 	if g.mouseFlight {
 		mouseStatus = "On"
 	}
+	pointerMode := "Target"
+	if g.viewCamera.Mode == camera.Cockpit && ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
+		pointerMode = "Steer"
+	}
 	return fmt.Sprintf(
-		"Mode: %s | %s | View: %s | Mouse: %s | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
+		"Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
 			"W/S throttle  Mouse/arrows yaw/pitch  Q/E roll  Space stop\nF/left-click fire  G mouse  M mode  V view  P pause  R reset  +/- or wheel zoom",
 		g.mode,
 		status,
 		g.viewCamera.Mode,
+		pointerMode,
 		mouseStatus,
 		len(g.projectiles),
 		motion.Speed,

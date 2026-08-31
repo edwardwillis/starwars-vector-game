@@ -20,6 +20,12 @@ type Point struct {
 	Depth float64
 }
 
+// Ray describes a world-space half-line produced by a screen-space aim point.
+type Ray struct {
+	Origin    math3d.Vec3
+	Direction math3d.Vec3
+}
+
 // Culler can remove edges after world and camera transformations. A nil Culler
 // keeps every edge, matching the original arcade-like wireframe appearance.
 type Culler interface {
@@ -110,6 +116,35 @@ func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
 		Y:     (1 - projected.Y) * 0.5 * float64(p.Height),
 		Depth: -cameraPoint.Z,
 	}, true
+}
+
+// ScreenRay converts a logical screen position into a world-space camera ray.
+// View must be a rigid camera transform and Projection a perspective matrix.
+func (p Pipeline) ScreenRay(x, y float64) (Ray, bool) {
+	if p.Width <= 0 || p.Height <= 0 || p.Projection[0][0] == 0 || p.Projection[1][1] == 0 {
+		return Ray{}, false
+	}
+	ndcX := 2*x/float64(p.Width) - 1
+	ndcY := 1 - 2*y/float64(p.Height)
+	cameraDirection := math3d.Vec3{
+		X: ndcX / p.Projection[0][0],
+		Y: ndcY / p.Projection[1][1],
+		Z: -1,
+	}.Normalize()
+
+	// A rigid view's inverse rotation is its upper-left transpose.
+	worldDirection := math3d.Vec3{
+		X: p.View[0][0]*cameraDirection.X + p.View[1][0]*cameraDirection.Y + p.View[2][0]*cameraDirection.Z,
+		Y: p.View[0][1]*cameraDirection.X + p.View[1][1]*cameraDirection.Y + p.View[2][1]*cameraDirection.Z,
+		Z: p.View[0][2]*cameraDirection.X + p.View[1][2]*cameraDirection.Y + p.View[2][2]*cameraDirection.Z,
+	}.Normalize()
+	translation := math3d.Vec3{X: p.View[0][3], Y: p.View[1][3], Z: p.View[2][3]}
+	origin := math3d.Vec3{
+		X: -(p.View[0][0]*translation.X + p.View[1][0]*translation.Y + p.View[2][0]*translation.Z),
+		Y: -(p.View[0][1]*translation.X + p.View[1][1]*translation.Y + p.View[2][1]*translation.Z),
+		Z: -(p.View[0][2]*translation.X + p.View[1][2]*translation.Y + p.View[2][2]*translation.Z),
+	}
+	return Ray{Origin: origin, Direction: worldDirection}, true
 }
 
 func clipNear(a, b math3d.Vec3, near float64) (math3d.Vec3, math3d.Vec3, bool) {

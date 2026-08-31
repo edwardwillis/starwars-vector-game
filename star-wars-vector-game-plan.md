@@ -344,13 +344,14 @@ controllers remain the baseline for tests and offline play.
 10. Object catalog — fireable laser bolt with muzzle anchors, spin, and lifetime
 11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
 12. Starfield — deterministic world points, wrapping, projection, motion reference
-13. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
-14. Death Star — reusable surface modules, trench, towers, targeting reticle
-15. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
-16. Simulation extraction — stable IDs and renderer-independent world updates
-17. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
-18. Controller interface — intents, registry, static and manual strategies
-19. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
+13. Cockpit targeting — pointer aim, right-button steering, firing cone, converging bolts
+14. Dogfight — enemy movement, spawning, lifetime, simple AI, collisions
+15. Death Star — reusable surface modules, trench, towers, targeting reticle
+16. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
+17. Simulation extraction — stable IDs and renderer-independent world updates
+18. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
+19. Controller interface — intents, registry, static and manual strategies
+20. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
 20. Multiplayer client — control input, interpolation, ownership, view switching
 21. External agent adapter — asynchronous AI/MCP decisions and safe fallback
 22. Score, game states, sound

@@ -10,9 +10,8 @@ pipeline.
 
 ## Current milestone
 
-Step 12: a deterministic 500-point world-space starfield that wraps around the
-fighter and provides visible motion and direction reference in every camera
-mode.
+Step 13: cockpit mouse targeting with right-button flight steering, a bounded
+firing cone, and paired laser bolts that converge on the selected aim point.
 
 ## Prerequisites
 
@@ -47,8 +46,9 @@ moving along a gentle curved path while yawing and rolling.
 - Arrow keys: yaw and pitch
 - `Q` / `E`: roll
 - `Space`: stop
-- `F`: fire alternating laser bolts
-- Left mouse button: fire while using mouse steering
+- Move the mouse in cockpit view to aim the targeting crosshairs
+- Hold right mouse in cockpit view to steer toward the pointer
+- `F` or left mouse: fire alternating paired laser bolts toward the crosshairs
 - `P`: pause or resume simulation
 - `R`: reset fighter pose and motion
 - `+` / `-` or mouse wheel: camera zoom

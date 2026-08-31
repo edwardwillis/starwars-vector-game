@@ -74,3 +74,22 @@ func TestProjectPoint(t *testing.T) {
 		t.Fatal("ProjectPoint accepted a point outside the screen")
 	}
 }
+
+func TestScreenRayUsesCameraOriginAndScreenDirection(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.View = math3d.Translation(-2, -3, -4)
+	ray, ok := pipeline.ScreenRay(400, 300)
+	if !ok {
+		t.Fatal("ScreenRay rejected the screen center")
+	}
+	if ray.Origin != (math3d.Vec3{X: 2, Y: 3, Z: 4}) {
+		t.Fatalf("ray origin is %+v, want camera position", ray.Origin)
+	}
+	if ray.Direction.Sub(math3d.Vec3{Z: -1}).Length() > 1e-9 {
+		t.Fatalf("center ray direction is %+v, want -Z", ray.Direction)
+	}
+	right, _ := pipeline.ScreenRay(800, 300)
+	if right.Direction.X <= 0 || right.Direction.Z >= 0 {
+		t.Fatalf("right-edge ray has unexpected direction %+v", right.Direction)
+	}
+}
