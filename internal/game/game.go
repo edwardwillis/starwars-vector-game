@@ -49,6 +49,7 @@ const (
 	autonomousAimError        = 3.2
 	maxShieldStrength         = 8
 	shieldRechargeInterval    = 20.0
+	controlsDisplayDuration   = 12.0
 )
 
 var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
@@ -87,6 +88,7 @@ type Game struct {
 	manualConfig             control.ManualConfig
 	mode                     flightMode
 	paused                   bool
+	started                  bool
 	showHUD                  bool
 	viewCamera               *camera.Camera
 	nextObjectID             scene.ObjectID
@@ -114,6 +116,7 @@ type Game struct {
 	shieldStrength           int
 	shieldQuietTime          float64
 	destructionViewRemaining float64
+	controlsRemaining        float64
 }
 
 func New() *Game {
@@ -146,27 +149,42 @@ func New() *Game {
 	viewCamera := camera.New(fighterID)
 	viewCamera.Mode = camera.Cockpit
 	game := &Game{
-		pipeline:        render.NewPipeline(ScreenWidth, ScreenHeight, math.Pi/3, 0.1, 100),
-		objects:         objects,
-		initialPose:     initialPose,
-		autoMotion:      autoMotion,
-		manualConfig:    manualConfig,
-		viewCamera:      viewCamera,
-		nextObjectID:    scene.ObjectID(autonomousFighters + 2),
-		projectiles:     make(map[scene.ObjectID]float64),
-		owners:          make(map[scene.ObjectID]scene.ObjectID),
-		starField:       starfield.New(starCount, starSeed, starRadius, initialPose.Position),
-		controllers:     controllers,
-		debris:          make(map[scene.ObjectID]destructionTransient),
-		respawnSequence: autonomousFighters,
-		shieldStrength:  maxShieldStrength,
-		showHUD:         false,
+		pipeline:          render.NewPipeline(ScreenWidth, ScreenHeight, math.Pi/3, 0.1, 100),
+		objects:           objects,
+		initialPose:       initialPose,
+		autoMotion:        autoMotion,
+		manualConfig:      manualConfig,
+		viewCamera:        viewCamera,
+		nextObjectID:      scene.ObjectID(autonomousFighters + 2),
+		projectiles:       make(map[scene.ObjectID]float64),
+		owners:            make(map[scene.ObjectID]scene.ObjectID),
+		starField:         starfield.New(starCount, starSeed, starRadius, initialPose.Position),
+		controllers:       controllers,
+		debris:            make(map[scene.ObjectID]destructionTransient),
+		respawnSequence:   autonomousFighters,
+		shieldStrength:    maxShieldStrength,
+		started:           false,
+		showHUD:           false,
+		controlsRemaining: controlsDisplayDuration,
 	}
 	game.pipeline.View = game.viewCamera.View(game.objects)
 	return game
 }
 
 func (g *Game) Update() error {
+	if !g.started {
+		if inpututil.IsKeyJustPressed(ebiten.KeyS) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyF) ||
+			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			g.started = true
+			g.controlsRemaining = 0
+		}
+		g.pipeline.View = g.viewCamera.View(g.objects)
+		return nil
+	}
+	if g.controlsRemaining > 0 {
+		g.controlsRemaining = max(0, g.controlsRemaining-tickSeconds)
+	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		if g.mode == modeAutopilot {
 			g.mode = modeManual
@@ -448,6 +466,7 @@ func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object,
 		}
 		if id == fighterID {
 			g.playerDestroyed = true
+			g.controlsRemaining = controlsDisplayDuration
 			g.playerViewMode = g.viewCamera.Mode
 			g.viewCamera.Mode = camera.Fixed
 			if g.mouseFlight {
@@ -930,6 +949,7 @@ func (g *Game) resetFighter() {
 		return
 	}
 	fighter.Pose = g.initialPose
+	g.controlsRemaining = 0
 	g.destructionViewRemaining = 0
 	g.shieldStrength = maxShieldStrength
 	g.shieldQuietTime = 0
@@ -975,6 +995,7 @@ func (g *Game) respawnPlayer() {
 	}
 	g.objects = append(g.objects, fighter)
 	g.playerDestroyed = false
+	g.controlsRemaining = 0
 	g.destructionViewRemaining = 0
 	g.shieldStrength = maxShieldStrength
 	g.shieldQuietTime = 0
@@ -1103,7 +1124,7 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
 	const (
 		topY       = float32(8)
-		halfWidth  = float32(60)
+		halfWidth  = float32(68)
 		canopyDrop = float32(34)
 	)
 	cx := float32(ScreenWidth / 2)
@@ -1139,15 +1160,27 @@ func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
 }
 
 func drawVectorShieldWord(screen *ebiten.Image, centerX, topY float32, lineColor color.Color) {
-	const (
-		glyphWidth = float32(8)
-		glyphGap   = float32(3)
-	)
-	word := "SHIELD"
-	totalWidth := float32(len(word))*glyphWidth + float32(len(word)-1)*glyphGap
-	startX := centerX - totalWidth/2
-	for index, letter := range word {
-		drawVectorGlyph(screen, startX+float32(index)*(glyphWidth+glyphGap), topY, letter, lineColor)
+	drawVectorText(screen, centerX, topY, "SHIELD", lineColor)
+}
+
+func drawVectorText(screen *ebiten.Image, centerX, topY float32, text string, lineColor color.Color) {
+	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
+	total := float32(0)
+	for _, letter := range text {
+		if letter == ' ' {
+			total += spaceWidth + glyphGap
+		} else {
+			total += glyphWidth + glyphGap
+		}
+	}
+	left := centerX - (total-glyphGap)/2
+	for _, letter := range text {
+		if letter == ' ' {
+			left += spaceWidth + glyphGap
+			continue
+		}
+		drawVectorGlyph(screen, left, topY, letter, lineColor)
+		left += glyphWidth + glyphGap
 	}
 }
 
@@ -1158,8 +1191,17 @@ func drawVectorGlyph(screen *ebiten.Image, left, top float32, letter rune, lineC
 		'H': {{left, top, left, bottom}, {right, top, right, bottom}, {left, middle, right, middle}},
 		'I': {{left, top, right, top}, {left + 4, top, left + 4, bottom}, {left, bottom, right, bottom}},
 		'E': {{left, top, right, top}, {left, top, left, bottom}, {left, middle, right, middle}, {left, bottom, right, bottom}},
+		'F': {{left, top, right, top}, {left, top, left, bottom}, {left, middle, right, middle}},
 		'L': {{left, top, left, bottom}, {left, bottom, right, bottom}},
 		'D': {{left, top, right - 2, top}, {left, top, left, bottom}, {right - 2, top, right, middle}, {right - 2, middle, right, bottom}, {left, bottom, right - 2, bottom}},
+		'P': {{left, top, right - 2, top}, {left, top, left, bottom}, {right - 2, top, right, middle}, {left, middle, right - 2, middle}},
+		'R': {{left, top, right - 2, top}, {left, top, left, bottom}, {right - 2, top, right, middle}, {left, middle, right - 2, middle}, {left + 1, middle, right, bottom}},
+		'T': {{left, top, right, top}, {left + 4, top, left + 4, bottom}},
+		'O': {{left, top, right, top}, {left, top, left, bottom}, {right, top, right, bottom}, {left, bottom, right, bottom}},
+		'A': {{left, bottom, left, top + 2}, {left, top + 2, left + 4, top}, {left + 4, top, right, top + 2}, {right, top + 2, right, bottom}, {left, middle, right, middle}},
+		'U': {{left, top, left, bottom}, {right, top, right, bottom}, {left, bottom, right, bottom}},
+		'Y': {{left, top, left + 4, middle}, {right, top, left + 4, middle}, {left + 4, middle, left + 4, bottom}},
+		'!': {{left + 4, top, left + 4, bottom - 3}, {left + 4, bottom, left + 4, bottom}},
 	}
 	for _, segment := range segments[letter] {
 		vector.StrokeLine(screen, segment[0], segment[1], segment[2], segment[3], 2, lineColor, true)
@@ -1168,8 +1210,8 @@ func drawVectorGlyph(screen *ebiten.Image, left, top float32, letter rune, lineC
 
 func drawVectorShieldNumber(screen *ebiten.Image, centerX, topY float32, value int, lineColor color.Color) {
 	if value >= 10 {
-		drawVectorShieldDigit(screen, centerX-8, topY, value/10, lineColor)
-		drawVectorShieldDigit(screen, centerX+8, topY, value%10, lineColor)
+		drawVectorShieldDigit(screen, centerX-6, topY, value/10, lineColor)
+		drawVectorShieldDigit(screen, centerX+6, topY, value%10, lineColor)
 		return
 	}
 	drawVectorShieldDigit(screen, centerX, topY, value, lineColor)
@@ -1184,21 +1226,21 @@ func drawVectorShieldDigit(screen *ebiten.Image, centerX, topY float32, value in
 		value = 9
 	}
 	const (
-		width  = float32(12)
-		height = float32(18)
+		width  = float32(9)
+		height = float32(14)
 	)
 	left := centerX - width/2
 	right := centerX + width/2
 	middle := topY + height/2
 	bottom := topY + height
 	segments := [...][4]float32{
-		{left + 2, topY, right - 2, topY},
-		{right, topY + 2, right, middle - 2},
-		{right, middle + 2, right, bottom - 2},
-		{left + 2, bottom, right - 2, bottom},
-		{left, middle + 2, left, bottom - 2},
-		{left, topY + 2, left, middle - 2},
-		{left + 2, middle, right - 2, middle},
+		{left + 1.5, topY, right - 1.5, topY},
+		{right, topY + 1.5, right, middle - 1.5},
+		{right, middle + 1.5, right, bottom - 1.5},
+		{left + 1.5, bottom, right - 1.5, bottom},
+		{left, middle + 1.5, left, bottom - 1.5},
+		{left, topY + 1.5, left, middle - 1.5},
+		{left + 1.5, middle, right - 1.5, middle},
 	}
 	digitSegments := [...]uint8{0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f}
 	mask := digitSegments[value]
@@ -1209,7 +1251,7 @@ func drawVectorShieldDigit(screen *ebiten.Image, centerX, topY float32, value in
 		if mask&(1<<index) == 0 {
 			continue
 		}
-		vector.StrokeLine(screen, segment[0], segment[1], segment[2], segment[3], 2, lineColor, true)
+		vector.StrokeLine(screen, segment[0], segment[1], segment[2], segment[3], 1.5, lineColor, true)
 	}
 }
 
@@ -1543,9 +1585,29 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.mouseFlight {
 		g.drawMouseReticle(screen)
 	}
+	if g.playerDestroyed {
+		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
+		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
+	}
+	if g.controlsRemaining > 0 {
+		ebitenutil.DebugPrintAt(screen, controlsText(!g.playerDestroyed), 16, 16)
+	}
 	if g.showHUD {
 		ebitenutil.DebugPrint(screen, g.hudText())
 	}
+}
+
+func controlsText(startPrompt bool) string {
+	text := "CONTROLS\n" +
+		"W/S  throttle    Arrows  steer\n" +
+		"Q/E  roll        Mouse  aim\n" +
+		"Right mouse button  steer fighter\n" +
+		"F / left mouse  fire    G  mouse flight\n" +
+		"V  view   Shift  follow fighter   Space  HUD\n\n"
+	if startPrompt {
+		return text + "PRESS S OR FIRE TO START"
+	}
+	return text + "PRESS R TO RESTART"
 }
 
 func (g *Game) drawStarfield(screen *ebiten.Image) {

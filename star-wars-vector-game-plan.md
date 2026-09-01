@@ -324,6 +324,69 @@ against the object's current world transform. View selection remains separate
 from object ownership and input, allowing a user to observe one object while
 controlling another.
 
+## Cut Scenes and Orchestrated Set Pieces
+
+The game will support deterministic cut scenes for movie-style introductions,
+mission briefings, level transitions, victory sequences, and other authored set
+pieces. A cut scene places predefined catalog objects, text, and camera
+viewpoints on a timeline and assigns them scripted paths or actions. It uses the
+normal object catalog and rendering pipeline, so fighters, laser bolts, Death
+Star geometry, starfields, themes, and realism settings retain their established
+appearance instead of requiring a separate animation system.
+
+A cut-scene definition contains:
+
+- a stable name, version, duration, and deterministic seed;
+- the catalog objects to spawn and their initial poses and styles;
+- position and orientation tracks, with explicit interpolation and easing;
+- timed actions such as firing, formation changes, text cues, and object removal;
+- a fixed world viewpoint or timed camera track with optional cuts between
+  named object or world anchors;
+- vector text cards, captions, placement, color, and display intervals;
+- optional audio and transition cues when sound is implemented; and
+- completion and skip behavior, including the next game state or level.
+
+```go
+type CutScene struct {
+    Name       string
+    Version    int
+    Duration   float64
+    Seed       uint64
+    Actors     []ActorTrack
+    Cameras    []CameraCue
+    Text       []TextCue
+    Events     []TimedEvent
+    Transition Transition
+}
+```
+
+Tracks are evaluated from absolute cut-scene time rather than accumulated frame
+deltas, preventing drift and making playback reproducible in tests, replays,
+and synchronized multiplayer clients. The fixed simulation tick advances the
+timeline, while rendering may interpolate between evaluated poses. Camera and
+actor interpolation must specify its coordinate space, easing rule, and behavior
+at track boundaries.
+
+During a cut scene, orchestration temporarily supplies authoritative actor poses
+or scripted decisions. Normal controllers do not compete with those tracks.
+Actors can be marked cinematic-only or handed into the live simulation at the
+end of a transition with an explicit final pose, motion, controller, health, and
+ownership state. Conversely, a transition can capture selected live objects as
+actors without mutating unrelated world state.
+
+Cut scenes are registered by stable identifier and selected by the active game
+or level profile. Definitions should be data-driven once the schema stabilizes,
+allowing contributors to create introductions and transitions without changing
+the game loop. Initial definitions may use validated Go values; versioned JSON
+or YAML loading follows the same policy as game profiles.
+
+Playback includes a clear skip input. Skipping applies the declared transition
+atomically rather than fast-forwarding every visual event. Interactive gameplay
+input, collision damage, autonomous firing, and respawn processing are disabled
+unless a cut-scene definition explicitly enables them. Text and camera framing
+must respect the logical viewport and remain independent of operating-system
+window size.
+
 ## Live Simulation and Multiplayer Server
 
 A later networked mode will use an authoritative Go server that owns the live
@@ -351,6 +414,154 @@ The simulation core should remain independent of Ebitengine and networking so
 the same deterministic update logic can run on the server, in local single-player
 mode, and in tests. The current local game remains the first client and can use
 an in-process simulation before a network transport is introduced.
+
+## Customization and Extension Architecture
+
+The next architectural milestone is to turn the existing extension hooks into
+a coherent customization API before adding major new object classes, network
+transport, or external agents. Contributors should be able to add a behavior,
+object definition, rendering profile, or complete game profile without editing
+the central game loop. Built-in features use the same registration and
+configuration paths offered to contributors so extension points remain tested
+by normal gameplay.
+
+Customization is divided into five stable layers:
+
+| Layer | Responsibility | Primary extension mechanism |
+|---|---|---|
+| Game profile | Selects and tunes the overall experience | Named, versioned, validated configuration |
+| Controller | Decides how one object behaves | Strategy factory registered by stable name |
+| Object catalog | Defines appearance, anchors, capabilities, and destruction | Object-definition factory registered by stable name |
+| Rendering | Selects optional visibility and presentation processing | Named pipeline profile assembled from rendering stages |
+| Cinematic | Orchestrates actors, cameras, text, and transitions | Named cut-scene definition with validated timeline tracks |
+
+### Unified Game Profiles
+
+Values that currently live in game constants and assembly functions will move
+into one immutable root configuration. This includes manual flight limits,
+world-motion scale, swarm count and placement, controller selection, pursuit
+tuning, aim error, weapon behavior, shields, collision and respawn rules,
+difficulty, and the selected rendering profile.
+
+```go
+type GameProfile struct {
+    Name       string
+    Version    int
+    Simulation SimulationConfig
+    Player     PlayerConfig
+    Swarm      SwarmConfig
+    Combat     CombatConfig
+    Difficulty DifficultyConfig
+    Rendering  string
+    Cinematics CinematicConfig
+}
+```
+
+Profiles are validated before a session starts, treated as immutable during a
+run unless a setting is explicitly runtime-switchable, and recorded with the
+session seed for replay and multiplayer agreement. Initial built-in profiles
+remain Go values for type safety and straightforward testing. Versioned JSON or
+YAML loading can be added after the schema stabilizes. A custom profile should
+be sufficient to change game tempo and feature selection without modifying
+`game.go`.
+
+Difficulty presets are curated overlays on a complete game profile rather than
+a second independent configuration system. Applying `Cadet`, `Pilot`, `Ace`, or
+`Nightmare` produces a fully resolved and validated profile before the world is
+created.
+
+### Registries and Factories
+
+Controllers, catalog objects, rendering profiles, and cut scenes are selected
+through registries keyed by stable, namespaced identifiers such as
+`builtin/pursuit`, `builtin/twin-panel-fighter`, `builtin/arcade`, and
+`builtin/opening-flyby`. Registry entries contain factories or immutable
+definitions plus configuration validation, not shared mutable instances.
+Per-object controller state and pseudo-random state remain isolated on the
+object instance.
+
+```go
+type ControllerFactory func(seed uint64, config Config) (Controller, error)
+
+type ObjectDefinition struct {
+    Create            ObjectFactory
+    CreateFragments   FragmentFactory
+    DefaultController string
+}
+```
+
+An object definition owns the knowledge needed to construct its intact form,
+destruction components, and final polygon shards. The simulation asks the
+definition for fragments instead of calling fighter-specific catalog functions.
+This permits a new spacecraft or Death Star component to participate in the
+generic spawn, collision, rendering, and destruction systems without a type
+switch in the game loop.
+
+Catalog styling will be parameterized independently from geometry. A style or
+theme selects colors, line widths, and faction presentation while the same
+model, anchors, collision properties, and destruction topology are reused.
+
+### Composable Rendering Profiles
+
+The current edge-level `Culler` is an interim hook. It can remove complete
+edges, but it cannot implement partial hidden-line resolution, scene-wide
+occlusion, or depth cues. Rendering will evolve toward ordered stages with a
+stable input/output contract. Mandatory correctness stages such as camera
+transformation, near-plane clipping, projection, and screen clipping always
+run. Optional stages are selected by a named profile.
+
+```go
+type RenderStage interface {
+    Apply(RenderContext, Geometry) Geometry
+}
+
+type RenderingProfile struct {
+    Name   string
+    Stages []RenderStageFactory
+}
+```
+
+The realism slider selects the built-in cumulative profiles described above;
+it does not manipulate renderer internals directly. Contributors may register
+alternative visibility resolvers or presentation stages such as vector glow,
+provided they preserve the stage contract and declare whether they operate per
+object or across the complete scene.
+
+### Simulation Boundary
+
+The Ebitengine `Game` will become an adapter for input, audio, window lifecycle,
+and drawing. Renderer-independent world state and fixed-tick rules move into a
+simulation package that owns objects, controller decisions, integration,
+weapons, collisions, damage, destruction, and spawning. This is required both
+for modular customization and for the later authoritative server.
+
+The simulation depends on controller and catalog interfaces, never on concrete
+built-in implementations. Rendering consumes read-only world snapshots and
+does not own gameplay state. User input, local rule-driven controllers, and
+remote agents all produce the same validated decision type.
+
+### Public and External Extensions
+
+Packages under Go's `internal/` convention are suitable while APIs are still
+changing and allow contributors working inside this repository to add built-in
+extensions. Once the controller, configuration, catalog, and snapshot contracts
+stabilize, the minimal extension-facing types will move to importable packages
+so separately maintained Go modules can compile against them.
+
+The first plugin mechanism will use normal Go imports and compile-time
+registration. Go's native dynamic-plugin mechanism is not the default because
+of its platform and exact-build compatibility constraints. Runtime and
+language-independent extensions use the later versioned external-agent
+protocol, including MCP adapters, and remain out of process behind simulation
+validation, timeouts, and deterministic fallbacks.
+
+Every extension point requires:
+
+- a stable identifier and validated configuration;
+- deterministic behavior for a fixed seed where applicable;
+- focused contract tests plus at least one registry/assembly test;
+- no direct mutation of authoritative state outside the simulation API; and
+- documented compatibility and fallback behavior.
 
 ## Pluggable Intelligence and Control
 
@@ -406,16 +617,27 @@ be validated at load time. A later settings screen can select a profile before
 starting a game; the authoritative server will reject mismatched profiles in a
 multiplayer session.
 
-The core boundary is intentionally small:
+The core controller boundary is intentionally small. The current
+`Strategy.Step(Context) Motion` and follow-up `Attacker.AttackIntent()` hooks are
+an intermediate implementation; the customization milestone replaces them with
+one atomic decision so every controller passes through common flight and weapon
+validation:
 
 ```go
 type Controller interface {
-    Decide(Context) Intent
+    Decide(Context) Decision
 }
 
 type Intent struct {
-    Thrust Vec3
-    Turn   Vec3
+    Throttle float64
+    Yaw      float64
+    Pitch    float64
+    Roll     float64
+    Stop     bool
+}
+
+type Decision struct {
+    Flight Intent
     Aim    Vec3
     Fire   bool
 }
@@ -450,25 +672,34 @@ controllers remain the baseline for tests and offline play.
 8. Input — keyboard/mouse intent, dead zone, reticle, throttle, yaw/pitch/roll
 9. Camera system — stable object IDs, fixed/chase/cockpit/orbit views, anchors
 10. Object catalog — fireable laser bolt with muzzle anchors, spin, and lifetime
-11. Visibility modes — faces, hidden-line depth resolver, interactive realism slider
+11. Rendering topology preparation — model faces, clipping, and interim culling hook
 12. Starfield — deterministic world points, wrapping, projection, motion reference
 13. Cockpit targeting — pointer aim, right-button steering, firing cone, converging bolts
 14. Dogfight — multiple catalog fighter instances, deterministic pursuit/wander/excursion, variable-radius overlapping attack runs, autonomous targeting and fire, variable-speed and predictive-avoidance heuristics, symmetric collisions, two-stage component-to-polygon disintegration, player and swarm respawn lifecycle
-15. Death Star — reusable surface modules, trench, towers, targeting reticle
-16. Camera anchors — cockpit, chase, spectator, and Death Star viewpoints
-17. Simulation extraction — stable IDs and renderer-independent world updates
-18. Authoritative server — fixed ticks, autonomous objects, sessions, snapshots
-19. Controller interface — intents, registry, static and manual strategies
-20. Rule-driven intelligence — patrol, pursuit, evasion, targeting, formations
-21. Multiplayer client — control input, interpolation, ownership, view switching
-22. External agent adapter — asynchronous AI/MCP decisions and safe fallback
-23. Shields, score, game states, curated difficulty profiles, sound
-24. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
-25. Stretch: controller evaluation, tournaments, and strategy hot-loading
-26. Stretch: CRT/vector-glow shader, fixed-point math (period-accurate)
+15. Unified customization profiles — extract game constants and tuning into immutable, versioned, validated `GameProfile` values; add curated difficulty overlays
+16. Controller contract and registry — atomic validated decisions, named factories, per-instance state, static/manual/pursuit built-ins
+17. Object-definition registry — generic construction, styles, anchors, capabilities, fragments, and polygon shards without fighter-specific game logic
+18. Composable rendering profiles — replace the interim culler with optional backface, hidden-line, scene-occlusion, and depth-cue stages plus the interactive realism selector
+19. Simulation extraction — stable IDs and renderer-independent fixed-tick world updates behind snapshot and command APIs
+20. Death Star — reusable registered surface modules, trench, towers, targeting reticle
+21. Generalized camera anchors — cockpit, chase, spectator, and Death Star viewpoints selected independently from control ownership
+22. Cut-scene orchestration — registered actor, path, camera, text, event, skip, and level-transition timelines
+23. Authoritative server — fixed ticks, autonomous objects, sessions, profiles, snapshots
+24. Rule-driven intelligence library — patrol, pursuit, evasion, targeting, and formations registered through the controller API
+25. Multiplayer client — control input, interpolation, ownership, view switching
+26. External agent adapter — asynchronous AI/MCP decisions and safe fallback
+27. Score, complete game states, difficulty-selection UI, and sound
+28. Public extension API — stabilize importable controller, catalog, configuration, snapshot, and cinematic contracts
+29. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
+30. Stretch: controller evaluation, tournaments, and strategy hot-loading
+31. Stretch: CRT/vector-glow stages and fixed-point math (period-accurate)
 
 ## Notes
 - Step 5 is first visually demonstrable milestone (target early win).
 - Keep each step in its own commit/branch for incremental review.
-- Visibility defaults to `VisibilityAll`; backface and hidden-line modes arrive in
-  step 11 and remain runtime-switchable features.
+- Visibility defaults to drawing every edge; backface and hidden-line modes
+  arrive through the rendering-profile work in step 18 and remain
+  runtime-switchable features.
+- Steps 15–19 are the modularity checkpoint. Major new world content and
+  networking build on those contracts rather than adding more special cases to
+  the Ebitengine game adapter.

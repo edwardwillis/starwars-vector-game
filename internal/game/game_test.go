@@ -49,24 +49,24 @@ func TestShieldDamageAndRechargeRules(t *testing.T) {
 	if g.shieldStrength != maxShieldStrength {
 		t.Fatalf("initial shield=%d, want %d", g.shieldStrength, maxShieldStrength)
 	}
-	if g.applyShieldDamage(1) || g.shieldStrength != 5 {
+	if g.applyShieldDamage(1) || g.shieldStrength != 7 {
 		t.Fatalf("laser shield damage produced strength=%d", g.shieldStrength)
 	}
 	g.updateShield(shieldRechargeInterval - tickSeconds)
-	if g.shieldStrength != 5 {
+	if g.shieldStrength != 7 {
 		t.Fatalf("shield recharged too early to %d", g.shieldStrength)
 	}
 	g.updateShield(tickSeconds)
-	if g.shieldStrength != 6 {
-		t.Fatalf("shield did not recharge to 6: %d", g.shieldStrength)
+	if g.shieldStrength != 8 {
+		t.Fatalf("shield did not recharge to 8: %d", g.shieldStrength)
 	}
-	if g.applyShieldDamage(3) || g.shieldStrength != 3 {
+	if g.applyShieldDamage(3) || g.shieldStrength != 5 {
 		t.Fatalf("collision shield damage produced strength=%d", g.shieldStrength)
 	}
-	if g.applyShieldDamage(3) || g.shieldStrength != 0 {
+	if g.applyShieldDamage(3) || g.shieldStrength != 2 {
 		t.Fatalf("shield reached incorrect zero state: %d", g.shieldStrength)
 	}
-	if !g.applyShieldDamage(1) || g.shieldStrength != -1 {
+	if !g.applyShieldDamage(3) || g.shieldStrength != -1 {
 		t.Fatalf("shield did not destroy player below zero: %d", g.shieldStrength)
 	}
 }
@@ -129,11 +129,18 @@ func TestSwarmControllersContinueAvoidingWhenPlayerIsDestroyed(t *testing.T) {
 	}
 }
 
-func TestUpdateMovesAndRotatesFighter(t *testing.T) {
+func TestUpdateWaitsForStartThenMovesAndRotatesFighter(t *testing.T) {
 	g := New()
 	before := g.objects[0].Pose
 	if err := g.Update(); err != nil {
 		t.Fatalf("Update returned an error: %v", err)
+	}
+	if g.objects[0].Pose != before {
+		t.Fatal("Update moved the fighter before the game started")
+	}
+	g.started = true
+	if err := g.Update(); err != nil {
+		t.Fatalf("started Update returned an error: %v", err)
 	}
 	after := g.objects[0].Pose
 	if after.Position == before.Position {
