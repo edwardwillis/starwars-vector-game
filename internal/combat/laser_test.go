@@ -42,6 +42,25 @@ func TestFireLaserRejectsMissingMuzzle(t *testing.T) {
 	}
 }
 
+func TestFireLaserWithConfigUsesSessionTuning(t *testing.T) {
+	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	config := LaserConfig{Speed: 30, SpinRate: 4, Lifetime: 3}
+	spawn, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", config)
+	if err != nil {
+		t.Fatalf("FireLaserWithConfig returned an error: %v", err)
+	}
+	if spawn.Object.Motion.Speed != config.Speed || spawn.Object.Motion.RollRate != config.SpinRate || spawn.Lifetime != config.Lifetime {
+		t.Fatalf("custom laser configuration was not applied: %+v", spawn)
+	}
+}
+
+func TestFireLaserWithConfigRejectsInvalidTuning(t *testing.T) {
+	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	if _, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", LaserConfig{}); err == nil {
+		t.Fatal("FireLaserWithConfig accepted invalid tuning")
+	}
+}
+
 func TestFireLaserTowardOrientsBoltAtConvergencePoint(t *testing.T) {
 	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	target := math3d.Vec3{X: 4, Y: 2, Z: 20}

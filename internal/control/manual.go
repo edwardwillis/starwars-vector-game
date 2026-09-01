@@ -22,6 +22,18 @@ type ManualConfig struct {
 	MaxRollRate  float64
 }
 
+// Limits are the movement constraints applied to any controller decision.
+// Keeping these separate from a strategy lets manual, scripted, and external
+// controllers share the same authoritative flight rules.
+type Limits struct {
+	Acceleration float64
+	MaxForward   float64
+	MaxReverse   float64
+	MaxYawRate   float64
+	MaxPitchRate float64
+	MaxRollRate  float64
+}
+
 func DefaultManualConfig() ManualConfig {
 	return ManualConfig{
 		Acceleration: 2.0,
@@ -37,6 +49,19 @@ func DefaultManualConfig() ManualConfig {
 // and changes gradually; angular rates follow the current controls and return to
 // zero when those controls are released.
 func Apply(motion kinematics.Motion, intent Intent, config ManualConfig, seconds float64) kinematics.Motion {
+	return ApplyWithLimits(motion, intent, Limits{
+		Acceleration: config.Acceleration,
+		MaxForward:   config.MaxForward,
+		MaxReverse:   config.MaxReverse,
+		MaxYawRate:   config.MaxYawRate,
+		MaxPitchRate: config.MaxPitchRate,
+		MaxRollRate:  config.MaxRollRate,
+	}, seconds)
+}
+
+// ApplyWithLimits validates and applies any controller intent using shared
+// authoritative movement limits.
+func ApplyWithLimits(motion kinematics.Motion, intent Intent, limits Limits, seconds float64) kinematics.Motion {
 	intent.Throttle = clamp(intent.Throttle, -1, 1)
 	intent.Yaw = clamp(intent.Yaw, -1, 1)
 	intent.Pitch = clamp(intent.Pitch, -1, 1)
@@ -45,12 +70,12 @@ func Apply(motion kinematics.Motion, intent Intent, config ManualConfig, seconds
 	if intent.Stop {
 		motion.Speed = 0
 	} else if seconds > 0 {
-		motion.Speed += intent.Throttle * config.Acceleration * seconds
-		motion.Speed = clamp(motion.Speed, -config.MaxReverse, config.MaxForward)
+		motion.Speed += intent.Throttle * limits.Acceleration * seconds
+		motion.Speed = clamp(motion.Speed, -limits.MaxReverse, limits.MaxForward)
 	}
-	motion.YawRate = intent.Yaw * config.MaxYawRate
-	motion.PitchRate = intent.Pitch * config.MaxPitchRate
-	motion.RollRate = intent.Roll * config.MaxRollRate
+	motion.YawRate = intent.Yaw * limits.MaxYawRate
+	motion.PitchRate = intent.Pitch * limits.MaxPitchRate
+	motion.RollRate = intent.Roll * limits.MaxRollRate
 	return motion
 }
 

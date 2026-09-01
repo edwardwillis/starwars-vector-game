@@ -18,18 +18,19 @@ type Context struct {
 	MotionScale float64
 }
 
-// Strategy supplies motion for one autonomous object simulation tick. The
-// game owns poses and integration; strategies only decide how an object moves.
-type Strategy interface {
-	Step(context Context) kinematics.Motion
+// Decision is the complete request produced by a controller for one tick. The
+// simulation remains authoritative over applying flight limits, firing, and
+// all world mutations.
+type Decision struct {
+	Flight Intent
+	Aim    math3d.Vec3
+	Fire   bool
 }
 
-// Attacker is an optional capability implemented by strategies that can ask
-// the simulation to fire after their movement decision. The simulation remains
-// authoritative over projectile creation and damage.
-type Attacker interface {
-	Strategy
-	AttackIntent() bool
+// Strategy supplies a validated decision for one object simulation tick. The
+// game owns poses and integration; strategies never mutate world state.
+type Strategy interface {
+	Decide(context Context) Decision
 }
 
 type PursuitConfig struct {
@@ -162,7 +163,22 @@ func (p *Pursuit) AttackIntent() bool {
 	return p.attackFire
 }
 
+// Decide returns an atomic flight, aim, and fire decision. Step remains below
+// as a compatibility helper for package users migrating to the decision API.
+func (p *Pursuit) Decide(context Context) Decision {
+	motion := p.stepMotion(context)
+	return Decision{
+		Flight: intentForMotion(context.Self.Motion, motion, p.config, context.Seconds),
+		Aim:    context.Target.Pose.Position,
+		Fire:   p.attackFire,
+	}
+}
+
 func (p *Pursuit) Step(context Context) kinematics.Motion {
+	return p.stepMotion(context)
+}
+
+func (p *Pursuit) stepMotion(context Context) kinematics.Motion {
 	self, target, seconds := context.Self, context.Target, context.Seconds
 	if seconds <= 0 {
 		return self.Motion
@@ -211,6 +227,18 @@ func (p *Pursuit) Step(context Context) kinematics.Motion {
 		motion.RollRate = blend(motion.RollRate, p.avoidanceRoll, 0.95*fade)
 	}
 	return motion
+}
+
+func intentForMotion(current, desired kinematics.Motion, config PursuitConfig, seconds float64) Intent {
+	intent := Intent{
+		Yaw:   desired.YawRate / max(0.000001, config.MaxYawRate),
+		Pitch: desired.PitchRate / max(0.000001, config.MaxPitchRate),
+		Roll:  desired.RollRate / max(0.000001, config.MaxRollRate),
+	}
+	if seconds > 0 && config.Acceleration > 0 {
+		intent.Throttle = (desired.Speed - current.Speed) / (config.Acceleration * seconds)
+	}
+	return intent
 }
 
 func (p *Pursuit) updateAttack(self, target scene.Object, seconds float64) {

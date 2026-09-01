@@ -470,6 +470,13 @@ a second independent configuration system. Applying `Cadet`, `Pilot`, `Ace`, or
 `Nightmare` produces a fully resolved and validated profile before the world is
 created.
 
+Initial implementation status: complete. The four built-in profiles resolve to
+validated Go values; `Pilot` preserves the established gameplay, the command
+line selects a profile at launch, and `Game.NewWithProfile` clones the resolved
+configuration before creating the session. External JSON/YAML loading and an
+in-game selection screen remain later work after the schema has seen further
+use.
+
 ### Registries and Factories
 
 Controllers, catalog objects, rendering profiles, and cut scenes are selected
@@ -648,6 +655,13 @@ configuration. This allows new strategies to be added without changing object,
 physics, networking, or rendering code. Controller state belongs to each object
 instance, while reusable controller factories and configuration schemas belong
 to the plugin registry.
+
+Initial implementation status: complete. The control package now exposes the
+atomic `Decision` contract, shared `Limits` application, and a registry with
+`Static`, `Manual`, and `Pursuit` built-ins. The game accepts a caller-supplied
+registry through `NewWithProfileAndRegistry`; the legacy `Step` and
+`AttackIntent` methods remain as compatibility helpers while contributors move
+to `Decide`.
 
 External AI/MCP controllers require an asynchronous adapter because network
 responses cannot block the fixed simulation tick. The adapter uses deadlines,

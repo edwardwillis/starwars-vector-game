@@ -10,7 +10,18 @@ pipeline.
 
 ## Current milestone
 
-Step 14 in progress: five autonomous instances of the existing fighter use
+Step 15 customization foundation: gameplay tuning now resolves through a
+validated, versioned game profile rather than constants in the game loop. The
+built-in `Cadet`, `Pilot`, `Ace`, and `Nightmare` profiles select complete swarm,
+flight, combat, shield, display, targeting, starfield, and simulation settings.
+`Pilot` preserves the established default gameplay. Game construction clones
+the selected profile so later caller changes cannot alter a running session.
+
+Step 16 controller foundation is also implemented: atomic controller decisions,
+shared movement limits, and a registry for built-in or contributor-supplied
+`Static`, `Manual`, and `Pursuit` strategies.
+
+The step 14 dogfight remains playable: five autonomous instances of the existing fighter use
 independent deterministic pursuit heuristics, widely separated starting and
 return positions,
 randomized pitch/yaw wander, and timed fly-away excursions before returning to
@@ -70,10 +81,21 @@ go test ./...
 go run .
 ```
 
+Select a curated profile when starting the game:
+
+```sh
+go run . -profile cadet
+go run . -profile pilot
+go run . -profile ace
+go run . -profile nightmare
+```
+
 You should see a 960×540 dark window with green, low-poly twin-panel fighters.
-The game starts inside the player's cockpit at maximum forward speed, heading
-toward a distant forward formation of five autonomous fighters that pursue and
-attack with varied steering.
+The launch card starts inside the player's cockpit at maximum forward speed.
+Press `S`, `F`, or the left mouse button to begin heading toward the selected
+profile's distant autonomous formation. The controls card hides automatically
+after ten seconds, or immediately when play starts, and can subsequently be
+shown or hidden with `?`.
 
 In cockpit view, border threat markers point toward the eight nearest fighters
 or incoming enemy bolts. Each marker's urgency progresses from blue to orange to
@@ -91,6 +113,7 @@ red, with a flashing red marker for immediate danger.
 - Arrow keys: yaw and pitch
 - `Q` / `E`: roll
 - `Space`: toggle the textual heads-up display
+- `?`: show or hide the controls card
 - Move the mouse in cockpit view to aim the targeting crosshairs
 - Hold right mouse in cockpit view to steer toward the pointer
 - `F` or left mouse: fire alternating paired laser bolts toward the crosshairs
@@ -124,9 +147,11 @@ A pluggable controller architecture will support static objects, human input,
 deterministic rule-driven behavior, and asynchronous external AI agents such as
 MCP-backed controllers without granting them authority over simulation state.
 
-Planned difficulty selection will use curated `Cadet`, `Pilot`, `Ace`, and
-optional `Nightmare` profiles that bundle swarm size, speed, attack cadence, aim
-error, avoidance, and recovery settings.
+Difficulty selection now provides curated `Cadet`, `Pilot`, `Ace`, and
+`Nightmare` profiles that bundle swarm size, speed, attack cadence, aim error,
+avoidance, recovery, combat, shields, targeting, display, and simulation
+settings. A later settings screen will select these profiles in-game; they are
+currently selected with the `-profile` command-line flag.
 
 Player shields start at eight strength points, shown as eight mirrored segments on each side; a laser hit loses one point and a collision loses three
 to a collision, recharge one segment after 20 seconds without damage, and

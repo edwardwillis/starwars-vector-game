@@ -13,6 +13,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
@@ -23,33 +24,9 @@ import (
 )
 
 const (
-	ScreenWidth               = 960
-	ScreenHeight              = 540
-	tickSeconds               = 1.0 / 60.0
-	zoomSpeed                 = 1.5
-	fighterID                 = scene.ObjectID(1)
-	fireInterval              = 0.12
-	fireWindow                = 1.5
-	maxFireEvents             = 3
-	laserBeamTime             = 0.08
-	mouseDeadzone             = 0.08
-	mouseSensitivity          = 1.25
-	starCount                 = 500
-	starRadius                = 40.0
-	starSeed                  = 42
-	aimRadius                 = 190.0
-	aimConvergence            = 30.0
-	autonomousFighters        = 5
-	disintegrationTime        = 2.0
-	playerDestructionViewTime = 3.0
-	autonomousRespawnDelay    = 3.0
-	autonomousSpawnRadius     = 12.0
-	autonomousRespawnDistance = 48.0
-	arcadeMotionScale         = 2.0
-	autonomousAimError        = 3.2
-	maxShieldStrength         = 8
-	shieldRechargeInterval    = 20.0
-	controlsDisplayDuration   = 12.0
+	ScreenWidth  = 960
+	ScreenHeight = 540
+	fighterID    = scene.ObjectID(1)
 )
 
 var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
@@ -81,11 +58,12 @@ func (mode flightMode) String() string {
 
 // Game owns the simulation state and wireframe rendering pipeline.
 type Game struct {
+	profile                  profile.GameProfile
+	controllerRegistry       *control.Registry
 	objects                  []scene.Object
 	pipeline                 render.Pipeline
 	initialPose              kinematics.Pose
 	autoMotion               kinematics.Motion
-	manualConfig             control.ManualConfig
 	mode                     flightMode
 	paused                   bool
 	started                  bool
@@ -117,73 +95,94 @@ type Game struct {
 	shieldQuietTime          float64
 	destructionViewRemaining float64
 	controlsRemaining        float64
+	controlsPinned           bool
 }
 
 func New() *Game {
-	manualConfig := control.DefaultManualConfig()
-	initialPose := kinematics.Pose{
-		Position: math3d.Vec3{Z: -7},
-		Orientation: math3d.QuaternionFromYawPitchRoll(
-			0,
-			0,
-			0,
-		),
+	game, err := NewWithProfile(profile.Pilot())
+	if err != nil {
+		panic(err)
 	}
-	autoMotion := kinematics.Motion{
-		Speed:    manualConfig.MaxForward,
-		YawRate:  0.22,
-		RollRate: 0.16,
+	return game
+}
+
+// NewWithProfile creates a game from a validated snapshot of the supplied
+// profile. Subsequent caller changes do not affect the running session.
+func NewWithProfile(gameProfile profile.GameProfile) (*Game, error) {
+	return NewWithProfileAndRegistry(gameProfile, control.DefaultRegistry())
+}
+
+// NewWithProfileAndRegistry creates a game with caller-registered controller
+// implementations while retaining the same profile validation and simulation
+// authority boundaries.
+func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *control.Registry) (*Game, error) {
+	gameProfile = gameProfile.Clone()
+	if err := gameProfile.Validate(); err != nil {
+		return nil, fmt.Errorf("create game: %w", err)
 	}
+	if registry == nil {
+		return nil, fmt.Errorf("create game: controller registry is nil")
+	}
+	initialPose := gameProfile.Player.InitialPose
+	autoMotion := gameProfile.Player.AutopilotMotion
 	fighter := catalog.TwinPanelFighter(fighterID, initialPose)
 	fighter.Motion = autoMotion
 	objects := []scene.Object{fighter}
-	controllers := make(map[scene.ObjectID]control.Strategy, autonomousFighters)
-	pursuitConfig := autonomousPursuitConfig()
-	for index, pose := range autonomousFighterPoses() {
+	controllers := make(map[scene.ObjectID]control.Strategy, gameProfile.Swarm.Count)
+	for index, pose := range autonomousFighterPoses(gameProfile.Swarm.InitialPositions) {
 		id := scene.ObjectID(index + 2)
 		autonomous := catalog.TwinPanelFighter(id, pose)
-		autonomous.Motion.Speed = 2.85 + float64(index)*0.12
+		autonomous.Motion.Speed = gameProfile.Swarm.InitialSpeed + float64(index)*gameProfile.Swarm.SpeedStep
 		objects = append(objects, autonomous)
-		controllers[id] = control.NewPursuit(uint64(id)*0x9e3779b97f4a7c15, pursuitConfig)
+		controller, err := registry.Create(gameProfile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, gameProfile.Swarm.Pursuit)
+		if err != nil {
+			return nil, err
+		}
+		controllers[id] = controller
 	}
 	viewCamera := camera.New(fighterID)
 	viewCamera.Mode = camera.Cockpit
 	game := &Game{
-		pipeline:          render.NewPipeline(ScreenWidth, ScreenHeight, math.Pi/3, 0.1, 100),
-		objects:           objects,
-		initialPose:       initialPose,
-		autoMotion:        autoMotion,
-		manualConfig:      manualConfig,
-		viewCamera:        viewCamera,
-		nextObjectID:      scene.ObjectID(autonomousFighters + 2),
-		projectiles:       make(map[scene.ObjectID]float64),
-		owners:            make(map[scene.ObjectID]scene.ObjectID),
-		starField:         starfield.New(starCount, starSeed, starRadius, initialPose.Position),
-		controllers:       controllers,
-		debris:            make(map[scene.ObjectID]destructionTransient),
-		respawnSequence:   autonomousFighters,
-		shieldStrength:    maxShieldStrength,
-		started:           false,
-		showHUD:           false,
-		controlsRemaining: controlsDisplayDuration,
+		profile:            gameProfile,
+		controllerRegistry: registry,
+		pipeline:           render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
+		objects:            objects,
+		initialPose:        initialPose,
+		autoMotion:         autoMotion,
+		viewCamera:         viewCamera,
+		nextObjectID:       scene.ObjectID(gameProfile.Swarm.Count + 2),
+		projectiles:        make(map[scene.ObjectID]float64),
+		owners:             make(map[scene.ObjectID]scene.ObjectID),
+		starField:          starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
+		controllers:        controllers,
+		debris:             make(map[scene.ObjectID]destructionTransient),
+		respawnSequence:    uint64(gameProfile.Swarm.Count),
+		shieldStrength:     gameProfile.Player.Shield.Maximum,
+		started:            false,
+		showHUD:            false,
+		controlsRemaining:  gameProfile.Display.ControlsDisplayDuration,
 	}
 	game.pipeline.View = game.viewCamera.View(game.objects)
-	return game
+	return game, nil
 }
 
 func (g *Game) Update() error {
+	seconds := g.profile.Simulation.TickSeconds
+	questionPressed := questionKeyJustPressed()
+	if questionPressed {
+		g.toggleControls()
+	}
+	g.updateControls(seconds)
 	if !g.started {
 		if inpututil.IsKeyJustPressed(ebiten.KeyS) ||
 			inpututil.IsKeyJustPressed(ebiten.KeyF) ||
 			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 			g.started = true
 			g.controlsRemaining = 0
+			g.controlsPinned = false
 		}
 		g.pipeline.View = g.viewCamera.View(g.objects)
 		return nil
-	}
-	if g.controlsRemaining > 0 {
-		g.controlsRemaining = max(0, g.controlsRemaining-tickSeconds)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		if g.mode == modeAutopilot {
@@ -207,7 +206,7 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
 		g.viewCamera.Cycle()
 	}
-	if (inpututil.IsKeyJustPressed(ebiten.KeyShiftLeft) || inpututil.IsKeyJustPressed(ebiten.KeyShiftRight)) && len(g.controllers) > 0 {
+	if !questionPressed && (inpututil.IsKeyJustPressed(ebiten.KeyShiftLeft) || inpututil.IsKeyJustPressed(ebiten.KeyShiftRight)) && len(g.controllers) > 0 {
 		g.switchToRandomSwarmFollowView()
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
@@ -225,34 +224,34 @@ func (g *Game) Update() error {
 	}
 
 	g.updateZoom()
-	g.laserBeamTime = max(0, g.laserBeamTime-tickSeconds)
+	g.laserBeamTime = max(0, g.laserBeamTime-seconds)
 	if g.mode == modeManual {
 		if fighter := g.objectByID(fighterID); fighter != nil {
-			fighter.Motion = control.Apply(fighter.Motion, g.readIntent(), g.manualConfig, tickSeconds)
+			fighter.Motion = control.Apply(fighter.Motion, g.readIntent(), g.profile.Player.Flight, seconds)
 		}
 	}
 	if g.paused {
 		g.pipeline.View = g.viewCamera.View(g.objects)
 		return nil
 	}
-	g.simulationTime += tickSeconds
-	g.updateShield(tickSeconds)
+	g.simulationTime += seconds
+	g.updateShield(seconds)
 	if g.destructionViewRemaining > 0 {
-		g.destructionViewRemaining -= tickSeconds
-		g.viewCamera.PullBack(3.0 * tickSeconds)
+		g.destructionViewRemaining -= seconds
+		g.viewCamera.PullBack(3.0 * seconds)
 		if g.destructionViewRemaining <= 0 {
 			g.destructionViewRemaining = 0
 			g.switchToRandomSwarmFollowView()
 		}
 	}
 	g.updateRespawns()
-	g.updateAutonomous(tickSeconds)
-	g.fireCooldown = max(0, g.fireCooldown-tickSeconds)
+	g.updateAutonomous(seconds)
+	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	if ebiten.IsKeyPressed(ebiten.KeyF) || ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		g.fireLaser()
 	}
 	previousPositions := objectPositions(g.objects)
-	motionSeconds := tickSeconds * arcadeMotionScale
+	motionSeconds := seconds * g.profile.Simulation.MotionScale
 	for index := range g.objects {
 		g.objects[index].Pose = kinematics.Integrate(
 			g.objects[index].Pose,
@@ -260,14 +259,14 @@ func (g *Game) Update() error {
 			motionSeconds,
 		)
 	}
-	g.updateDebris(tickSeconds)
+	g.updateDebris(seconds)
 	g.resolveLaserCollisions(previousPositions)
 	g.resolveSolidCollisions(previousPositions)
-	g.updateProjectiles(tickSeconds)
+	g.updateProjectiles(seconds)
 	if reference := g.starfieldReferencePosition(); reference != nil {
 		g.starField.Wrap(*reference)
 	}
-	g.viewCamera.Update(tickSeconds)
+	g.viewCamera.Update(seconds)
 	g.pipeline.View = g.viewCamera.View(g.objects)
 	return nil
 }
@@ -383,7 +382,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 				if !playerShieldHit {
 					playerShieldHit = true
 					// Damage is applied once per simulation tick for a paired volley.
-					if g.applyShieldDamage(1) {
+					if g.applyShieldDamage(g.profile.Player.Shield.LaserDamage) {
 						destroyed[nearest.ID] = nearest
 					}
 				}
@@ -426,14 +425,14 @@ func (g *Game) resolveSolidCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 			if hit {
 				g.collisions++
 				if first.ID == fighterID {
-					if g.applyShieldDamage(3) {
+					if g.applyShieldDamage(g.profile.Player.Shield.CollisionDamage) {
 						destroyed[first.ID] = first
 					}
 				} else {
 					destroyed[first.ID] = first
 				}
 				if second.ID == fighterID {
-					if g.applyShieldDamage(3) {
+					if g.applyShieldDamage(g.profile.Player.Shield.CollisionDamage) {
 						destroyed[second.ID] = second
 					}
 				} else {
@@ -466,7 +465,8 @@ func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object,
 		}
 		if id == fighterID {
 			g.playerDestroyed = true
-			g.controlsRemaining = controlsDisplayDuration
+			g.controlsRemaining = g.profile.Display.ControlsDisplayDuration
+			g.controlsPinned = false
 			g.playerViewMode = g.viewCamera.Mode
 			g.viewCamera.Mode = camera.Fixed
 			if g.mouseFlight {
@@ -475,7 +475,7 @@ func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object,
 			}
 		}
 		if _, autonomous := g.controllers[id]; autonomous {
-			g.respawns = append(g.respawns, autonomousRespawn{readyAt: g.simulationTime + autonomousRespawnDelay})
+			g.respawns = append(g.respawns, autonomousRespawn{readyAt: g.simulationTime + g.profile.Swarm.RespawnDelay})
 			delete(g.controllers, id)
 		}
 	}
@@ -487,7 +487,7 @@ func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object,
 			cinematicTarget := g.nextObjectID
 			g.spawnDisintegration(object)
 			if id == fighterID {
-				g.destructionViewRemaining = playerDestructionViewTime
+				g.destructionViewRemaining = g.profile.Simulation.PlayerDestructionViewTime
 				g.viewCamera.TargetID = cinematicTarget
 				g.viewCamera.Mode = camera.Orbit
 				g.viewCamera.AdjustZoom(-2)
@@ -531,9 +531,9 @@ func (g *Game) spawnDisintegration(object scene.Object) {
 			RollRate:  spinSign * (2.0 + 0.40*float64(index)),
 		}
 		g.objects = append(g.objects, fragment)
-		lifetime := disintegrationTime
+		lifetime := g.profile.Simulation.DisintegrationTime
 		if object.ID == fighterID {
-			lifetime = playerDestructionViewTime
+			lifetime = g.profile.Simulation.PlayerDestructionViewTime
 		}
 		g.debris[fragment.ID] = destructionTransient{
 			remaining:      lifetime,
@@ -577,7 +577,7 @@ func (g *Game) spawnPolygonDisintegration(component scene.Object, transient dest
 		}
 		g.objects = append(g.objects, shard)
 		g.debris[shard.ID] = destructionTransient{
-			remaining:      disintegrationTime,
+			remaining:      g.profile.Simulation.DisintegrationTime,
 			rootObjectID:   transient.rootObjectID,
 			componentIndex: transient.componentIndex,
 			stage:          scene.DestructionPolygon,
@@ -626,56 +626,7 @@ func (g *Game) removeObjects(remove map[scene.ObjectID]bool) {
 	g.objects = kept
 }
 
-func autonomousPursuitConfig() control.PursuitConfig {
-	config := control.DefaultPursuitConfig()
-	config.PreferredDistance = 10.0
-	config.MinSpeed = 2.80
-	config.MaxSpeed = 3.40
-	config.Acceleration = 2.20
-	config.ApproachGain = 0.28
-	config.MaxYawRate = 1.15
-	config.MaxPitchRate = 0.90
-	config.MaxRollRate = 1.35
-	config.WanderStrength = 0.30
-	config.WanderInterval = 0.55
-	config.ScatterRadius = 4.0
-	config.ExcursionMinGap = 2.5
-	config.ExcursionMaxGap = 6.0
-	config.ExcursionMinTime = 1.5
-	config.ExcursionMaxTime = 3.5
-	config.SpeedVariation = 0.35
-	config.SpeedChangeInterval = 5.0
-	config.SpeedBlendRate = 0.65
-	config.AvoidanceHorizon = 2.75
-	config.AvoidanceMargin = 6.0
-	config.AvoidanceMinTime = 1.4
-	config.AvoidanceMaxTime = 2.0
-	config.AvoidanceCooldown = 0.08
-	config.AvoidanceSlowdown = 0.35
-	config.AttackMinGap = 1.5
-	config.AttackMaxGap = 6.0
-	config.AttackMinTime = 3.0
-	config.AttackMaxTime = 6.0
-	config.AttackMinRadius = 5.0
-	config.AttackMaxRadius = 14.0
-	config.AttackFireMinGap = 0.90
-	config.AttackFireMaxGap = 1.60
-	config.AttackRange = 34.0
-	// Attack runs fire at the designated target throughout the arc. The bolt
-	// itself is aimed independently, so a fighter need not point its nose
-	// directly at the player to make an attack pass visible and threatening.
-	config.AttackAimDot = -1.0
-	return config
-}
-
-func autonomousFighterPoses() []kinematics.Pose {
-	positions := [...]math3d.Vec3{
-		{X: -28, Y: 6, Z: 40},
-		{X: 28, Y: -6, Z: 40},
-		{X: -20, Y: -8, Z: 52},
-		{X: 20, Y: 8, Z: 52},
-		{X: 0, Y: 18, Z: 46},
-	}
+func autonomousFighterPoses(positions []math3d.Vec3) []kinematics.Pose {
 	poses := make([]kinematics.Pose, 0, len(positions))
 	for index, position := range positions {
 		poses = append(poses, kinematics.Pose{
@@ -717,7 +668,7 @@ func (g *Game) spawnAutonomousFighter() {
 			if away == (math3d.Vec3{}) {
 				away = math3d.Vec3{Z: -1}
 			}
-			candidate := center.Add(away.Scale(autonomousRespawnDistance))
+			candidate := center.Add(away.Scale(g.profile.Swarm.RespawnDistance))
 			if g.positionIsSafe(candidate, 6.0) {
 				center = candidate
 				headingTarget = nearest
@@ -738,9 +689,13 @@ func (g *Game) spawnAutonomousFighter() {
 	id := g.nextObjectID
 	g.nextObjectID++
 	fighter := catalog.TwinPanelFighter(id, pose)
-	fighter.Motion.Speed = 2.85 + 0.12*float64(g.respawnSequence%5)
+	fighter.Motion.Speed = g.profile.Swarm.InitialSpeed + g.profile.Swarm.SpeedStep*float64(g.respawnSequence%uint64(max(1, g.profile.Swarm.Count)))
+	controller, err := g.controllerRegistry.Create(g.profile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, g.profile.Swarm.Pursuit)
+	if err != nil {
+		return
+	}
 	g.objects = append(g.objects, fighter)
-	g.controllers[id] = control.NewPursuit(uint64(id)*0x9e3779b97f4a7c15, autonomousPursuitConfig())
+	g.controllers[id] = controller
 	g.respawnSequence++
 }
 
@@ -767,9 +722,9 @@ func (g *Game) safeAutonomousSpawnPose(center math3d.Vec3) kinematics.Pose {
 		sequence := float64(g.respawnSequence + uint64(attempt))
 		angle := sequence * math.Pi * (3 - math.Sqrt(5))
 		position := center.Add(math3d.Vec3{
-			X: math.Cos(angle) * autonomousSpawnRadius,
+			X: math.Cos(angle) * g.profile.Swarm.SpawnRadius,
 			Y: math.Sin(sequence*1.17) * 3.5,
-			Z: math.Sin(angle) * autonomousSpawnRadius,
+			Z: math.Sin(angle) * g.profile.Swarm.SpawnRadius,
 		})
 		if g.positionIsSafe(position, 4.5) {
 			direction := center.Sub(position).Normalize()
@@ -782,7 +737,7 @@ func (g *Game) safeAutonomousSpawnPose(center math3d.Vec3) kinematics.Pose {
 		}
 	}
 	return kinematics.Pose{
-		Position:    center.Add(math3d.Vec3{Z: -autonomousSpawnRadius * 1.5}),
+		Position:    center.Add(math3d.Vec3{Z: -g.profile.Swarm.SpawnRadius * 1.5}),
 		Orientation: math3d.IdentityQuaternion(),
 	}
 }
@@ -819,15 +774,17 @@ func (g *Game) updateAutonomous(seconds float64) {
 				nearby = append(nearby, candidate)
 			}
 		}
-		object.Motion = controller.Step(control.Context{
+		context := control.Context{
 			Self:        *object,
 			Target:      targetSnapshot,
 			Nearby:      nearby,
 			Seconds:     seconds,
-			MotionScale: arcadeMotionScale,
-		})
+			MotionScale: g.profile.Simulation.MotionScale,
+		}
+		decision := controller.Decide(context)
+		object.Motion = control.ApplyWithLimits(object.Motion, decision.Flight, g.profile.Swarm.Flight, seconds)
 		if target != nil {
-			if attacker, ok := controller.(control.Attacker); ok && attacker.AttackIntent() {
+			if decision.Fire {
 				g.fireAutonomousLaser(*object, targetSnapshot)
 			}
 		}
@@ -835,20 +792,20 @@ func (g *Game) updateAutonomous(seconds float64) {
 }
 
 func (g *Game) fireAutonomousLaser(shooter, target scene.Object) bool {
-	leadTime := shooter.Pose.Position.Sub(target.Pose.Position).Length() / combat.LaserSpeed
+	leadTime := shooter.Pose.Position.Sub(target.Pose.Position).Length() / g.profile.Combat.Laser.Speed
 	leadTime = min(0.45, leadTime)
 	targetVelocity := target.Pose.Forward().Scale(target.Motion.Speed).Add(target.Motion.Velocity)
-	aimPoint := target.Pose.Position.Add(targetVelocity.Scale(leadTime * arcadeMotionScale))
+	aimPoint := target.Pose.Position.Add(targetVelocity.Scale(leadTime * g.profile.Simulation.MotionScale))
 	// Keep autonomous attacks deterministic but imperfect. Error is expressed
 	// in the target's local lateral/vertical axes, so it remains a believable
 	// miss as the player turns instead of becoming world-axis drift.
 	seed := uint64(shooter.ID)*0x9e3779b97f4a7c15 ^ uint64(math.Max(0, math.Floor(g.simulationTime*60)))
-	errorX := deterministicSigned(&seed) * autonomousAimError
-	errorY := deterministicSigned(&seed) * autonomousAimError * 0.7
+	errorX := deterministicSigned(&seed) * g.profile.Swarm.AimError
+	errorY := deterministicSigned(&seed) * g.profile.Swarm.AimError * 0.7
 	aimPoint = aimPoint.Add(target.Pose.Orientation.Rotate(math3d.Vec3{X: errorX, Y: errorY}))
 	spawned := false
 	for _, muzzle := range []string{"muzzle-upper-left", "muzzle-upper-right"} {
-		spawn, err := combat.FireLaserToward(shooter, g.nextObjectID, muzzle, aimPoint)
+		spawn, err := combat.FireLaserTowardWithConfig(shooter, g.nextObjectID, muzzle, aimPoint, g.profile.Combat.Laser)
 		if err != nil {
 			continue
 		}
@@ -892,9 +849,9 @@ func (g *Game) fireLaser() bool {
 		var spawn combat.Spawn
 		var err error
 		if aimed {
-			spawn, err = combat.FireLaserToward(*fighter, g.nextObjectID, muzzle, aimTarget)
+			spawn, err = combat.FireLaserTowardWithConfig(*fighter, g.nextObjectID, muzzle, aimTarget, g.profile.Combat.Laser)
 		} else {
-			spawn, err = combat.FireLaser(*fighter, g.nextObjectID, muzzle)
+			spawn, err = combat.FireLaserWithConfig(*fighter, g.nextObjectID, muzzle, g.profile.Combat.Laser)
 		}
 		if err != nil {
 			return false
@@ -905,15 +862,15 @@ func (g *Game) fireLaser() bool {
 		g.owners[spawn.Object.ID] = spawn.OwnerID
 	}
 	g.laserBeamPair = pair
-	g.laserBeamTime = laserBeamTime
+	g.laserBeamTime = g.profile.Combat.BeamTime
 	g.nextMuzzlePair = (pair + 1) % len(muzzlePairs)
-	g.fireCooldown = fireInterval
+	g.fireCooldown = g.profile.Combat.FireInterval
 	g.fireHistory = append(g.fireHistory, g.simulationTime)
 	return true
 }
 
 func (g *Game) withinFireRateLimit() bool {
-	cutoff := g.simulationTime - fireWindow
+	cutoff := g.simulationTime - g.profile.Combat.FireWindow
 	firstActive := 0
 	for firstActive < len(g.fireHistory) && g.fireHistory[firstActive] <= cutoff {
 		firstActive++
@@ -921,7 +878,7 @@ func (g *Game) withinFireRateLimit() bool {
 	if firstActive > 0 {
 		g.fireHistory = append(g.fireHistory[:0], g.fireHistory[firstActive:]...)
 	}
-	return len(g.fireHistory) < maxFireEvents
+	return len(g.fireHistory) < g.profile.Combat.MaxFireEvents
 }
 
 func (g *Game) updateProjectiles(seconds float64) {
@@ -950,8 +907,9 @@ func (g *Game) resetFighter() {
 	}
 	fighter.Pose = g.initialPose
 	g.controlsRemaining = 0
+	g.controlsPinned = false
 	g.destructionViewRemaining = 0
-	g.shieldStrength = maxShieldStrength
+	g.shieldStrength = g.profile.Player.Shield.Maximum
 	g.shieldQuietTime = 0
 	g.fireCooldown = 0
 	g.fireHistory = g.fireHistory[:0]
@@ -973,13 +931,15 @@ func (g *Game) applyShieldDamage(amount int) bool {
 }
 
 func (g *Game) updateShield(seconds float64) {
-	if g.objectByID(fighterID) == nil || g.shieldStrength >= maxShieldStrength || seconds <= 0 {
+	maximum := g.profile.Player.Shield.Maximum
+	interval := g.profile.Player.Shield.RechargeInterval
+	if g.objectByID(fighterID) == nil || g.shieldStrength >= maximum || seconds <= 0 {
 		return
 	}
 	g.shieldQuietTime += seconds
-	for g.shieldQuietTime >= shieldRechargeInterval && g.shieldStrength < maxShieldStrength {
+	for g.shieldQuietTime >= interval && g.shieldStrength < maximum {
 		g.shieldStrength++
-		g.shieldQuietTime -= shieldRechargeInterval
+		g.shieldQuietTime -= interval
 	}
 }
 
@@ -991,13 +951,14 @@ func (g *Game) respawnPlayer() {
 	} else {
 		// A respawn always launches at full forward speed; manual control can
 		// immediately brake or reverse from this known, energetic starting state.
-		fighter.Motion.Speed = g.manualConfig.MaxForward
+		fighter.Motion.Speed = g.profile.Player.Flight.MaxForward
 	}
 	g.objects = append(g.objects, fighter)
 	g.playerDestroyed = false
 	g.controlsRemaining = 0
+	g.controlsPinned = false
 	g.destructionViewRemaining = 0
-	g.shieldStrength = maxShieldStrength
+	g.shieldStrength = g.profile.Player.Shield.Maximum
 	g.shieldQuietTime = 0
 	g.fireCooldown = 0
 	g.fireHistory = g.fireHistory[:0]
@@ -1057,10 +1018,10 @@ func (g *Game) readIntent() control.Intent {
 	}
 	if g.viewCamera.Mode == camera.Cockpit && ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
 		mouseX, mouseY := ebiten.CursorPosition()
-		intent.Yaw, intent.Pitch = cockpitSteeringAxes(mouseX, mouseY)
+		intent.Yaw, intent.Pitch = cockpitSteeringAxes(mouseX, mouseY, g.profile.Input)
 	} else if g.mouseFlight {
 		mouseX, mouseY := ebiten.CursorPosition()
-		mouseYaw, mousePitch := mouseFlightAxes(mouseX, mouseY, g.mouseNeutralX, g.mouseNeutralY)
+		mouseYaw, mousePitch := mouseFlightAxes(mouseX, mouseY, g.mouseNeutralX, g.mouseNeutralY, g.profile.Input)
 		intent.Yaw += mouseYaw
 		intent.Pitch += mousePitch
 	}
@@ -1112,7 +1073,7 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	if g.laserBeamTime <= 0 {
 		return
 	}
-	beamColor := color.RGBA{R: 80, G: 255, B: 240, A: uint8(255 * g.laserBeamTime / laserBeamTime)}
+	beamColor := color.RGBA{R: 80, G: 255, B: 240, A: uint8(255 * g.laserBeamTime / g.profile.Combat.BeamTime)}
 	start := 0
 	if g.laserBeamPair == 1 {
 		start = 2
@@ -1129,16 +1090,17 @@ func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
 	)
 	cx := float32(ScreenWidth / 2)
 	yellow := color.RGBA{R: 255, G: 224, B: 32, A: 255}
-	activeSegments := max(0, min(maxShieldStrength, g.shieldStrength))
+	segmentCount := g.profile.Player.Shield.Maximum
+	activeSegments := max(0, min(segmentCount, g.shieldStrength))
 	for side := 0; side < 2; side++ {
-		for index := 0; index < 8; index++ {
-			if index < maxShieldStrength-activeSegments {
+		for index := 0; index < segmentCount; index++ {
+			if index < segmentCount-activeSegments {
 				continue
 			}
 			// Square-root spacing fans the divisions outward: broad segments at
 			// each outside edge taper into narrow segments near the center.
-			fractionA := float32(math.Sqrt(float64(index) / 8))
-			fractionB := float32(math.Sqrt(float64(index+1) / 8))
+			fractionA := float32(math.Sqrt(float64(index) / float64(segmentCount)))
+			fractionB := float32(math.Sqrt(float64(index+1) / float64(segmentCount)))
 			var xA, xB float32
 			if side == 0 {
 				xA = cx - halfWidth + halfWidth*fractionA
@@ -1360,10 +1322,10 @@ func (g *Game) cockpitTarget() (float32, float32, bool) {
 		return ScreenWidth / 2, ScreenHeight / 2, true
 	}
 	x, y := ebiten.CursorPosition()
-	return clampCockpitTarget(float32(x), float32(y))
+	return clampCockpitTarget(float32(x), float32(y), float32(g.profile.Targeting.AimRadius))
 }
 
-func clampCockpitTarget(x, y float32) (float32, float32, bool) {
+func clampCockpitTarget(x, y, aimRadius float32) (float32, float32, bool) {
 	cx, cy := float32(ScreenWidth/2), float32(ScreenHeight/2)
 	dx, dy := x-cx, y-cy
 	distance := float32(math.Hypot(float64(dx), float64(dy)))
@@ -1383,7 +1345,7 @@ func (g *Game) cockpitAimTarget() (math3d.Vec3, bool) {
 	if !ok {
 		return math3d.Vec3{}, false
 	}
-	return ray.Origin.Add(ray.Direction.Scale(aimConvergence)), true
+	return ray.Origin.Add(ray.Direction.Scale(g.profile.Targeting.AimConvergence)), true
 }
 
 func cockpitCannonMuzzleTop(x, y, targetX, targetY float32) [2]float32 {
@@ -1515,26 +1477,27 @@ func (g *Game) toggleMouseFlight() {
 	}
 }
 
-func mouseFlightAxes(x, y, neutralX, neutralY int) (yaw, pitch float64) {
-	yaw = applyMouseDeadzone(float64(x-neutralX) / (ScreenWidth / 2))
-	pitch = applyMouseDeadzone(float64(y-neutralY) / (ScreenHeight / 2))
+func mouseFlightAxes(x, y, neutralX, neutralY int, config profile.InputConfig) (yaw, pitch float64) {
+	yaw = applyMouseDeadzone(float64(x-neutralX)/(ScreenWidth/2), config)
+	pitch = applyMouseDeadzone(float64(y-neutralY)/(ScreenHeight/2), config)
 	return yaw, pitch
 }
 
 // cockpitSteeringAxes accounts for the cockpit camera's 180-degree yaw: its
 // screen-right direction is the fighter's local -X direction. Vertical camera
 // and fighter pitch directions already agree.
-func cockpitSteeringAxes(x, y int) (yaw, pitch float64) {
-	screenYaw, pitch := mouseFlightAxes(x, y, ScreenWidth/2, ScreenHeight/2)
+func cockpitSteeringAxes(x, y int, config profile.InputConfig) (yaw, pitch float64) {
+	screenYaw, pitch := mouseFlightAxes(x, y, ScreenWidth/2, ScreenHeight/2, config)
 	return -screenYaw, pitch
 }
 
-func applyMouseDeadzone(value float64) float64 {
+func applyMouseDeadzone(value float64, config profile.InputConfig) float64 {
 	magnitude := math.Abs(value)
-	if magnitude <= mouseDeadzone {
+	deadzone := config.MouseDeadzone
+	if magnitude <= deadzone {
 		return 0
 	}
-	scaled := (magnitude - mouseDeadzone) / (1 - mouseDeadzone) * mouseSensitivity
+	scaled := (magnitude - deadzone) / (1 - deadzone) * config.MouseSensitivity
 	return math.Copysign(min(scaled, 1), value)
 }
 
@@ -1552,7 +1515,7 @@ func keyAxis(negative, positive ebiten.Key) float64 {
 func (g *Game) updateZoom() {
 	zoomInput := keyAxis(ebiten.KeyMinus, ebiten.KeyEqual)
 	_, wheelY := ebiten.Wheel()
-	g.viewCamera.AdjustZoom(zoomInput*zoomSpeed*tickSeconds + wheelY*0.2)
+	g.viewCamera.AdjustZoom(zoomInput*g.profile.Display.ZoomSpeed*g.profile.Simulation.TickSeconds + wheelY*0.2)
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
@@ -1589,7 +1552,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
 	}
-	if g.controlsRemaining > 0 {
+	if g.controlsVisible() {
 		ebitenutil.DebugPrintAt(screen, controlsText(!g.playerDestroyed), 16, 16)
 	}
 	if g.showHUD {
@@ -1603,11 +1566,36 @@ func controlsText(startPrompt bool) string {
 		"Q/E  roll        Mouse  aim\n" +
 		"Right mouse button  steer fighter\n" +
 		"F / left mouse  fire    G  mouse flight\n" +
-		"V  view   Shift  follow fighter   Space  HUD\n\n"
+		"V  view   Shift  follow fighter   Space  HUD\n" +
+		"?  show / hide controls\n\n"
 	if startPrompt {
 		return text + "PRESS S OR FIRE TO START"
 	}
 	return text + "PRESS R TO RESTART"
+}
+
+func questionKeyJustPressed() bool {
+	shift := ebiten.IsKeyPressed(ebiten.KeyShiftLeft) || ebiten.IsKeyPressed(ebiten.KeyShiftRight)
+	return shift && inpututil.IsKeyJustPressed(ebiten.KeySlash)
+}
+
+func (g *Game) controlsVisible() bool {
+	return g.controlsPinned || g.controlsRemaining > 0
+}
+
+func (g *Game) updateControls(seconds float64) {
+	if seconds > 0 && g.controlsRemaining > 0 && !g.controlsPinned {
+		g.controlsRemaining = max(0, g.controlsRemaining-seconds)
+	}
+}
+
+func (g *Game) toggleControls() {
+	if g.controlsVisible() {
+		g.controlsPinned = false
+		g.controlsRemaining = 0
+		return
+	}
+	g.controlsPinned = true
 }
 
 func (g *Game) drawStarfield(screen *ebiten.Image) {
@@ -1647,15 +1635,16 @@ func (g *Game) hudText() string {
 		pointerMode = "Steer"
 	}
 	return fmt.Sprintf(
-		"Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Tempo: %.1fx | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
+		"Profile: %s | Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Tempo: %.1fx | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
 			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
 			"W/S throttle  Mouse/arrows yaw/pitch  Q/E roll  Space stop\nF/left-click fire  G mouse  M mode  V view  P pause  R reset  +/- or wheel zoom",
+		g.profile.Name,
 		g.mode,
 		status,
 		g.viewCamera.Mode,
 		pointerMode,
 		mouseStatus,
-		arcadeMotionScale,
+		g.profile.Simulation.MotionScale,
 		len(g.projectiles),
 		motion.Speed,
 		motion.YawRate,
@@ -1666,7 +1655,7 @@ func (g *Game) hudText() string {
 		len(g.objects),
 		g.visibleObjects,
 		g.shieldStrength,
-		maxShieldStrength,
+		g.profile.Player.Shield.Maximum,
 		g.kills,
 		g.collisions,
 	)
