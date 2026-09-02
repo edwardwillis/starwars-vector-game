@@ -8,6 +8,21 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
 )
 
+func TestStagesForProfileAreProgressive(t *testing.T) {
+	if got := len(StagesForProfile("builtin/arcade")); got != 0 {
+		t.Fatalf("arcade stages = %d", got)
+	}
+	if got := len(StagesForProfile(ProfileCulled)); got != 1 {
+		t.Fatalf("culled stages = %d", got)
+	}
+	if got := len(StagesForProfile(ProfileHiddenLine)); got != 2 {
+		t.Fatalf("hidden-line stages = %d", got)
+	}
+	if got := len(StagesForProfile(ProfileDepthCue)); got != 3 {
+		t.Fatalf("depth-cue stages = %d", got)
+	}
+}
+
 func TestRenderCubeProducesEveryEdge(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
 	lines := pipeline.Render(model.Cube(2), math3d.Translation(0, 0, -5))

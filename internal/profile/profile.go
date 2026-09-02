@@ -68,6 +68,7 @@ type ShieldConfig struct {
 }
 
 type PlayerConfig struct {
+	Object          string
 	InitialPose     kinematics.Pose
 	AutopilotMotion kinematics.Motion
 	Flight          control.ManualConfig
@@ -79,6 +80,7 @@ type DifficultyConfig struct {
 }
 
 type SwarmConfig struct {
+	Object           string
 	Count            int
 	Controller       string
 	Flight           control.Limits
@@ -180,6 +182,7 @@ func Pilot() GameProfile {
 			BeamTime:      0.08,
 		},
 		Player: PlayerConfig{
+			Object: "builtin/twin-panel-fighter",
 			InitialPose: kinematics.Pose{
 				Position:    math3d.Vec3{Z: -7},
 				Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, 0),
@@ -198,6 +201,7 @@ func Pilot() GameProfile {
 			},
 		},
 		Swarm: SwarmConfig{
+			Object:     "builtin/twin-panel-fighter",
 			Count:      5,
 			Controller: control.PursuitName,
 			Flight: control.Limits{
@@ -328,6 +332,12 @@ func (profile GameProfile) Validate() error {
 	}
 	if profile.Difficulty.Name == "" {
 		return fmt.Errorf("difficulty name is required")
+	}
+	if profile.Player.Object == "" {
+		return fmt.Errorf("player object definition is required")
+	}
+	if profile.Swarm.Object == "" {
+		return fmt.Errorf("swarm object definition is required")
 	}
 	if err := validatePositive("zoom speed", profile.Display.ZoomSpeed); err != nil {
 		return err

@@ -694,7 +694,7 @@ controllers remain the baseline for tests and offline play.
 16. Controller contract and registry — atomic validated decisions, named factories, per-instance state, static/manual/pursuit built-ins
 17. Object-definition registry — generic construction, styles, anchors, capabilities, fragments, and polygon shards without fighter-specific game logic
 18. Composable rendering profiles — replace the interim culler with optional backface, hidden-line, scene-occlusion, and depth-cue stages plus the interactive realism selector
-19. Simulation extraction — stable IDs and renderer-independent fixed-tick world updates behind snapshot and command APIs
+19. Simulation extraction — stable IDs and renderer-independent fixed-tick world updates behind snapshot and command APIs; move gameplay tests into this headless layer wherever possible
 20. Death Star — reusable registered surface modules, trench, towers, targeting reticle
 21. Generalized camera anchors — cockpit, chase, spectator, and Death Star viewpoints selected independently from control ownership
 22. Cut-scene orchestration — registered actor, path, camera, text, event, skip, and level-transition timelines
@@ -714,6 +714,47 @@ controllers remain the baseline for tests and offline play.
 - Visibility defaults to drawing every edge; backface and hidden-line modes
   arrive through the rendering-profile work in step 18 and remain
   runtime-switchable features.
+- Later geometry refinement: consider extruding thin fighter wing panels to a
+  small finite depth, with front/back/side faces and consistent winding. This
+  would make back-face and hidden-line culling reliable from every orientation,
+  at the cost of additional geometry and updated fragment/shard definitions.
 - Steps 15–19 are the modularity checkpoint. Major new world content and
   networking build on those contracts rather than adding more special cases to
   the Ebitengine game adapter.
+- Headless testing is a first-class requirement: renderer-independent simulation,
+  catalog, controller, and profile tests should run without a display. Ebiten
+  integration tests may use an `integration` build tag and run under Xvfb (for
+  example, `xvfb-run -a go test -tags=integration ./...`) in local development
+  and CI environments without physical graphics hardware.
+- Vector-rendering guidance: retain homogeneous transforms, perspective
+  projection, near/screen line clipping, back-face detection for closed solids,
+  and vector-adapted depth ordering/hidden-line removal. Treat classic
+  scan-line, area-subdivision, and raster-oriented algorithms as reference
+  material rather than direct implementation targets; do not turn the project
+  into a pixel/raster renderer. A lightweight vector depth buffer or segment
+  splitting may be used when hidden-line removal advances, while BSP/octree
+  structures are reserved for larger static environments or spatial indexing.
+- Geometry prerequisite for visibility: important thin shapes such as fighter
+  panels should eventually be modeled as very thin extruded solids with
+  consistent face winding. This supplies the planes, normals, and depth needed
+  by vector back-face and hidden-line algorithms while preserving the classic
+  outline aesthetic.
+- Reference text: Foley, van Dam, Feiner, and Hughes, *Computer Graphics:
+  Principles and Practice*, 2nd ed. (Addison-Wesley, 1990), especially the
+  chapters on transformations, clipping, visible-surface determination,
+  z-buffering, list-priority methods, spatial subdivision, and animation.
+  Use it for algorithmic foundations while selecting vector-appropriate
+  adaptations rather than copying raster display pipelines.
+
+Implementation status: step 17 is complete. Catalog definitions now have stable
+names and lifecycle factories for intact objects, component fragments, and
+polygon shards. Games accept an injectable object registry, and profiles select
+player and swarm definitions independently of the game loop. Built-in fighter
+and laser-bolt definitions remain available as defaults while custom aliases
+and future object classes can be registered by contributors.
+
+Step 18 implementation is complete. The renderer now exposes composable stages
+and built-in progressive profiles (`arcade`, `culled`, `hidden-line`, and
+`depth-cue`). Profiles are selected from `Display.RenderingProfile`; legacy
+culler support remains compatible while back-face culling and later visibility
+stages can evolve independently.

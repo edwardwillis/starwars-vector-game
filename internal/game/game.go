@@ -60,6 +60,7 @@ func (mode flightMode) String() string {
 type Game struct {
 	profile                  profile.GameProfile
 	controllerRegistry       *control.Registry
+	catalogRegistry          *catalog.Registry
 	objects                  []scene.Object
 	pipeline                 render.Pipeline
 	initialPose              kinematics.Pose
@@ -96,7 +97,10 @@ type Game struct {
 	destructionViewRemaining float64
 	controlsRemaining        float64
 	controlsPinned           bool
+	realismLevel             int
 }
+
+var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue"}
 
 func New() *Game {
 	game, err := NewWithProfile(profile.Pilot())
@@ -109,13 +113,18 @@ func New() *Game {
 // NewWithProfile creates a game from a validated snapshot of the supplied
 // profile. Subsequent caller changes do not affect the running session.
 func NewWithProfile(gameProfile profile.GameProfile) (*Game, error) {
-	return NewWithProfileAndRegistry(gameProfile, control.DefaultRegistry())
+	return NewWithProfileAndRegistries(gameProfile, control.DefaultRegistry(), catalog.DefaultRegistry())
 }
 
 // NewWithProfileAndRegistry creates a game with caller-registered controller
 // implementations while retaining the same profile validation and simulation
 // authority boundaries.
 func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *control.Registry) (*Game, error) {
+	return NewWithProfileAndRegistries(gameProfile, registry, catalog.DefaultRegistry())
+}
+
+// NewWithProfileAndRegistries creates a game with caller-registered controllers and object definitions.
+func NewWithProfileAndRegistries(gameProfile profile.GameProfile, registry *control.Registry, catalogRegistry *catalog.Registry) (*Game, error) {
 	gameProfile = gameProfile.Clone()
 	if err := gameProfile.Validate(); err != nil {
 		return nil, fmt.Errorf("create game: %w", err)
@@ -123,15 +132,24 @@ func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *contro
 	if registry == nil {
 		return nil, fmt.Errorf("create game: controller registry is nil")
 	}
+	if catalogRegistry == nil {
+		return nil, fmt.Errorf("create game: catalog registry is nil")
+	}
 	initialPose := gameProfile.Player.InitialPose
 	autoMotion := gameProfile.Player.AutopilotMotion
-	fighter := catalog.TwinPanelFighter(fighterID, initialPose)
+	fighter, err := catalogRegistry.Create(gameProfile.Player.Object, fighterID, initialPose)
+	if err != nil {
+		return nil, fmt.Errorf("create player object: %w", err)
+	}
 	fighter.Motion = autoMotion
 	objects := []scene.Object{fighter}
 	controllers := make(map[scene.ObjectID]control.Strategy, gameProfile.Swarm.Count)
 	for index, pose := range autonomousFighterPoses(gameProfile.Swarm.InitialPositions) {
 		id := scene.ObjectID(index + 2)
-		autonomous := catalog.TwinPanelFighter(id, pose)
+		autonomous, err := catalogRegistry.Create(gameProfile.Swarm.Object, id, pose)
+		if err != nil {
+			return nil, fmt.Errorf("create swarm object: %w", err)
+		}
 		autonomous.Motion.Speed = gameProfile.Swarm.InitialSpeed + float64(index)*gameProfile.Swarm.SpeedStep
 		objects = append(objects, autonomous)
 		controller, err := registry.Create(gameProfile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, gameProfile.Swarm.Pursuit)
@@ -145,6 +163,7 @@ func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *contro
 	game := &Game{
 		profile:            gameProfile,
 		controllerRegistry: registry,
+		catalogRegistry:    catalogRegistry,
 		pipeline:           render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
 		objects:            objects,
 		initialPose:        initialPose,
@@ -161,6 +180,13 @@ func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *contro
 		started:            false,
 		showHUD:            false,
 		controlsRemaining:  gameProfile.Display.ControlsDisplayDuration,
+	}
+	game.pipeline.Stages = render.StagesForProfile(gameProfile.Display.RenderingProfile)
+	for index, name := range renderingProfiles {
+		if name == gameProfile.Display.RenderingProfile {
+			game.realismLevel = index
+			break
+		}
 	}
 	game.pipeline.View = game.viewCamera.View(game.objects)
 	return game, nil
@@ -199,6 +225,12 @@ func (g *Game) Update() error {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
 		g.showHUD = !g.showHUD
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyBracketLeft) {
+		g.setRealismLevel(g.realismLevel - 1)
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
+		g.setRealismLevel(g.realismLevel + 1)
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
 		g.resetFighter()
@@ -518,7 +550,10 @@ func (g *Game) spawnDisintegration(object scene.Object) {
 		direction := object.Pose.Orientation.Rotate(localDirection).Normalize()
 		pose := object.Pose
 		pose.Position = pose.Position.Add(direction.Scale(0.08))
-		fragment := catalog.TwinPanelFighterFragment(g.nextObjectID, index, pose)
+		fragment, err := g.catalogRegistry.CreateFragment(object.Definition, g.nextObjectID, index, pose)
+		if err != nil {
+			continue
+		}
 		g.nextObjectID++
 		spinSign := 1.0
 		if (uint64(object.ID)+uint64(index))%2 == 0 {
@@ -548,14 +583,20 @@ func (g *Game) spawnPolygonDisintegration(component scene.Object, transient dest
 	if transient.rootObjectID == 0 {
 		transient.rootObjectID = component.ID
 	}
-	polygonCount := catalog.TwinPanelFighterPolygonCount(transient.componentIndex)
+	polygonCount, err := g.catalogRegistry.PolygonCount(component.Definition, transient.componentIndex)
+	if err != nil {
+		return
+	}
 	for polygonIndex := 0; polygonIndex < polygonCount; polygonIndex++ {
-		shard := catalog.TwinPanelFighterPolygon(
+		shard, err := g.catalogRegistry.CreatePolygon(component.Definition,
 			g.nextObjectID,
 			transient.componentIndex,
 			polygonIndex,
 			component.Pose,
 		)
+		if err != nil {
+			continue
+		}
 		g.nextObjectID++
 		centroid := modelCentroid(shard.Parts[0].Mesh.Verts)
 		localDirection := centroid.Normalize()
@@ -688,7 +729,10 @@ func (g *Game) spawnAutonomousFighter() {
 	}
 	id := g.nextObjectID
 	g.nextObjectID++
-	fighter := catalog.TwinPanelFighter(id, pose)
+	fighter, err := g.catalogRegistry.Create(g.profile.Swarm.Object, id, pose)
+	if err != nil {
+		return
+	}
 	fighter.Motion.Speed = g.profile.Swarm.InitialSpeed + g.profile.Swarm.SpeedStep*float64(g.respawnSequence%uint64(max(1, g.profile.Swarm.Count)))
 	controller, err := g.controllerRegistry.Create(g.profile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, g.profile.Swarm.Pursuit)
 	if err != nil {
@@ -945,7 +989,10 @@ func (g *Game) updateShield(seconds float64) {
 
 func (g *Game) respawnPlayer() {
 	pose := g.safePlayerRespawnPose()
-	fighter := catalog.TwinPanelFighter(fighterID, pose)
+	fighter, err := g.catalogRegistry.Create(g.profile.Player.Object, fighterID, pose)
+	if err != nil {
+		return
+	}
 	if g.mode == modeAutopilot {
 		fighter.Motion = g.autoMotion
 	} else {
@@ -1557,7 +1604,32 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 	if g.showHUD {
 		ebitenutil.DebugPrint(screen, g.hudText())
+		g.drawRealismSlider(screen)
 	}
+}
+
+func (g *Game) setRealismLevel(level int) {
+	if level < 0 {
+		level = 0
+	}
+	if level >= len(renderingProfiles) {
+		level = len(renderingProfiles) - 1
+	}
+	g.realismLevel = level
+	g.pipeline.Stages = render.StagesForProfile(renderingProfiles[level])
+}
+
+func (g *Game) drawRealismSlider(screen *ebiten.Image) {
+	x, y, width := float32(24), float32(ScreenHeight-28), float32(220)
+	lineColor := color.RGBA{R: 64, G: 224, B: 255, A: 255}
+	vector.StrokeLine(screen, x, y, x+width, y, 2, lineColor, true)
+	for i := range renderingProfiles {
+		px := x + width*float32(i)/float32(len(renderingProfiles)-1)
+		vector.StrokeLine(screen, px, y-6, px, y+6, 2, lineColor, true)
+	}
+	px := x + width*float32(g.realismLevel)/float32(len(renderingProfiles)-1)
+	vector.DrawFilledCircle(screen, px, y, 6, lineColor, true)
+	drawVectorText(screen, x, y-12, fmt.Sprintf("REALISM %s  [ / ]", renderingProfiles[g.realismLevel]), lineColor)
 }
 
 func controlsText(startPrompt bool) string {
@@ -1567,6 +1639,7 @@ func controlsText(startPrompt bool) string {
 		"Right mouse button  steer fighter\n" +
 		"F / left mouse  fire    G  mouse flight\n" +
 		"V  view   Shift  follow fighter   Space  HUD\n" +
+		"[ / ]  rendering realism\n" +
 		"?  show / hide controls\n\n"
 	if startPrompt {
 		return text + "PRESS S OR FIRE TO START"

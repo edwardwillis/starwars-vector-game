@@ -25,15 +25,22 @@ var (
 	twinPanelPolygonShards = buildTwinPanelPolygonShards()
 )
 
+const (
+	CubeName             = "builtin/cube"
+	TwinPanelFighterName = "builtin/twin-panel-fighter"
+	LaserBoltName        = "builtin/laser-bolt"
+)
+
 const standardLineWidth float32 = 2
 
 // Cube returns a styled cube object suitable for pipeline demonstrations and
 // scene-layout tests.
 func Cube(id scene.ObjectID, size float64, pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		ID:   id,
-		Name: "cube",
-		Pose: pose,
+		ID:         id,
+		Name:       "cube",
+		Definition: CubeName,
+		Pose:       pose,
 		Parts: []scene.Part{{
 			Name:      "hull",
 			Mesh:      model.Cube(size),
@@ -68,6 +75,7 @@ func TwinPanelFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose
 	return scene.Object{
 		ID:               id,
 		Name:             "twin-panel fighter debris",
+		Definition:       TwinPanelFighterName,
 		Pose:             pose,
 		Parts:            parts,
 		CollisionRole:    scene.CollisionDebris,
@@ -113,9 +121,10 @@ func TwinPanelFighterPolygon(id scene.ObjectID, component, polygon int, pose kin
 	}
 	template := twinPanelPolygonShards[component][polygon]
 	return scene.Object{
-		ID:   id,
-		Name: "twin-panel fighter polygon shard",
-		Pose: pose,
+		ID:         id,
+		Name:       "twin-panel fighter polygon shard",
+		Definition: TwinPanelFighterName,
+		Pose:       pose,
 		Parts: []scene.Part{{
 			Name:      "polygon",
 			Mesh:      template.mesh,
@@ -132,9 +141,10 @@ func TwinPanelFighterPolygon(id scene.ObjectID, component, polygon int, pose kin
 // cockpit window.
 func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		ID:   id,
-		Name: "twin-panel fighter",
-		Pose: pose,
+		ID:         id,
+		Name:       "twin-panel fighter",
+		Definition: TwinPanelFighterName,
+		Pose:       pose,
 		Parts: []scene.Part{
 			{
 				Name:      "hull",
@@ -191,9 +201,10 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 // clusters at every ray tip.
 func LaserBolt(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		ID:   id,
-		Name: "laser bolt",
-		Pose: pose,
+		ID:         id,
+		Name:       "laser bolt",
+		Definition: LaserBoltName,
+		Pose:       pose,
 		Parts: []scene.Part{
 			{
 				Name:      "rays",

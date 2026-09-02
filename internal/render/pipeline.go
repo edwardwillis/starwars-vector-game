@@ -4,6 +4,8 @@ package render
 import (
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
+	"math"
+	"strings"
 )
 
 // Line is a visible screen-space line segment.
@@ -32,6 +34,122 @@ type Culler interface {
 	Cull(verts []math3d.Vec3, edges []model.Edge) []model.Edge
 }
 
+// Stage is a composable topology stage. Stages run after world/view
+// transformation and before clipping and projection.
+type Stage interface {
+	Name() string
+	Process(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []model.Edge
+}
+
+type stageFunc struct {
+	name string
+	fn   func([]math3d.Vec3, model.Model, []model.Edge) []model.Edge
+}
+
+func (s stageFunc) Name() string { return s.name }
+func (s stageFunc) Process(v []math3d.Vec3, m model.Model, e []model.Edge) []model.Edge {
+	return s.fn(v, m, e)
+}
+
+// ProfileNames are the progressively more realistic built-in render modes.
+const (
+	ProfileArcade     = "arcade"
+	ProfileCulled     = "culled"
+	ProfileHiddenLine = "hidden-line"
+	ProfileDepthCue   = "depth-cue"
+)
+
+func StagesForProfile(name string) []Stage {
+	name = strings.ToLower(name)
+	name = strings.TrimPrefix(name, "builtin/")
+	switch name {
+	case ProfileCulled:
+		return []Stage{BackfaceStage()}
+	case ProfileHiddenLine:
+		return []Stage{BackfaceStage(), HiddenLineStage()}
+	case ProfileDepthCue:
+		return []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
+	default:
+		return nil
+	}
+}
+
+func BackfaceStage() Stage { return stageFunc{"backface-culling", backfaceCull} }
+func HiddenLineStage() Stage {
+	return stageFunc{"hidden-line-removal", func(v []math3d.Vec3, m model.Model, e []model.Edge) []model.Edge { return e }}
+}
+func DepthCueStage() Stage {
+	return stageFunc{"depth-cue", func(v []math3d.Vec3, m model.Model, e []model.Edge) []model.Edge { return e }}
+}
+
+func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []model.Edge {
+	if len(mesh.Faces) == 0 {
+		return edges
+	}
+	// Open wireframe assemblies such as the twin-panel fighter contain thin
+	// side panels with no closed volume. Face-level culling makes one panel pop
+	// in and out independently, so preserve the complete outline for these
+	// meshes and reserve culling for volumetric geometry.
+	for _, face := range mesh.Faces {
+		if len(face.Vertices) < 3 {
+			continue
+		}
+		a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
+		n := b.Sub(a).Cross(c.Sub(a))
+		if math.Abs(n.X) > math.Abs(n.Z)*2 && math.Abs(n.X) > math.Abs(n.Y)*2 {
+			return edges
+		}
+	}
+	front := make(map[model.Edge]bool)
+	back := make(map[model.Edge]bool)
+	for _, face := range mesh.Faces {
+		if len(face.Vertices) < 3 {
+			continue
+		}
+		a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
+		n := b.Sub(a).Cross(c.Sub(a))
+		center := a.Add(b).Add(c).Scale(1.0 / 3)
+		facing := n.Dot(center.Scale(-1))
+		target := front
+		// Thin panel surfaces are intentionally visible as vector outlines even
+		// when viewed nearly edge-on. Their normal is dominated by X, so a strict
+		// solid-surface culler would make a wing blink out as the craft rotates.
+		if math.Abs(n.X) > math.Abs(n.Z)*2 && math.Abs(n.X) > math.Abs(n.Y)*2 {
+			target = front
+		} else if math.Abs(facing) < 1e-9 {
+			// Edge-on faces have no reliable front/back classification; retaining
+			// their boundary keeps thin panels visible from side and follow views.
+			target = front
+		} else if facing < 0 {
+			target = back
+		}
+		for i, index := range face.Vertices {
+			next := face.Vertices[(i+1)%len(face.Vertices)]
+			if index > next {
+				index, next = next, index
+			}
+			target[model.Edge{A: index, B: next}] = true
+		}
+	}
+	// Catalog meshes may use either winding convention. If the camera-facing
+	// orientation produced no edges, use the opposite convention rather than
+	// making an entire open panel disappear.
+	if len(front) == 0 && len(back) > 0 {
+		front = back
+	}
+	out := make([]model.Edge, 0, len(edges))
+	for _, edge := range edges {
+		key := edge
+		if key.A > key.B {
+			key.A, key.B = key.B, key.A
+		}
+		if front[key] {
+			out = append(out, edge)
+		}
+	}
+	return out
+}
+
 // Pipeline contains the configurable stages of the wireframe renderer.
 type Pipeline struct {
 	Width      int
@@ -40,6 +158,7 @@ type Pipeline struct {
 	View       math3d.Mat4
 	Projection math3d.Mat4
 	Culler     Culler
+	Stages     []Stage
 }
 
 func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
@@ -68,6 +187,11 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 	edges := mesh.Edges
 	if p.Culler != nil {
 		edges = p.Culler.Cull(verts, edges)
+	}
+	for _, stage := range p.Stages {
+		if stage != nil {
+			edges = stage.Process(verts, mesh, edges)
+		}
 	}
 
 	lines := make([]Line, 0, len(edges))

@@ -52,6 +52,7 @@ type Anchor struct {
 type Object struct {
 	ID               ObjectID
 	Name             string
+	Definition       string
 	Pose             kinematics.Pose
 	Motion           kinematics.Motion
 	Parts            []Part
