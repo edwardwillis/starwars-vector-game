@@ -91,3 +91,38 @@ func (q Quaternion) Matrix() Mat4 {
 		{0, 0, 0, 1},
 	}
 }
+
+// Slerp interpolates between orientations along the shortest arc.
+func Slerp(first, second Quaternion, amount float64) Quaternion {
+	first = first.Normalize()
+	second = second.Normalize()
+	if amount <= 0 {
+		return first
+	}
+	if amount >= 1 {
+		return second
+	}
+	dot := first.W*second.W + first.X*second.X + first.Y*second.Y + first.Z*second.Z
+	if dot < 0 {
+		second = Quaternion{W: -second.W, X: -second.X, Y: -second.Y, Z: -second.Z}
+		dot = -dot
+	}
+	if dot > 0.9995 {
+		return Quaternion{
+			W: first.W + amount*(second.W-first.W),
+			X: first.X + amount*(second.X-first.X),
+			Y: first.Y + amount*(second.Y-first.Y),
+			Z: first.Z + amount*(second.Z-first.Z),
+		}.Normalize()
+	}
+	theta := math.Acos(max(-1, min(1, dot)))
+	sine := math.Sin(theta)
+	firstWeight := math.Sin((1-amount)*theta) / sine
+	secondWeight := math.Sin(amount*theta) / sine
+	return Quaternion{
+		W: first.W*firstWeight + second.W*secondWeight,
+		X: first.X*firstWeight + second.X*secondWeight,
+		Y: first.Y*firstWeight + second.Y*secondWeight,
+		Z: first.Z*firstWeight + second.Z*secondWeight,
+	}.Normalize()
+}

@@ -10,7 +10,7 @@ import (
 )
 
 func TestFireLaserUsesMuzzlePoseAndInheritedSpeed(t *testing.T) {
-	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{
+	shooter := catalog.TIEFighter(1, kinematics.Pose{
 		Position:    math3d.Vec3{X: 10},
 		Orientation: math3d.IdentityQuaternion(),
 	})
@@ -43,7 +43,7 @@ func TestFireLaserRejectsMissingMuzzle(t *testing.T) {
 }
 
 func TestFireLaserWithConfigUsesSessionTuning(t *testing.T) {
-	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	shooter := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	config := LaserConfig{Speed: 30, SpinRate: 4, Lifetime: 3}
 	spawn, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", config)
 	if err != nil {
@@ -55,14 +55,14 @@ func TestFireLaserWithConfigUsesSessionTuning(t *testing.T) {
 }
 
 func TestFireLaserWithConfigRejectsInvalidTuning(t *testing.T) {
-	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	shooter := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	if _, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", LaserConfig{}); err == nil {
 		t.Fatal("FireLaserWithConfig accepted invalid tuning")
 	}
 }
 
 func TestFireLaserTowardOrientsBoltAtConvergencePoint(t *testing.T) {
-	shooter := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	shooter := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	target := math3d.Vec3{X: 4, Y: 2, Z: 20}
 	spawn, err := FireLaserToward(shooter, 2, "muzzle-upper-left", target)
 	if err != nil {

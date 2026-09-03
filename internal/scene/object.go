@@ -20,9 +20,28 @@ type Part struct {
 	LineWidth        float32
 	VisibleInCockpit bool
 	CockpitOnly      bool
+	Detail           DetailTier
+}
+
+// DetailTier orders optional visual geometry from essential silhouette to
+// close-range decoration. It affects rendering only.
+type DetailTier uint8
+
+const (
+	DetailPrimary DetailTier = iota
+	DetailMedium
+	DetailNear
+)
+
+type DetailThresholds struct {
+	MediumPixels float64
+	NearPixels   float64
 }
 
 type ObjectID uint64
+type FrameID string
+
+const ExteriorFrame FrameID = "builtin/exterior"
 
 type CollisionRole uint8
 
@@ -53,6 +72,8 @@ type Object struct {
 	ID               ObjectID
 	Name             string
 	Definition       string
+	Appearance       string
+	Frame            FrameID
 	Pose             kinematics.Pose
 	Motion           kinematics.Motion
 	Parts            []Part
@@ -61,8 +82,11 @@ type Object struct {
 	CollisionRadius  float64
 	Physical         bool
 	Hittable         bool
+	Targetable       bool
 	Destructible     bool
 	DestructionStage DestructionStage
+	VisualRadius     float64
+	DetailThresholds DetailThresholds
 }
 
 func (o Object) WorldMatrix() math3d.Mat4 {
@@ -92,6 +116,13 @@ func (o Object) Validate() error {
 	}
 	if o.Destructible && !o.Hittable {
 		return fmt.Errorf("scene object %q is destructible but not hittable", o.Name)
+	}
+	if o.VisualRadius < 0 {
+		return fmt.Errorf("scene object %q has a negative visual radius", o.Name)
+	}
+	if o.DetailThresholds.MediumPixels < 0 || o.DetailThresholds.NearPixels < 0 ||
+		(o.DetailThresholds.NearPixels > 0 && o.DetailThresholds.NearPixels < o.DetailThresholds.MediumPixels) {
+		return fmt.Errorf("scene object %q has invalid detail thresholds", o.Name)
 	}
 	for index, part := range o.Parts {
 		if err := part.Mesh.Validate(); err != nil {

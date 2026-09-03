@@ -155,6 +155,7 @@ type Pipeline struct {
 	Width      int
 	Height     int
 	Near       float64
+	Far        float64
 	View       math3d.Mat4
 	Projection math3d.Mat4
 	Culler     Culler
@@ -166,6 +167,7 @@ func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
 		Width:      width,
 		Height:     height,
 		Near:       near,
+		Far:        far,
 		View:       math3d.Identity(),
 		Projection: math3d.Perspective(verticalFOV, float64(width)/float64(height), near, far),
 	}
@@ -204,6 +206,10 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 		if !visible {
 			continue
 		}
+		a, b, visible = clipFar(a, b, p.Far)
+		if !visible {
+			continue
+		}
 
 		a = p.Projection.TransformPoint(a)
 		b = p.Projection.TransformPoint(b)
@@ -228,7 +234,7 @@ func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
 		return Point{}, false
 	}
 	cameraPoint := p.View.TransformPoint(world)
-	if cameraPoint.Z > -p.Near {
+	if cameraPoint.Z > -p.Near || (p.Far > p.Near && cameraPoint.Z < -p.Far) {
 		return Point{}, false
 	}
 	projected := p.Projection.TransformPoint(cameraPoint)
@@ -240,6 +246,28 @@ func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
 		Y:     (1 - projected.Y) * 0.5 * float64(p.Height),
 		Depth: -cameraPoint.Z,
 	}, true
+}
+
+func clipFar(a, b math3d.Vec3, far float64) (math3d.Vec3, math3d.Vec3, bool) {
+	if far <= 0 {
+		return a, b, true
+	}
+	planeZ := -far
+	aInside, bInside := a.Z >= planeZ, b.Z >= planeZ
+	if !aInside && !bInside {
+		return math3d.Vec3{}, math3d.Vec3{}, false
+	}
+	if aInside && bInside {
+		return a, b, true
+	}
+	t := (planeZ - a.Z) / (b.Z - a.Z)
+	intersection := a.Add(b.Sub(a).Scale(t))
+	if !aInside {
+		a = intersection
+	} else {
+		b = intersection
+	}
+	return a, b, true
 }
 
 // ScreenRay converts a logical screen position into a world-space camera ray.

@@ -100,7 +100,8 @@ func (r *Registry) CreatePolygon(name string, id scene.ObjectID, component, poly
 
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
-	_ = r.Register(Definition{Name: TwinPanelFighterName, Create: TwinPanelFighter, CreateFragment: TwinPanelFighterFragment, PolygonCount: TwinPanelFighterPolygonCount, CreatePolygon: TwinPanelFighterPolygon})
+	_ = r.Register(Definition{Name: TIEFighterName, Create: TIEFighter, CreateFragment: TIEFighterFragment, PolygonCount: TIEFighterPolygonCount, CreatePolygon: TIEFighterPolygon})
 	_ = r.Register(Definition{Name: LaserBoltName, Create: LaserBolt})
+	_ = r.Register(Definition{Name: DeathStarName, Create: DeathStar})
 	return r
 }

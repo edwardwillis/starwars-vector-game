@@ -17,18 +17,20 @@ var (
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
-	twinPanelHull          = model.TwinPanelFighter()
-	twinPanelWindow        = model.TwinPanelFighterWindow()
-	twinPanelDebris        = model.TwinPanelFighterFragments()
-	laserBoltRays          = model.LaserBoltRays()
-	laserBoltTips          = model.LaserBoltBranches()
-	twinPanelPolygonShards = buildTwinPanelPolygonShards()
+	tieFighterHull          = model.TIEFighter()
+	tieFighterWindow        = model.TIEFighterWindow()
+	tieFighterDebris        = model.TIEFighterFragments()
+	laserBoltRays           = model.LaserBoltRays()
+	laserBoltTips           = model.LaserBoltBranches()
+	tieFighterPolygonShards = buildTIEFighterPolygonShards()
+	deathStarGeometry       = model.DeathStar(300)
 )
 
 const (
-	CubeName             = "builtin/cube"
-	TwinPanelFighterName = "builtin/twin-panel-fighter"
-	LaserBoltName        = "builtin/laser-bolt"
+	CubeName       = "builtin/cube"
+	TIEFighterName = "builtin/tie-fighter"
+	LaserBoltName  = "builtin/laser-bolt"
+	DeathStarName  = "builtin/death-star"
 )
 
 const standardLineWidth float32 = 2
@@ -53,29 +55,29 @@ func Cube(id scene.ObjectID, size float64, pose kinematics.Pose) scene.Object {
 	}
 }
 
-// TwinPanelFighterFragment returns one of three non-colliding debris pieces.
-func TwinPanelFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
-	if index < 0 || index >= len(twinPanelDebris) {
-		panic("catalog: twin-panel fighter fragment index out of range")
+// TIEFighterFragment returns one of three non-colliding debris pieces.
+func TIEFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
+	if index < 0 || index >= len(tieFighterDebris) {
+		panic("catalog: TIE fighter fragment index out of range")
 	}
 	parts := []scene.Part{{
 		Name:      "fragment-hull",
-		Mesh:      twinPanelDebris[index],
+		Mesh:      tieFighterDebris[index],
 		Color:     vectorGreen,
 		LineWidth: standardLineWidth,
 	}}
 	if index == 1 {
 		parts = append(parts, scene.Part{
 			Name:      "fragment-window",
-			Mesh:      twinPanelWindow,
+			Mesh:      tieFighterWindow,
 			Color:     windowAmber,
 			LineWidth: standardLineWidth,
 		})
 	}
 	return scene.Object{
 		ID:               id,
-		Name:             "twin-panel fighter debris",
-		Definition:       TwinPanelFighterName,
+		Name:             "TIE fighter debris",
+		Definition:       TIEFighterName,
 		Pose:             pose,
 		Parts:            parts,
 		CollisionRole:    scene.CollisionDebris,
@@ -91,14 +93,14 @@ type polygonShardTemplate struct {
 	color color.RGBA
 }
 
-func buildTwinPanelPolygonShards() [3][]polygonShardTemplate {
+func buildTIEFighterPolygonShards() [3][]polygonShardTemplate {
 	var shards [3][]polygonShardTemplate
-	for component := range twinPanelDebris {
-		for _, polygon := range twinPanelDebris[component].PolygonModels() {
+	for component := range tieFighterDebris {
+		for _, polygon := range tieFighterDebris[component].PolygonModels() {
 			shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: vectorGreen})
 		}
 		if component == 1 {
-			for _, polygon := range twinPanelWindow.PolygonModels() {
+			for _, polygon := range tieFighterWindow.PolygonModels() {
 				shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: windowAmber})
 			}
 		}
@@ -106,24 +108,24 @@ func buildTwinPanelPolygonShards() [3][]polygonShardTemplate {
 	return shards
 }
 
-func TwinPanelFighterPolygonCount(component int) int {
-	if component < 0 || component >= len(twinPanelPolygonShards) {
+func TIEFighterPolygonCount(component int) int {
+	if component < 0 || component >= len(tieFighterPolygonShards) {
 		return 0
 	}
-	return len(twinPanelPolygonShards[component])
+	return len(tieFighterPolygonShards[component])
 }
 
-// TwinPanelFighterPolygon returns one final, non-targetable polygon shard.
-func TwinPanelFighterPolygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
-	if component < 0 || component >= len(twinPanelPolygonShards) ||
-		polygon < 0 || polygon >= len(twinPanelPolygonShards[component]) {
-		panic("catalog: twin-panel fighter polygon index out of range")
+// TIEFighterPolygon returns one final, non-targetable polygon shard.
+func TIEFighterPolygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
+	if component < 0 || component >= len(tieFighterPolygonShards) ||
+		polygon < 0 || polygon >= len(tieFighterPolygonShards[component]) {
+		panic("catalog: TIE fighter polygon index out of range")
 	}
-	template := twinPanelPolygonShards[component][polygon]
+	template := tieFighterPolygonShards[component][polygon]
 	return scene.Object{
 		ID:         id,
-		Name:       "twin-panel fighter polygon shard",
-		Definition: TwinPanelFighterName,
+		Name:       "TIE fighter polygon shard",
+		Definition: TIEFighterName,
 		Pose:       pose,
 		Parts: []scene.Part{{
 			Name:      "polygon",
@@ -137,24 +139,24 @@ func TwinPanelFighterPolygon(id scene.ObjectID, component, polygon int, pose kin
 	}
 }
 
-// TwinPanelFighter returns the complete multipart fighter with its contrasting
+// TIEFighter returns the complete multipart fighter with its contrasting
 // cockpit window.
-func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
 		ID:         id,
-		Name:       "twin-panel fighter",
-		Definition: TwinPanelFighterName,
+		Name:       "TIE fighter",
+		Definition: TIEFighterName,
 		Pose:       pose,
 		Parts: []scene.Part{
 			{
 				Name:      "hull",
-				Mesh:      twinPanelHull,
+				Mesh:      tieFighterHull,
 				Color:     vectorGreen,
 				LineWidth: standardLineWidth,
 			},
 			{
 				Name:      "windscreen",
-				Mesh:      twinPanelWindow,
+				Mesh:      tieFighterWindow,
 				Color:     windowAmber,
 				LineWidth: standardLineWidth,
 			},
@@ -192,8 +194,10 @@ func TwinPanelFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		CollisionRadius:  1.8,
 		Physical:         true,
 		Hittable:         true,
+		Targetable:       true,
 		Destructible:     true,
 		DestructionStage: scene.DestructionIntact,
+		VisualRadius:     1.8,
 	}
 }
 
@@ -224,5 +228,27 @@ func LaserBolt(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		},
 		CollisionRole:   scene.CollisionProjectile,
 		CollisionRadius: 0.12,
+	}
+}
+
+// DeathStar returns a large static object assembled from independently styled
+// detail tiers. Its geometry remains ordinary object-local vector geometry.
+func DeathStar(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	const radius = 300.0
+	return scene.Object{
+		ID: id, Name: "Death Star", Definition: DeathStarName, Pose: pose,
+		Parts: []scene.Part{
+			{Name: "sphere", Mesh: deathStarGeometry.Sphere, Color: vectorGreen, LineWidth: 1.5, Detail: scene.DetailPrimary},
+			{Name: "superlaser dish", Mesh: deathStarGeometry.Dish, Color: vectorGreen, LineWidth: 2, Detail: scene.DetailMedium},
+		},
+		Anchors: map[string]kinematics.Pose{
+			"center": {Orientation: math3d.IdentityQuaternion()},
+			"target": {Position: math3d.Vec3{Z: -radius}, Orientation: math3d.IdentityQuaternion()},
+			"dish":   {Position: math3d.Vec3{Y: 138, Z: -266}, Orientation: math3d.IdentityQuaternion()},
+		},
+		CollisionRole: scene.CollisionSolid, CollisionRadius: radius,
+		Physical: true, Hittable: true, Targetable: true, Destructible: false,
+		VisualRadius:     radius,
+		DetailThresholds: scene.DetailThresholds{MediumPixels: 360, NearPixels: 430},
 	}
 }

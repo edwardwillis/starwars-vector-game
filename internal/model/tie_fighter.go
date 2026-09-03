@@ -6,11 +6,11 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 )
 
-// TwinPanelFighter returns a deliberately simple, original wireframe fighter:
+// TIEFighter returns a deliberately simple, original wireframe fighter:
 // a faceted cockpit, two box pylons, and two tall framed panels. It is inspired
 // by the broad geometry of classic twin-panel space fighters without copying a
 // production asset.
-func TwinPanelFighter() Model {
+func TIEFighter() Model {
 	mesh := Model{}
 
 	appendCockpit(&mesh)
@@ -87,9 +87,9 @@ func appendCockpit(mesh *Model) {
 
 }
 
-// TwinPanelFighterWindow returns the inset forward window as a separate model
+// TIEFighterWindow returns the inset forward window as a separate model
 // so the game can draw it in a contrasting vector color.
-func TwinPanelFighterWindow() Model {
+func TIEFighterWindow() Model {
 	const (
 		segments      = 8
 		windowRadius  = 0.29
@@ -119,10 +119,10 @@ func TwinPanelFighterWindow() Model {
 	return window
 }
 
-// TwinPanelFighterFragments partitions the fighter's edges into left, center,
+// TIEFighterFragments partitions the fighter's edges into left, center,
 // and right debris meshes. Together the three fragments reconstruct the hull.
-func TwinPanelFighterFragments() [3]Model {
-	hull := TwinPanelFighter()
+func TIEFighterFragments() [3]Model {
+	hull := TIEFighter()
 	fragments := [3]Model{
 		{Verts: hull.Verts},
 		{Verts: hull.Verts},

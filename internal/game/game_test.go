@@ -26,6 +26,7 @@ func TestNewWithProfileAppliesResolvedCustomization(t *testing.T) {
 	custom.Name = "test/custom"
 	custom.Swarm.Count = 2
 	custom.Swarm.InitialPositions = custom.Swarm.InitialPositions[:2]
+	custom.World.Objects = nil
 	custom.Player.Shield.Maximum = 4
 	custom.Combat.Laser.Speed = 27
 
@@ -304,8 +305,9 @@ func TestProjectileExpiresAndIsRemoved(t *testing.T) {
 
 func TestNewCreatesIndependentAutonomousFighters(t *testing.T) {
 	g := New()
-	if len(g.objects) != g.profile.Swarm.Count+1 {
-		t.Fatalf("New created %d objects, want player plus %d autonomous fighters", len(g.objects), g.profile.Swarm.Count)
+	wantObjects := g.profile.Swarm.Count + 1 + len(g.profile.World.Objects)
+	if len(g.objects) != wantObjects {
+		t.Fatalf("New created %d objects, want %d profile objects", len(g.objects), wantObjects)
 	}
 	if len(g.controllers) != g.profile.Swarm.Count {
 		t.Fatalf("New created %d controllers, want %d", len(g.controllers), g.profile.Swarm.Count)
@@ -568,7 +570,7 @@ func TestLaserHitBreaksComponentIntoFreshPolygonShards(t *testing.T) {
 	if g.objectByID(componentID) != nil || g.objectByID(boltID) != nil {
 		t.Fatal("component hit did not consume the component and projectile")
 	}
-	wantPolygons := catalog.TwinPanelFighterPolygonCount(componentIndex)
+	wantPolygons := catalog.TIEFighterPolygonCount(componentIndex)
 	polygonCount := 0
 	componentCount := 0
 	for id, transient := range g.debris {

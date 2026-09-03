@@ -6,16 +6,19 @@ import (
 	"math"
 	"sort"
 
+	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
 	"github.com/edwardwillis/starwars-vector-game/internal/collision"
 	"github.com/edwardwillis/starwars-vector-game/internal/combat"
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
+	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
+	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -44,6 +47,27 @@ type destructionTransient struct {
 	stage          scene.DestructionStage
 }
 
+type localEnvironment struct {
+	bound     environment.Bound
+	tiles     map[environment.TileCoordinate]environment.Tile
+	destroyed map[string]bool
+}
+
+type environmentTransition struct {
+	objectID      scene.ObjectID
+	destination   scene.FrameID
+	anchor        string
+	duration      float64
+	elapsed       float64
+	startPose     kinematics.Pose
+	targetPose    kinematics.Pose
+	entryPose     kinematics.Pose
+	motion        kinematics.Motion
+	worldVelocity math3d.Vec3
+	previousMode  camera.Mode
+	rollRadians   float64
+}
+
 const (
 	modeAutopilot flightMode = iota
 	modeManual
@@ -61,6 +85,11 @@ type Game struct {
 	profile                  profile.GameProfile
 	controllerRegistry       *control.Registry
 	catalogRegistry          *catalog.Registry
+	appearanceRegistry       *appearance.Registry
+	environmentRegistry      *environment.Registry
+	environments             []localEnvironment
+	transitions              map[scene.ObjectID]environmentTransition
+	transitionCommitments    map[scene.ObjectID]bool
 	objects                  []scene.Object
 	pipeline                 render.Pipeline
 	initialPose              kinematics.Pose
@@ -68,6 +97,7 @@ type Game struct {
 	mode                     flightMode
 	paused                   bool
 	started                  bool
+	swarmLaunched            bool
 	showHUD                  bool
 	viewCamera               *camera.Camera
 	nextObjectID             scene.ObjectID
@@ -85,6 +115,7 @@ type Game struct {
 	starField                *starfield.Field
 	controllers              map[scene.ObjectID]control.Strategy
 	debris                   map[scene.ObjectID]destructionTransient
+	environmentContacts      map[scene.ObjectID]float64
 	respawns                 []autonomousRespawn
 	respawnSequence          uint64
 	playerDestroyed          bool
@@ -92,6 +123,8 @@ type Game struct {
 	kills                    int
 	collisions               int
 	visibleObjects           int
+	world                    *sim.World
+	detailLevels             map[scene.ObjectID]scene.DetailTier
 	shieldStrength           int
 	shieldQuietTime          float64
 	destructionViewRemaining float64
@@ -125,6 +158,19 @@ func NewWithProfileAndRegistry(gameProfile profile.GameProfile, registry *contro
 
 // NewWithProfileAndRegistries creates a game with caller-registered controllers and object definitions.
 func NewWithProfileAndRegistries(gameProfile profile.GameProfile, registry *control.Registry, catalogRegistry *catalog.Registry) (*Game, error) {
+	return NewWithAllRegistries(gameProfile, registry, catalogRegistry, environment.DefaultRegistry())
+}
+
+// NewWithAllRegistries is the complete customization boundary for a session.
+// Environment definitions use the same registration approach as controllers
+// and catalog objects, so adding a large-object zone does not modify Game.
+func NewWithAllRegistries(gameProfile profile.GameProfile, registry *control.Registry, catalogRegistry *catalog.Registry, environmentRegistry *environment.Registry) (*Game, error) {
+	return NewWithRegistriesAndAppearances(gameProfile, registry, catalogRegistry, environmentRegistry, appearance.DefaultRegistry())
+}
+
+// NewWithRegistriesAndAppearances is the full customization boundary for
+// logical objects, controllers, environments, and visual presentations.
+func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *control.Registry, catalogRegistry *catalog.Registry, environmentRegistry *environment.Registry, appearanceRegistry *appearance.Registry) (*Game, error) {
 	gameProfile = gameProfile.Clone()
 	if err := gameProfile.Validate(); err != nil {
 		return nil, fmt.Errorf("create game: %w", err)
@@ -134,6 +180,12 @@ func NewWithProfileAndRegistries(gameProfile profile.GameProfile, registry *cont
 	}
 	if catalogRegistry == nil {
 		return nil, fmt.Errorf("create game: catalog registry is nil")
+	}
+	if environmentRegistry == nil {
+		return nil, fmt.Errorf("create game: environment registry is nil")
+	}
+	if appearanceRegistry == nil {
+		return nil, fmt.Errorf("create game: appearance registry is nil")
 	}
 	initialPose := gameProfile.Player.InitialPose
 	autoMotion := gameProfile.Player.AutopilotMotion
@@ -158,30 +210,55 @@ func NewWithProfileAndRegistries(gameProfile profile.GameProfile, registry *cont
 		}
 		controllers[id] = controller
 	}
+	nextObjectID := scene.ObjectID(gameProfile.Swarm.Count + 2)
+	for _, placement := range gameProfile.World.Objects {
+		object, err := catalogRegistry.Create(placement.Definition, nextObjectID, placement.Pose)
+		if err != nil {
+			return nil, fmt.Errorf("create world object %q: %w", placement.Definition, err)
+		}
+		object.Appearance = placement.Appearance
+		objects = append(objects, object)
+		nextObjectID++
+	}
 	viewCamera := camera.New(fighterID)
 	viewCamera.Mode = camera.Cockpit
 	game := &Game{
-		profile:            gameProfile,
-		controllerRegistry: registry,
-		catalogRegistry:    catalogRegistry,
-		pipeline:           render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
-		objects:            objects,
-		initialPose:        initialPose,
-		autoMotion:         autoMotion,
-		viewCamera:         viewCamera,
-		nextObjectID:       scene.ObjectID(gameProfile.Swarm.Count + 2),
-		projectiles:        make(map[scene.ObjectID]float64),
-		owners:             make(map[scene.ObjectID]scene.ObjectID),
-		starField:          starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
-		controllers:        controllers,
-		debris:             make(map[scene.ObjectID]destructionTransient),
-		respawnSequence:    uint64(gameProfile.Swarm.Count),
-		shieldStrength:     gameProfile.Player.Shield.Maximum,
-		started:            false,
-		showHUD:            false,
-		controlsRemaining:  gameProfile.Display.ControlsDisplayDuration,
+		profile:             gameProfile,
+		controllerRegistry:  registry,
+		catalogRegistry:     catalogRegistry,
+		appearanceRegistry:  appearanceRegistry,
+		environmentRegistry: environmentRegistry,
+		pipeline:            render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
+		objects:             objects,
+		initialPose:         initialPose,
+		autoMotion:          autoMotion,
+		viewCamera:          viewCamera,
+		nextObjectID:        nextObjectID,
+		projectiles:         make(map[scene.ObjectID]float64),
+		owners:              make(map[scene.ObjectID]scene.ObjectID),
+		starField:           starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
+		controllers:         controllers,
+		debris:              make(map[scene.ObjectID]destructionTransient),
+		environmentContacts: make(map[scene.ObjectID]float64),
+		transitions:         make(map[scene.ObjectID]environmentTransition),
+		transitionCommitments: make(map[scene.ObjectID]bool),
+		respawnSequence:     uint64(gameProfile.Swarm.Count),
+		shieldStrength:      gameProfile.Player.Shield.Maximum,
+		started:             false,
+		swarmLaunched:       true,
+		showHUD:             false,
+		controlsRemaining:   gameProfile.Display.ControlsDisplayDuration,
+		detailLevels:        make(map[scene.ObjectID]scene.DetailTier),
 	}
 	game.pipeline.Stages = render.StagesForProfile(gameProfile.Display.RenderingProfile)
+	world, err := sim.New(objects)
+	if err != nil {
+		return nil, fmt.Errorf("create simulation world: %w", err)
+	}
+	game.world = world
+	if err := game.installEnvironments(); err != nil {
+		return nil, fmt.Errorf("create local environments: %w", err)
+	}
 	for index, name := range renderingProfiles {
 		if name == gameProfile.Display.RenderingProfile {
 			game.realismLevel = index
@@ -190,6 +267,42 @@ func NewWithProfileAndRegistries(gameProfile profile.GameProfile, registry *cont
 	}
 	game.pipeline.View = game.viewCamera.View(game.objects)
 	return game, nil
+}
+
+func (g *Game) launchSwarm() {
+	if g.swarmLaunched {
+		return
+	}
+	g.swarmLaunched = true
+	for id := range g.controllers {
+		if fighter := g.objectByID(id); fighter != nil {
+			fighter.Physical = true
+			fighter.Hittable = true
+			fighter.Destructible = true
+			fighter.Targetable = true
+		}
+	}
+}
+
+func (g *Game) installEnvironments() error {
+	for _, bound := range environment.Bind(g.environmentRegistry, g.objects) {
+		if err := g.world.Apply(sim.RegisterFrame{Frame: sim.Frame{
+			ID:          bound.FrameID,
+			HostID:      bound.HostID,
+			Environment: bound.Definition.Name,
+			Pose:        bound.Definition.LocalPose,
+		}}); err != nil {
+			return err
+		}
+		runtime := localEnvironment{
+			bound:     bound,
+			tiles:     make(map[environment.TileCoordinate]environment.Tile),
+			destroyed: make(map[string]bool),
+		}
+		g.environments = append(g.environments, runtime)
+	}
+	g.objects = g.world.Objects
+	return nil
 }
 
 func (g *Game) Update() error {
@@ -254,6 +367,22 @@ func (g *Game) Update() error {
 			ebiten.SetCursorMode(ebiten.CursorModeVisible)
 		}
 	}
+	if len(g.transitions) > 0 {
+		if !g.paused {
+			g.simulationTime += seconds
+			// Keep the authoritative tick and unrelated world objects moving while
+			// the controlled craft follows its presentation path. The transitioning
+			// object's motion was cleared when the transition began.
+			g.world.Objects = g.objects
+			if err := g.world.Step(seconds * g.profile.Simulation.MotionScale); err != nil {
+				return err
+			}
+			g.objects = g.world.Objects
+			g.advanceEnvironmentTransitions(seconds, inpututil.IsKeyJustPressed(ebiten.KeyEscape))
+		}
+		g.pipeline.View = g.viewCamera.View(g.objects)
+		return nil
+	}
 
 	g.updateZoom()
 	g.laserBeamTime = max(0, g.laserBeamTime-seconds)
@@ -268,6 +397,7 @@ func (g *Game) Update() error {
 	}
 	g.simulationTime += seconds
 	g.updateShield(seconds)
+	g.updateEnvironmentContacts(seconds)
 	if g.destructionViewRemaining > 0 {
 		g.destructionViewRemaining -= seconds
 		g.viewCamera.PullBack(3.0 * seconds)
@@ -280,26 +410,311 @@ func (g *Game) Update() error {
 	g.updateAutonomous(seconds)
 	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	if ebiten.IsKeyPressed(ebiten.KeyF) || ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+		g.launchSwarm()
 		g.fireLaser()
 	}
 	previousPositions := objectPositions(g.objects)
 	motionSeconds := seconds * g.profile.Simulation.MotionScale
-	for index := range g.objects {
-		g.objects[index].Pose = kinematics.Integrate(
-			g.objects[index].Pose,
-			g.objects[index].Motion,
-			motionSeconds,
-		)
+	// Keep the simulation world authoritative for fixed-tick kinematics. The
+	// gameplay adapter may add/remove objects during collision and destruction
+	// processing, so synchronize those structural changes before each tick.
+	g.world.Objects = g.objects
+	if err := g.world.Step(motionSeconds); err != nil {
+		return err
 	}
+	g.objects = g.world.Objects
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		return err
+	}
+	g.refreshEnvironmentTiles()
 	g.updateDebris(seconds)
 	g.resolveLaserCollisions(previousPositions)
 	g.resolveSolidCollisions(previousPositions)
+	g.resolveEnvironmentCollisions(previousPositions)
 	g.updateProjectiles(seconds)
 	if reference := g.starfieldReferencePosition(); reference != nil {
 		g.starField.Wrap(*reference)
 	}
 	g.viewCamera.Update(seconds)
 	g.pipeline.View = g.viewCamera.View(g.objects)
+	return nil
+}
+
+func (g *Game) updateEnvironmentContacts(seconds float64) {
+	for id, remaining := range g.environmentContacts {
+		remaining -= seconds
+		if remaining <= 0 {
+			delete(g.environmentContacts, id)
+			continue
+		}
+		g.environmentContacts[id] = remaining
+	}
+}
+
+func normalizedObjectFrame(object scene.Object) scene.FrameID {
+	if object.Frame == "" {
+		return scene.ExteriorFrame
+	}
+	return object.Frame
+}
+
+func sameFrame(first, second scene.Object) bool {
+	return normalizedObjectFrame(first) == normalizedObjectFrame(second)
+}
+
+func (g *Game) pursuesTarget(id scene.ObjectID) bool {
+	controller, ok := g.controllers[id]
+	if !ok {
+		return false
+	}
+	follower, ok := controller.(control.PursuitFollower)
+	return ok && follower.PursuesTarget()
+}
+
+// updateTransitionCommitments gives non-pursuit controllers an explicit,
+// deterministic way to commit to a nearby surface approach. The commitment is
+// deliberately based on heading as well as distance, so passing fighters do
+// not get pulled into a transition unexpectedly.
+func (g *Game) updateTransitionCommitments() {
+	for _, runtime := range g.environments {
+		for _, transition := range runtime.bound.Definition.Transitions {
+			source := runtime.bound.ResolveFrame(transition.Source)
+			for _, object := range g.objects {
+				if !object.Physical || object.ID == fighterID ||
+					normalizedObjectFrame(object) != source || g.pursuesTarget(object.ID) {
+					continue
+				}
+				pose, err := g.world.PoseInFrame(object.ID, runtime.bound.FrameID)
+				if err != nil || g.transitionCommitments[object.ID] {
+					continue
+				}
+				toVolume := transition.Trigger.Center.Sub(pose.Position)
+				distance := toVolume.Length()
+				if distance > 160 || distance < 1e-6 {
+					continue
+				}
+				velocity := pose.Forward().Scale(object.Motion.Speed).Add(object.Motion.Velocity)
+				if velocity.Length() > 1e-6 && velocity.Normalize().Dot(toVolume.Normalize()) >= 0.35 {
+					g.transitionCommitments[object.ID] = true
+				}
+			}
+		}
+	}
+}
+
+// updateEnvironmentTransitions starts per-object approach presentations. The
+// authoritative frame transfer occurs only when the declared presentation
+// duration completes (or when the player skips it).
+func (g *Game) updateEnvironmentTransitions() error {
+	g.updateTransitionCommitments()
+	for _, runtime := range g.environments {
+		for _, transition := range runtime.bound.Definition.Transitions {
+			source := runtime.bound.ResolveFrame(transition.Source)
+			destination := runtime.bound.ResolveFrame(transition.Destination)
+			for index := range g.objects {
+				object := g.objects[index]
+				if !object.Physical || normalizedObjectFrame(object) != source {
+					continue
+				}
+				pose, err := g.world.PoseInFrame(object.ID, runtime.bound.FrameID)
+				if err != nil {
+					return err
+				}
+				// Ordinary approach transitions are player-driven. Autonomous
+				// fighters enter only when following a transitioning target or when
+				// their controller has explicitly committed to the approach.
+				inApproach := object.ID == fighterID && transition.Trigger.Contains(pose.Position)
+				// Pursuers inherit the target's transition. This lets a swarm
+				// fighter follow the player into a local surface frame even when
+				// it is still outside the ordinary approach volume.
+				if !inApproach && object.ID != fighterID && g.pursuesTarget(object.ID) {
+					target := g.objectByID(fighterID)
+					if target != nil && normalizedObjectFrame(*target) == source {
+						if targetTransition, exists := g.transitions[fighterID]; exists {
+							inApproach = targetTransition.destination == destination
+						} else {
+							targetPose, targetErr := g.world.PoseInFrame(fighterID, runtime.bound.FrameID)
+							inApproach = targetErr == nil && transition.Trigger.Contains(targetPose.Position)
+						}
+					}
+				}
+				if !inApproach && g.transitionCommitments[object.ID] {
+					inApproach = true
+				}
+				if !inApproach {
+					continue
+				}
+				if _, exists := g.transitions[object.ID]; exists {
+					continue
+				}
+				framePose, err := g.world.FramePose(destination)
+				if err != nil {
+					return err
+				}
+				if transition.Duration <= 0 {
+					if err := g.completeEnvironmentTransition(environmentTransition{objectID: object.ID, destination: destination, anchor: transition.Name, motion: object.Motion}, transition.EntryPose); err != nil {
+						return err
+					}
+					continue
+				}
+				sourceFramePose, err := g.world.FramePose(source)
+				if err != nil {
+					return err
+				}
+				g.transitions[object.ID] = environmentTransition{
+					objectID: object.ID, destination: destination, anchor: transition.Name,
+					duration: transition.Duration, startPose: object.Pose,
+					targetPose: kinematics.Compose(framePose, transition.EntryPose), entryPose: transition.EntryPose, motion: object.Motion,
+					worldVelocity: sourceFramePose.Orientation.Rotate(object.Motion.Velocity),
+					previousMode:  g.viewCamera.Mode,
+					rollRadians:   math.Pi,
+				}
+				delete(g.transitionCommitments, object.ID)
+				g.objects[index].Motion = kinematics.Motion{}
+				if object.ID == g.viewCamera.TargetID {
+					// Keep the player in cockpit view throughout the approach. The
+					// interpolated craft orientation rotates the cockpit horizon and
+					// starfield as the fighter aligns with the surface.
+					g.viewCamera.Mode = camera.Cockpit
+				}
+			}
+		}
+		for index := range g.objects {
+			object := g.objects[index]
+			if !object.Physical || normalizedObjectFrame(object) != runtime.bound.FrameID ||
+				runtime.bound.Definition.ExitVolume.Contains(object.Pose.Position) {
+				continue
+			}
+			if err := g.world.Apply(sim.Transfer{ObjectID: object.ID, Destination: scene.ExteriorFrame, Anchor: "exit"}); err != nil {
+				return err
+			}
+		}
+	}
+	g.objects = g.world.Objects
+	return nil
+}
+
+func (g *Game) advanceEnvironmentTransitions(seconds float64, skip bool) {
+	for id, transition := range g.transitions {
+		transition.elapsed += seconds
+		amount := transition.elapsed / transition.duration
+		if skip {
+			amount = 1
+		}
+		amount = max(0, min(1, amount))
+		// Smoothstep gives the roll and approach a gentle start and finish.
+		eased := amount * amount * (3 - 2*amount)
+		if object := g.objectByID(id); object != nil {
+			object.Pose.Position = transition.startPose.Position.Add(transition.targetPose.Position.Sub(transition.startPose.Position).Scale(eased))
+			alignment := math3d.Slerp(transition.startPose.Orientation, transition.targetPose.Orientation, eased)
+			// Roll through the requested half-turn for cinematic feedback, then
+			// settle back to the declared entry orientation. This keeps the
+			// fighter upright when surface flight begins instead of leaving it
+			// inverted after the presentation roll.
+			rollAmount := transition.rollRadians * math.Sin(math.Pi*eased)
+			roll := math3d.QuaternionFromAxisAngle(math3d.Vec3{Z: 1}, rollAmount)
+			object.Pose.Orientation = alignment.Mul(roll).Normalize()
+		}
+		if amount < 1 {
+			g.transitions[id] = transition
+			continue
+		}
+		if err := g.completeEnvironmentTransition(transition, transition.entryPose); err != nil {
+			delete(g.transitions, id)
+			continue
+		}
+		delete(g.transitions, id)
+	}
+	g.viewCamera.Update(seconds)
+	g.objects = g.world.Objects
+}
+
+func (g *Game) completeEnvironmentTransition(transition environmentTransition, finalLocalPose kinematics.Pose) error {
+	g.world.Objects = g.objects
+	if err := g.world.Apply(sim.Transfer{ObjectID: transition.objectID, Destination: transition.destination, Anchor: transition.anchor}); err != nil {
+		return err
+	}
+	object := g.worldObjectByID(transition.objectID)
+	if object == nil {
+		return fmt.Errorf("transition object %d disappeared", transition.objectID)
+	}
+	object.Pose = finalLocalPose
+	object.Motion = transition.motion
+	if framePose, err := g.world.FramePose(transition.destination); err == nil {
+		object.Motion.Velocity = framePose.Orientation.Conjugate().Rotate(transition.worldVelocity)
+	}
+	if transition.objectID == g.viewCamera.TargetID {
+		g.viewCamera.Mode = transition.previousMode
+	}
+	g.objects = g.world.Objects
+	return nil
+}
+
+func (g *Game) refreshEnvironmentTiles() {
+	for runtimeIndex := range g.environments {
+		runtime := &g.environments[runtimeIndex]
+		desired := make(map[environment.TileCoordinate]bool)
+		size := runtime.bound.Definition.TileSize
+		radius := runtime.bound.Definition.TileRadius
+		for _, object := range g.objects {
+			if normalizedObjectFrame(object) != runtime.bound.FrameID ||
+				(object.ID != g.viewCamera.TargetID && !object.Physical && object.CollisionRole != scene.CollisionProjectile) {
+				continue
+			}
+			center := environment.TileCoordinate{
+				X: int(math.Floor(object.Pose.Position.X/size + 0.5)),
+				Z: int(math.Floor(object.Pose.Position.Z/size + 0.5)),
+			}
+			for offsetX := -radius; offsetX <= radius; offsetX++ {
+				for offsetZ := -radius; offsetZ <= radius; offsetZ++ {
+					desired[environment.TileCoordinate{X: center.X + offsetX, Z: center.Z + offsetZ}] = true
+				}
+			}
+		}
+		tiles := make(map[environment.TileCoordinate]environment.Tile, len(desired))
+		for coordinate := range desired {
+			if tile, exists := runtime.tiles[coordinate]; exists {
+				tiles[coordinate] = tile
+			} else {
+				tiles[coordinate] = runtime.bound.Definition.Tile(coordinate)
+			}
+		}
+		runtime.tiles = tiles
+	}
+}
+
+func (g *Game) worldObjectByID(id scene.ObjectID) *scene.Object {
+	if g.world == nil {
+		return nil
+	}
+	for index := range g.world.Objects {
+		if g.world.Objects[index].ID == id {
+			return &g.world.Objects[index]
+		}
+	}
+	return nil
+}
+
+// Snapshot returns a renderer-independent copy of the current world state.
+func (g *Game) Snapshot() sim.Snapshot {
+	if g.world == nil {
+		return sim.Snapshot{}
+	}
+	g.world.Objects = g.objects
+	return g.world.Snapshot()
+}
+
+// ApplySimulationCommands applies validated structural or motion commands at
+// the simulation boundary. The adapter refreshes its object slice afterward.
+func (g *Game) ApplySimulationCommands(commands ...sim.Command) error {
+	if g.world == nil {
+		return fmt.Errorf("simulation world is unavailable")
+	}
+	g.world.Objects = g.objects
+	if err := g.world.Apply(commands...); err != nil {
+		return err
+	}
+	g.objects = g.world.Objects
 	return nil
 }
 
@@ -361,7 +776,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 		owner := g.owners[projectile.ID]
 		for _, other := range g.objects {
 			if other.ID <= projectile.ID || other.CollisionRole != scene.CollisionProjectile ||
-				remove[other.ID] || g.owners[other.ID] == owner {
+				remove[other.ID] || g.owners[other.ID] == owner || !sameFrame(projectile, other) {
 				continue
 			}
 			otherStart, ok := previous[other.ID]
@@ -387,8 +802,10 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 		nearestTime := math.Inf(1)
 		var nearest scene.Object
 		for _, target := range g.objects {
-			if target.ID == owner || target.ID == projectile.ID || destroyed[target.ID].ID != 0 ||
-				!target.Hittable || !target.Destructible {
+			if target.ID == owner || target.ID == projectile.ID || destroyed[target.ID].ID != 0 || !target.Hittable {
+				continue
+			}
+			if !sameFrame(projectile, target) {
 				continue
 			}
 			targetStart, ok := previous[target.ID]
@@ -418,7 +835,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 						destroyed[nearest.ID] = nearest
 					}
 				}
-			} else {
+			} else if nearest.Destructible {
 				destroyed[nearest.ID] = nearest
 			}
 			if owner == fighterID {
@@ -437,11 +854,11 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 func (g *Game) resolveSolidCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 	destroyed := make(map[scene.ObjectID]scene.Object)
 	for firstIndex, first := range g.objects {
-		if !first.Physical || !first.Destructible || destroyed[first.ID].ID != 0 {
+		if !first.Physical || destroyed[first.ID].ID != 0 {
 			continue
 		}
 		for _, second := range g.objects[firstIndex+1:] {
-			if !second.Physical || !second.Destructible || destroyed[second.ID].ID != 0 {
+			if !second.Physical || destroyed[second.ID].ID != 0 || !sameFrame(first, second) {
 				continue
 			}
 			firstStart := previous[first.ID]
@@ -460,14 +877,14 @@ func (g *Game) resolveSolidCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 					if g.applyShieldDamage(g.profile.Player.Shield.CollisionDamage) {
 						destroyed[first.ID] = first
 					}
-				} else {
+				} else if first.Destructible {
 					destroyed[first.ID] = first
 				}
 				if second.ID == fighterID {
 					if g.applyShieldDamage(g.profile.Player.Shield.CollisionDamage) {
 						destroyed[second.ID] = second
 					}
-				} else {
+				} else if second.Destructible {
 					destroyed[second.ID] = second
 				}
 				break
@@ -477,6 +894,119 @@ func (g *Game) resolveSolidCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 	if len(destroyed) > 0 {
 		g.destroyAndDisintegrate(destroyed, nil)
 	}
+}
+
+func (g *Game) resolveEnvironmentCollisions(previous map[scene.ObjectID]math3d.Vec3) {
+	remove := make(map[scene.ObjectID]bool)
+	destroyed := make(map[scene.ObjectID]scene.Object)
+	for _, object := range g.objects {
+		if object.CollisionRole != scene.CollisionProjectile && !object.Physical {
+			continue
+		}
+		if g.environmentContacts[object.ID] > 0 || g.transitionedOnCurrentTick(object.ID) {
+			continue
+		}
+		var runtime *localEnvironment
+		for index := range g.environments {
+			if g.environments[index].bound.FrameID == normalizedObjectFrame(object) {
+				runtime = &g.environments[index]
+				break
+			}
+		}
+		if runtime == nil {
+			continue
+		}
+		start, ok := previous[object.ID]
+		if !ok {
+			start = object.Pose.Position
+		}
+		var nearest collision.Hit
+		hitFound := false
+		for _, tile := range runtime.tiles {
+			for _, plane := range tile.Planes {
+				if hit, ok := collision.SweepSpherePlane(start, object.Pose.Position, object.CollisionRadius, plane); ok && (!hitFound || hit.Time < nearest.Time) {
+					nearest, hitFound = hit, true
+				}
+			}
+			for _, box := range tile.Boxes {
+				if runtime.destroyed[string(box.FeatureID)] {
+					continue
+				}
+				if hit, ok := collision.SweepSphereBox(start, object.Pose.Position, object.CollisionRadius, box); ok && (!hitFound || hit.Time < nearest.Time) {
+					nearest, hitFound = hit, true
+				}
+			}
+		}
+		if !hitFound {
+			continue
+		}
+		if object.CollisionRole == scene.CollisionProjectile {
+			remove[object.ID] = true
+			if g.environmentFeatureIsHittable(runtime, string(nearest.FeatureID)) {
+				runtime.destroyed[string(nearest.FeatureID)] = true
+			}
+			continue
+		}
+		g.collisions++
+		if object.ID == fighterID {
+			if g.applyShieldDamage(g.profile.Player.Shield.CollisionDamage) {
+				destroyed[object.ID] = object
+				continue
+			}
+		} else if object.Destructible {
+			destroyed[object.ID] = object
+			continue
+		}
+		if live := g.objectByID(object.ID); live != nil {
+			live.Pose.Position = nearest.Point.Add(nearest.Normal.Scale(live.CollisionRadius + 0.02))
+			velocity := live.Pose.Forward().Scale(live.Motion.Speed).Add(live.Motion.Velocity)
+			reflected := velocity.Sub(nearest.Normal.Scale(1.4 * velocity.Dot(nearest.Normal)))
+			if reflected.Length() > 1e-9 {
+				direction := reflected.Normalize()
+				live.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(
+					math.Atan2(direction.X, direction.Z),
+					-math.Asin(max(-1, min(1, direction.Y))),
+					0,
+				)
+				live.Motion.Speed = reflected.Length() * 0.7
+				live.Motion.Velocity = math3d.Vec3{}
+			}
+			g.environmentContacts[live.ID] = 0.35
+		}
+	}
+	if len(remove) > 0 || len(destroyed) > 0 {
+		g.destroyAndDisintegrate(destroyed, remove)
+	}
+}
+
+func (g *Game) environmentFeatureIsHittable(runtime *localEnvironment, id string) bool {
+	if runtime == nil || id == "" {
+		return false
+	}
+	for _, tile := range runtime.tiles {
+		for _, feature := range tile.Features {
+			if feature.ID == id {
+				return feature.Hittable
+			}
+		}
+	}
+	return false
+}
+
+func (g *Game) transitionedOnCurrentTick(id scene.ObjectID) bool {
+	if g.world == nil {
+		return false
+	}
+	for index := len(g.world.Transitions) - 1; index >= 0; index-- {
+		event := g.world.Transitions[index]
+		if event.Tick < g.world.Tick {
+			return false
+		}
+		if event.ObjectID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object, remove map[scene.ObjectID]bool) {
@@ -565,6 +1095,7 @@ func (g *Game) spawnDisintegration(object scene.Object) {
 			PitchRate: -spinSign * (1.05 + 0.22*float64(index)),
 			RollRate:  spinSign * (2.0 + 0.40*float64(index)),
 		}
+		fragment.Frame = object.Frame
 		g.objects = append(g.objects, fragment)
 		lifetime := g.profile.Simulation.DisintegrationTime
 		if object.ID == fighterID {
@@ -616,6 +1147,7 @@ func (g *Game) spawnPolygonDisintegration(component scene.Object, transient dest
 			PitchRate: -spinSign * (1.1 + 0.09*float64(polygonIndex%5)),
 			RollRate:  spinSign * (2.2 + 0.13*float64(polygonIndex%9)),
 		}
+		shard.Frame = component.Frame
 		g.objects = append(g.objects, shard)
 		g.debris[shard.ID] = destructionTransient{
 			remaining:      g.profile.Simulation.DisintegrationTime,
@@ -660,6 +1192,7 @@ func (g *Game) removeObjects(remove map[scene.ObjectID]bool) {
 			delete(g.projectiles, object.ID)
 			delete(g.owners, object.ID)
 			delete(g.debris, object.ID)
+			delete(g.environmentContacts, object.ID)
 			continue
 		}
 		kept = append(kept, object)
@@ -702,7 +1235,9 @@ func (g *Game) updateRespawns() {
 func (g *Game) spawnAutonomousFighter() {
 	center := g.initialPose.Position
 	var headingTarget *scene.Object
-	if player := g.objectByID(fighterID); player != nil {
+	if hangarPose, ok := g.hangarSpawnPose(int(g.respawnSequence)); ok {
+		center = hangarPose.Position
+	} else if player := g.objectByID(fighterID); player != nil {
 		center = player.Pose.Position
 		if nearest := g.nearestAutonomousTo(center); nearest != nil {
 			away := center.Sub(nearest.Pose.Position).Normalize()
@@ -717,6 +1252,9 @@ func (g *Game) spawnAutonomousFighter() {
 		}
 	}
 	pose := g.safeAutonomousSpawnPose(center)
+	if hangarPose, ok := g.hangarSpawnPose(int(g.respawnSequence)); ok {
+		pose = hangarPose
+	}
 	if headingTarget != nil {
 		direction := headingTarget.Pose.Position.Sub(pose.Position).Normalize()
 		if direction != (math3d.Vec3{}) {
@@ -741,6 +1279,46 @@ func (g *Game) spawnAutonomousFighter() {
 	g.objects = append(g.objects, fighter)
 	g.controllers[id] = controller
 	g.respawnSequence++
+}
+
+// hangarSpawnPose places a fighter just beyond the Death Star's surface in a
+// deterministic launch formation. The formation is derived from the host
+// object's pose and radius, so it remains valid if the Death Star is moved or
+// replaced by another large static object later.
+func (g *Game) hangarSpawnPose(index int) (kinematics.Pose, bool) {
+	for _, host := range g.objects {
+		if host.Definition != catalog.DeathStarName || host.CollisionRadius <= 0 {
+			continue
+		}
+		outward := host.Pose.Orientation.Rotate(math3d.Vec3{Z: -1}).Normalize()
+		if outward == (math3d.Vec3{}) {
+			outward = math3d.Vec3{Z: -1}
+		}
+		right := host.Pose.Orientation.Rotate(math3d.Vec3{X: 1}).Normalize()
+		up := host.Pose.Orientation.Rotate(math3d.Vec3{Y: 1}).Normalize()
+		column := float64(index % 3)
+		row := float64((index / 3) % 3)
+		position := host.Pose.Position.Add(outward.Scale(host.CollisionRadius + 10))
+		position = position.Add(right.Scale((column - 1) * 14))
+		position = position.Add(up.Scale((row - 1) * 10))
+		return kinematics.Pose{
+			Position:    position,
+			Orientation: orientationToward(outward),
+		}, true
+	}
+	return kinematics.Pose{}, false
+}
+
+func orientationToward(direction math3d.Vec3) math3d.Quaternion {
+	direction = direction.Normalize()
+	if direction == (math3d.Vec3{}) {
+		return math3d.IdentityQuaternion()
+	}
+	return math3d.QuaternionFromYawPitchRoll(
+		math.Atan2(direction.X, direction.Z),
+		-math.Asin(max(-1, min(1, direction.Y))),
+		0,
+	)
 }
 
 func (g *Game) nearestAutonomousTo(position math3d.Vec3) *scene.Object {
@@ -788,7 +1366,7 @@ func (g *Game) safeAutonomousSpawnPose(center math3d.Vec3) kinematics.Pose {
 
 func (g *Game) positionIsSafe(position math3d.Vec3, minimumDistance float64) bool {
 	for _, object := range g.objects {
-		if object.CollisionRole == scene.CollisionSolid && object.Pose.Position.Sub(position).Length() < minimumDistance {
+		if normalizedObjectFrame(object) == scene.ExteriorFrame && object.CollisionRole == scene.CollisionSolid && object.Pose.Position.Sub(position).Length() < minimumDistance+object.CollisionRadius {
 			return false
 		}
 	}
@@ -808,26 +1386,33 @@ func (g *Game) updateAutonomous(seconds float64) {
 		}
 	}
 	for id, controller := range g.controllers {
+		if !g.swarmLaunched {
+			continue
+		}
 		object := g.objectByID(id)
 		if object == nil {
 			continue
 		}
 		nearby := make([]scene.Object, 0, len(solidSnapshots)-1)
 		for _, candidate := range solidSnapshots {
-			if candidate.ID != id {
+			if candidate.ID != id && sameFrame(*object, candidate) {
 				nearby = append(nearby, candidate)
 			}
 		}
+		controllerTarget := targetSnapshot
+		if target == nil || !sameFrame(*object, targetSnapshot) {
+			controllerTarget = scene.Object{}
+		}
 		context := control.Context{
 			Self:        *object,
-			Target:      targetSnapshot,
+			Target:      controllerTarget,
 			Nearby:      nearby,
 			Seconds:     seconds,
 			MotionScale: g.profile.Simulation.MotionScale,
 		}
 		decision := controller.Decide(context)
 		object.Motion = control.ApplyWithLimits(object.Motion, decision.Flight, g.profile.Swarm.Flight, seconds)
-		if target != nil {
+		if controllerTarget.ID != 0 {
 			if decision.Fire {
 				g.fireAutonomousLaser(*object, targetSnapshot)
 			}
@@ -855,6 +1440,7 @@ func (g *Game) fireAutonomousLaser(shooter, target scene.Object) bool {
 		}
 		g.nextObjectID++
 		g.objects = append(g.objects, spawn.Object)
+		g.objects[len(g.objects)-1].Frame = shooter.Frame
 		g.projectiles[spawn.Object.ID] = spawn.Lifetime
 		g.owners[spawn.Object.ID] = spawn.OwnerID
 		spawned = true
@@ -902,6 +1488,7 @@ func (g *Game) fireLaser() bool {
 		}
 		g.nextObjectID++
 		g.objects = append(g.objects, spawn.Object)
+		g.objects[len(g.objects)-1].Frame = fighter.Frame
 		g.projectiles[spawn.Object.ID] = spawn.Lifetime
 		g.owners[spawn.Object.ID] = spawn.OwnerID
 	}
@@ -1039,7 +1626,7 @@ func (g *Game) safePlayerRespawnPose() kinematics.Pose {
 
 func (g *Game) positionIsClear(position math3d.Vec3, minimumDistance float64) bool {
 	for _, object := range g.objects {
-		if object.Pose.Position.Sub(position).Length() < minimumDistance+object.CollisionRadius {
+		if normalizedObjectFrame(object) == scene.ExteriorFrame && object.Pose.Position.Sub(position).Length() < minimumDistance+object.CollisionRadius {
 			return false
 		}
 	}
@@ -1090,6 +1677,7 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	cx, cy, targetInRange := g.cockpitTarget()
 	g.drawShieldIndicator(screen)
 	g.drawThreatIndicator(screen)
+	g.drawTargetableIndicator(screen)
 	targetColor := color.Color(cyan)
 	if !targetInRange {
 		targetColor = amber
@@ -1127,6 +1715,112 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	}
 	vector.StrokeLine(screen, muzzleTops[start][0], muzzleTops[start][1], cx-5, cy, 3, beamColor, true)
 	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
+}
+
+func (g *Game) drawTargetableIndicator(screen *ebiten.Image) {
+	target, ok := g.aimedTarget()
+	if !ok {
+		return
+	}
+	center := target.Pose.Position
+	if anchor, exists := target.Anchor("target"); exists {
+		center = anchor.Position
+	}
+	projected, visible := g.pipeline.ProjectPoint(center)
+	if !visible {
+		return
+	}
+	radius := float32(14)
+	if target.VisualRadius > 0 {
+		cameraPoint := g.pipeline.View.TransformPoint(target.Pose.Position)
+		if depth := -cameraPoint.Z; depth > g.pipeline.Near {
+			radius = float32(min(42, max(14, target.VisualRadius/depth*g.pipeline.Projection[1][1]*float64(g.pipeline.Height)*0.5)))
+		}
+	}
+	x, y := float32(projected.X), float32(projected.Y)
+	c := color.RGBA{R: 255, G: 224, B: 32, A: 255}
+	const arm = float32(7)
+	for _, segment := range [][4]float32{{x - radius, y - radius, x - radius + arm, y - radius}, {x - radius, y - radius, x - radius, y - radius + arm}, {x + radius, y - radius, x + radius - arm, y - radius}, {x + radius, y - radius, x + radius, y - radius + arm}, {x - radius, y + radius, x - radius + arm, y + radius}, {x - radius, y + radius, x - radius, y + radius - arm}, {x + radius, y + radius, x + radius - arm, y + radius}, {x + radius, y + radius, x + radius, y + radius - arm}} {
+		vector.StrokeLine(screen, segment[0], segment[1], segment[2], segment[3], 2, c, true)
+	}
+}
+
+func (g *Game) aimedTarget() (scene.Object, bool) {
+	x, y, _ := g.cockpitTarget()
+	ray, ok := g.pipeline.ScreenRay(float64(x), float64(y))
+	if !ok {
+		return scene.Object{}, false
+	}
+	nearest := math.Inf(1)
+	var selected scene.Object
+	viewFrame := g.activeViewFrame()
+	for _, object := range g.objects {
+		if object.ID == fighterID || !object.Targetable || normalizedObjectFrame(object) != viewFrame {
+			continue
+		}
+		radius := object.CollisionRadius
+		if radius <= 0 {
+			radius = object.VisualRadius
+		}
+		toCenter := object.Pose.Position.Sub(ray.Origin)
+		along := toCenter.Dot(ray.Direction)
+		if along <= 0 || along >= nearest {
+			continue
+		}
+		closest := ray.Origin.Add(ray.Direction.Scale(along))
+		if object.Pose.Position.Sub(closest).Length() > radius {
+			continue
+		}
+		nearest, selected = along, object
+	}
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID != viewFrame {
+			continue
+		}
+		for _, tile := range runtime.tiles {
+			for _, feature := range tile.Features {
+				if !feature.Targetable || runtime.destroyed[feature.ID] {
+					continue
+				}
+				radius := 3.0
+				for _, box := range feature.Boxes {
+					radius = max(radius, box.HalfExtents.Length())
+				}
+				toCenter := feature.Pose.Position.Sub(ray.Origin)
+				along := toCenter.Dot(ray.Direction)
+				if along <= 0 || along >= nearest {
+					continue
+				}
+				closest := ray.Origin.Add(ray.Direction.Scale(along))
+				if feature.Pose.Position.Sub(closest).Length() > radius {
+					continue
+				}
+				nearest = along
+				selected = scene.Object{
+					ID:              environmentFeatureObjectID(runtime.bound.HostID, feature.ID),
+					Name:            feature.Kind,
+					Definition:      runtime.bound.Definition.Name + "/" + feature.Kind,
+					Frame:           runtime.bound.FrameID,
+					Pose:            feature.Pose,
+					CollisionRadius: radius,
+					VisualRadius:    radius,
+					Targetable:      true,
+				}
+			}
+		}
+	}
+	return selected, selected.ID != 0
+}
+
+func environmentFeatureObjectID(hostID scene.ObjectID, featureID string) scene.ObjectID {
+	const offset64 = uint64(14695981039346656037)
+	const prime64 = uint64(1099511628211)
+	hash := offset64 ^ uint64(hostID)
+	for index := 0; index < len(featureID); index++ {
+		hash ^= uint64(featureID[index])
+		hash *= prime64
+	}
+	return scene.ObjectID(hash | 1<<63)
 }
 
 func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
@@ -1331,7 +2025,7 @@ func (g *Game) nearestCockpitThreats(limit int) []cockpitThreat {
 	}
 	threats := make([]cockpitThreat, 0, limit)
 	for _, object := range g.objects {
-		if object.ID == fighterID {
+		if object.ID == fighterID || !sameFrame(*player, object) {
 			continue
 		}
 		isThreat := object.Physical ||
@@ -1339,7 +2033,7 @@ func (g *Game) nearestCockpitThreats(limit int) []cockpitThreat {
 		if !isThreat {
 			continue
 		}
-		distance := object.Pose.Position.Sub(player.Pose.Position).Length()
+		distance := max(0, object.Pose.Position.Sub(player.Pose.Position).Length()-object.CollisionRadius)
 		threats = append(threats, cockpitThreat{object: object, distance: distance})
 	}
 	sort.Slice(threats, func(first, second int) bool {
@@ -1569,9 +2263,43 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(background)
 	g.drawStarfield(screen)
 	visibleObjects := 0
+	viewFrame := g.activeViewFrame()
+	// Occlusion masks are drawn before any world geometry so a distant solid
+	// billboard hides only the starfield, while nearby fighters remain visible.
 	for _, object := range g.objects {
+		if !g.swarmLaunched {
+			if _, autonomous := g.controllers[object.ID]; autonomous {
+				continue
+			}
+		}
+		if normalizedObjectFrame(object) != viewFrame {
+			continue
+		}
+		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" && definition.Billboard.Occludes {
+			g.drawBillboardOcclusion(screen, object)
+		}
+	}
+	for _, object := range g.objects {
+		if !g.swarmLaunched {
+			if _, autonomous := g.controllers[object.ID]; autonomous {
+				continue
+			}
+		}
+		if normalizedObjectFrame(object) != viewFrame {
+			continue
+		}
+		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
+			if g.drawBillboard(screen, object, definition.Billboard) {
+				visibleObjects++
+			}
+			continue
+		}
 		objectVisible := false
+		detail := g.objectDetailTier(object)
 		for _, part := range object.Parts {
+			if part.Detail > detail {
+				continue
+			}
 			insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
 			if insideTargetCockpit && !part.VisibleInCockpit {
 				continue
@@ -1588,6 +2316,29 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			visibleObjects++
 		}
 	}
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID != viewFrame {
+			continue
+		}
+		for _, tile := range runtime.tiles {
+			for _, part := range tile.Parts {
+				for _, line := range g.pipeline.Render(part.Mesh, math3d.Identity()) {
+					drawLine(screen, line, part.Color, part.LineWidth)
+				}
+			}
+			for _, feature := range tile.Features {
+				if runtime.destroyed[feature.ID] {
+					continue
+				}
+				for _, part := range feature.Parts {
+					for _, line := range g.pipeline.Render(part.Mesh, feature.Pose.Matrix()) {
+						drawLine(screen, line, part.Color, part.LineWidth)
+					}
+				}
+			}
+		}
+	}
+	g.drawTransitionEnvironment(screen)
 	g.visibleObjects = visibleObjects
 	if g.viewCamera.Mode == camera.Cockpit {
 		g.drawCockpitOverlay(screen)
@@ -1606,6 +2357,134 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrint(screen, g.hudText())
 		g.drawRealismSlider(screen)
 	}
+}
+
+func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
+	if len(g.transitions) == 0 || g.world == nil {
+		return
+	}
+	for _, transition := range g.transitions {
+		if transition.objectID != g.viewCamera.TargetID {
+			continue
+		}
+		var runtime *localEnvironment
+		for index := range g.environments {
+			if g.environments[index].bound.FrameID == transition.destination {
+				runtime = &g.environments[index]
+				break
+			}
+		}
+		if runtime == nil {
+			continue
+		}
+		framePose, err := g.world.FramePose(transition.destination)
+		if err != nil {
+			continue
+		}
+		// Preload a compact patch around the declared entry corridor. It is
+		// rendered in host/world coordinates during the exterior transition;
+		// normal surface streaming takes over after the frame transfer.
+		for tileX := -2; tileX <= 2; tileX++ {
+			for tileZ := -2; tileZ <= 2; tileZ++ {
+				coordinate := environment.TileCoordinate{X: tileX, Z: tileZ}
+				tile, exists := runtime.tiles[coordinate]
+				if !exists {
+					tile = runtime.bound.Definition.Tile(coordinate)
+				}
+				for _, part := range tile.Parts {
+					for _, line := range g.pipeline.Render(part.Mesh, framePose.Matrix()) {
+						drawLine(screen, line, part.Color, part.LineWidth)
+					}
+				}
+				for _, feature := range tile.Features {
+					if runtime.destroyed[feature.ID] {
+						continue
+					}
+					for _, part := range feature.Parts {
+						worldMatrix := framePose.Matrix().Mul(feature.Pose.Matrix())
+						for _, line := range g.pipeline.Render(part.Mesh, worldMatrix) {
+							drawLine(screen, line, part.Color, part.LineWidth)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboard appearance.Billboard) bool {
+	center, visible := g.pipeline.ProjectPoint(object.Pose.Position)
+	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
+		return false
+	}
+	projectedRadius := object.VisualRadius / center.Depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	if projectedRadius <= 0 {
+		return false
+	}
+	// The same normalized artwork is used at every distance. Detail reveal is
+	// monotonic with projected size and therefore stable while approaching.
+	reveal := (projectedRadius - 55) / 260
+	for _, line := range billboard.Lines(reveal) {
+		vector.StrokeLine(
+			screen,
+			float32(center.X+line.A.X*projectedRadius), float32(center.Y-line.A.Y*projectedRadius),
+			float32(center.X+line.B.X*projectedRadius), float32(center.Y-line.B.Y*projectedRadius),
+			line.Width, line.Color, true,
+		)
+	}
+	return true
+}
+
+func (g *Game) drawBillboardOcclusion(screen *ebiten.Image, object scene.Object) {
+	center, visible := g.pipeline.ProjectPoint(object.Pose.Position)
+	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
+		return
+	}
+	radius := object.VisualRadius / center.Depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	if radius > 0 {
+		vector.DrawFilledCircle(screen, float32(center.X), float32(center.Y), float32(radius), background, true)
+	}
+}
+
+func (g *Game) activeViewFrame() scene.FrameID {
+	if target := g.objectByID(g.viewCamera.TargetID); target != nil && g.viewCamera.Mode != camera.Fixed {
+		return normalizedObjectFrame(*target)
+	}
+	return scene.ExteriorFrame
+}
+
+func (g *Game) objectDetailTier(object scene.Object) scene.DetailTier {
+	thresholds := object.DetailThresholds
+	if object.VisualRadius <= 0 || thresholds.MediumPixels <= 0 || thresholds.NearPixels <= 0 {
+		return scene.DetailNear
+	}
+	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
+	depth := -cameraPoint.Z
+	if depth <= g.pipeline.Near {
+		return scene.DetailNear
+	}
+	projectedRadius := object.VisualRadius / depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	current := g.detailLevels[object.ID]
+	const leaveRatio = 0.88
+	switch current {
+	case scene.DetailNear:
+		if projectedRadius >= thresholds.NearPixels*leaveRatio {
+			return scene.DetailNear
+		}
+		current = scene.DetailMedium
+	case scene.DetailMedium:
+		if projectedRadius >= thresholds.NearPixels {
+			current = scene.DetailNear
+		} else if projectedRadius < thresholds.MediumPixels*leaveRatio {
+			current = scene.DetailPrimary
+		}
+	default:
+		if projectedRadius >= thresholds.MediumPixels {
+			current = scene.DetailMedium
+		}
+	}
+	g.detailLevels[object.ID] = current
+	return current
 }
 
 func (g *Game) setRealismLevel(level int) {

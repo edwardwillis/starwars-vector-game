@@ -59,6 +59,17 @@ func TestRenderClipsEdgeCrossingNearPlane(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsGeometryBeyondFarPlane(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 10)
+	mesh := model.Model{Verts: []math3d.Vec3{{X: -1}, {X: 1}}, Edges: []model.Edge{{A: 0, B: 1}}}
+	if lines := pipeline.Render(mesh, math3d.Translation(0, 0, -11)); len(lines) != 0 {
+		t.Fatalf("rendered %d lines beyond far plane", len(lines))
+	}
+	if _, ok := pipeline.ProjectPoint(math3d.Vec3{Z: -11}); ok {
+		t.Fatal("ProjectPoint accepted point beyond far plane")
+	}
+}
+
 func TestClipScreen(t *testing.T) {
 	clipped, ok := clipScreen(Line{X1: -10, Y1: 50, X2: 110, Y2: 50}, 100, 100)
 	if !ok {

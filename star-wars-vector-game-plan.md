@@ -228,6 +228,14 @@ Respawn placement favors a safe point well away from the nearest surviving swarm
 member, with the replacement oriented toward that member so it re-enters the
 engagement rather than appearing inside an existing dogfight.
 
+Static environment collision is asymmetric: an indestructible surface or
+structure survives while the impacting fighter or projectile receives the
+configured response. Collision participation, targetability, damageability,
+and destructibility are independent capabilities. Collision resolution returns
+the earliest time of impact, contact point, surface normal, and environment
+feature ID so the simulation can place the moving object outside the collider,
+apply damage once, and avoid repeated damage from persistent overlap.
+
 Fragment count, directions, speeds, and spin must be deterministic from stable
 simulation data such as the destroyed object ID and impact tick. This keeps
 local tests, replay, and the later authoritative server consistent. Networked
@@ -237,9 +245,9 @@ object, it follows an explicitly selected fragment when supported. Player
 destruction uses a three-second external pullback view of the disintegration,
 then follows a deterministic random surviving swarm fighter until respawn.
 
-## Player Shields
+## Object Shields
 
-The player fighter will have a shield strength that starts at 8, shown as eight
+The initially controlled fighter will have a shield strength that starts at 8, shown as eight
 mirrored segments on each side. A laser-bolt
 hit decrements the shield by 1, while a physical collision decrements it by 3.
 The shield recharges by 1 point after 20 seconds without receiving damage,
@@ -248,7 +256,11 @@ falls below zero; reaching exactly zero leaves the fighter barely operational.
 Damage resets the recharge timer, and a pending recharge is cancelled by any
 subsequent hit.
 
-In cockpit view, the current shield strength is displayed at the top center as a
+Shield strength and recharge state belong to the controlled world object, not
+to a global player singleton. Each shield-capable spacecraft has independent
+state so multiple players can be damaged, destroyed, recharged, and respawned
+concurrently. In cockpit view, the locally observed object's current shield
+strength is displayed at the top center as a
 compact arcade-style `SHIELD` indicator with eight mirrored triangular segments per side, following the visual
 language of the original vector game. The shield state is simulation-owned and
 must be included in future snapshots, replay events, and difficulty-profile
@@ -263,7 +275,7 @@ Directional catalog models use a shared local coordinate convention:
 - `+Y` is up;
 - `+X` is right.
 
-The current twin-panel fighter follows this convention: its cockpit window faces
+The current TIE fighter follows this convention: its cockpit window faces
 `+Z`. Models that have no meaningful front, such as the Death Star or a static
 piece of scenery, still use the convention for consistency but may never move.
 
@@ -387,6 +399,146 @@ unless a cut-scene definition explicitly enables them. Text and camera framing
 must respect the logical viewport and remain independent of operating-system
 window size.
 
+### Large-object exterior-to-local-environment transitions
+
+The orbital/surface/orbital flow is a reusable large-object capability, not a
+Death Star-specific game mode. A large-object definition may expose named local
+environments, entry and exit volumes, transition anchors, coordinate frames,
+and representation policies. The Death Star is the first application; future
+capital ships and stations can use the same mechanism for hull surfaces,
+hangars, trenches, bridges, reactor spaces, and other close-flight areas. The
+generic flow is `exterior -> transition -> local environment -> transition ->
+exterior`.
+
+Step 20 brings forward the smallest cut-scene subset needed to reproduce this
+change of scale. The Death Star has two coordinated registered representations
+rather than one uniformly detailed sphere:
+
+1. An exterior arcade representation for far and approach views. This is one
+   normalized, camera-facing 2D vector drawing containing the circular outline,
+   symbolic equatorial stripe, and superlaser dish. Distance changes its
+   projected scale rather than swapping it for a different drawing. Stable
+   optional lines and dots are progressively revealed as it approaches, giving
+   the original game's apparently random increase in surface detail without
+   frame-to-frame flicker. The stripe is a visual identifier only and does not
+   imply that the finite local trench encircles the station.
+2. A local surface/trench environment for close flight, using a tangent-space
+   coordinate frame and reusable tiles containing panels, towers, cannon
+   emplacements, trench walls, and floor geometry. Only nearby and potentially
+   visible tiles are selected for rendering; distance tiers reduce line density
+   toward the horizon.
+
+The logical Death Star remains an ordinary authoritative world object even when
+its exterior appearance is a billboard. It retains stable identity, host pose,
+radius, collision volume, targeting anchor, transition anchors, and attached
+environments. The billboard is client presentation and must never become a HUD
+overlay or substitute for simulation state.
+
+Exterior appearance is profile-selectable. Register at least
+`builtin/death-star-arcade-billboard` and
+`builtin/death-star-orbital-wireframe` presentations against the same logical
+object definition. The arcade presentation is the default; retain the existing
+sparse 3D sphere-and-dish representation as a supported alternative rather than
+dead code. The generic presentation mechanism must remain suitable for 3D
+orbital models such as Imperial Star Destroyers.
+
+The arcade drawing uses normalized 2D vector coordinates and a generic
+world-anchored billboard renderer: project the Death Star centre, derive its
+screen radius from world radius and depth, then scale the same drawing about
+that point facing each client's active camera. Base silhouette lines are always
+visible. Solid billboard presentations may request a filled occlusion silhouette
+behind their vector lines so background stars do not show through the object;
+the mask is rendered as a presentation pass before nearby world geometry. Each
+optional detail primitive receives a deterministic seed-derived
+reveal threshold; projected size/proximity progressively reveals more lines and
+dots. Apply hysteresis or stable thresholding so details do not shimmer at a
+boundary. Detail selection affects presentation only, not collision, targeting,
+network state, or the local surface layout.
+
+The local environment is fully flyable. Entry places the fighter above ordinary
+surface rather than inside the trench. Fighters may continue indefinitely over
+the surface, attack towers and cannon installations, locate the trench as a
+specific landmark, descend through its open top, and fly along its axis. Adopt one explicit
+local convention—for example `+Z` along the trench, `+X` across it, and `+Y`
+outward/up from the Death Star surface. Outside the trench the surface deck is
+at `Y=0`; the trench has finite side walls and a recessed bottom at negative
+`Y`. The trench is a finite surface feature, not an equatorial channel and not
+a repeating property of every tile. It terminates at a closed end containing a
+small addressable exhaust port in the floor. Entry into the trench is ordinary
+continuous flight through the open top, not a scripted snap into a corridor.
+
+Near-surface flight should appear unbounded at gameplay scale. Generate a
+deterministic two-dimensional neighborhood of tangent-space surface tiles around
+each relevant fighter and discard distant render/collision tiles. Tile identity
+comes from stable integer coordinates so revisiting an area reproduces the same
+layout and preserves authoritative installation/destruction state. This first
+representation may use a locally planar tangent patch; later curvature or
+host-surface remapping must preserve the same environment and tile contracts.
+
+Rendered tiles and collision tiles are generated from the same validated
+module definitions so visible floors, trench sides, trench bottoms, towers,
+cannon emplacements, antennae, and block structures have matching collision
+geometry. Use a small set of reusable collider primitives: swept fighter
+spheres against finite planes/rectangles for decks and trench walls, and
+oriented boxes or other simple convex bounds for structures. Projectiles use
+the same earliest-time-of-impact query. Broad-phase tile bounds reject distant
+features before narrow-phase tests; collision geometry is independent of visual
+LOD, so a hidden far-detail feature cannot become non-physical accidentally.
+
+If a shielded fighter survives contact, resolve it to the contact boundary and
+apply a deterministic deflection, slide, or stop response plus a short contact
+grace interval. Do not leave it embedded where the next fixed tick repeats the
+same collision damage. At full impact damage, use the normal disintegration
+lifecycle with inherited trajectory and the contact normal influencing debris
+spread.
+
+Crossing a configurable surface-distance threshold starts a deterministic
+two-second approach cut scene, unless a mission explicitly suppresses or
+overrides it. Suspend player steering and firing, move the craft along the
+declared approach path, and perform one deliberate 180-degree local-axis roll
+while aligning into the local surface-flight orientation as the camera closes on
+a named surface anchor. At the declared final authoritative tick, atomically transfer the craft
+into the local surface environment with its declared pose and motion and resume
+control above ordinary surface. This transition preserves player identity,
+ownership, speed, shields, score, and other gameplay state. It changes
+representation and coordinate frame, not the logical craft. Skipping applies
+the exact same final state immediately.
+
+Local-environment entry is per fighter, not a global scene switch. The
+authoritative world assigns each object a spatial zone/frame identifier such as
+`exterior` or a specific host environment. In multiplayer, one fighter may be
+inside a trench or hangar while another remains outside; each client receives
+and renders the relevant zone plus transition events. The cut scene is client
+presentation, while the zone/frame transfer occurs at an explicit authoritative
+tick.
+
+Leaving a configured exit volume performs the inverse mapping and returns the
+fighter to the exterior frame with continuous orientation and velocity.
+For surface environments, the default exit volume is an altitude band: climbing
+above its configurable upper boundary is an explicit, intuitive return-to-space
+control. The same contract can later expose hangar doors, trench ends, or other
+named exits without changing the transfer mechanism.
+Transfers are bidirectional and idempotent: an object cannot occupy both frames
+or trigger duplicate entry/exit events. Each event records the host object ID,
+environment ID, transition anchor, source and destination frames, and
+authoritative tick. Spherical hosts may use a spherical/tangent mapping; other
+hosts supply an ordinary local-to-host transform.
+
+Local environments are anchored to the host object's pose. For a static body
+this is a fixed transform; for a moving or rotating capital ship, composing the
+environment frame with the host pose keeps hangars and hull environments
+attached without changing the transition contract. The initial implementation
+may support static hosts, but the data model must not assume that every host is
+spherical, planetary, or immobile.
+
+The initial transition implementation needs only a fixed camera/actor path, a
+two-second duration, deliberate half-turn roll, input suppression, skip action,
+and final-state transfer. The general registered cut-scene
+timeline, text, branching events, and level-transition system remain in the
+later cut-scene step. Orbital and surface scenes use ordinary catalog objects,
+camera transforms, targeting, controllers, and rendering profiles; neither the
+renderer nor HUD may branch on a Death Star type.
+
 ## Live Simulation and Multiplayer Server
 
 A later networked mode will use an authoritative Go server that owns the live
@@ -415,6 +567,36 @@ the same deterministic update logic can run on the server, in local single-playe
 mode, and in tests. The current local game remains the first client and can use
 an in-process simulation before a network transport is introduced.
 
+### First-class player identity and ownership
+
+Multiple players are a core world-model requirement, not a later duplication of
+the current single-player adapter. Introduce a stable `PlayerID` (or the more
+general `ParticipantID`) distinct from `scene.ObjectID`. A participant record
+identifies its controlled object, team/faction, connection/ready state, score,
+respawn state, and permissions. Damageable state such as shields belongs to the
+controlled object; camera selection and HUD preferences remain client-local.
+
+The authoritative simulation must not depend on a global `fighterID`, singular
+`Player` profile, global shield/destroyed flags, or controller-map membership to
+infer whether an object is a player, swarm member, or static object. Maintain
+explicit ownership and role metadata instead. One participant may control one
+object initially, but the model must allow control transfer, spectators, and a
+participant selecting a viewpoint different from its controlled object.
+
+Input commands carry participant identity, target object ID, client sequence,
+and intended simulation tick. The server authenticates the participant, checks
+ownership/control permission, and applies validated intent; clients never send
+authoritative transforms. Projectiles retain their firing object ID, with score
+credit resolved through ownership at the authoritative event tick. Object
+spawn/removal, damage, destruction, respawn, and scoring events identify all
+affected stable IDs explicitly.
+
+Local single-player mode is the one-participant case of the same session model.
+Step 20 and later object work must not add new singleton-player assumptions.
+Before the authoritative-server step, migrate existing `fighterID`, shield,
+destruction, respawn, targeting, and controller-role state into participant- and
+object-keyed structures with headless two-player tests.
+
 ## Customization and Extension Architecture
 
 The next architectural milestone is to turn the existing extension hooks into
@@ -425,13 +607,14 @@ the central game loop. Built-in features use the same registration and
 configuration paths offered to contributors so extension points remain tested
 by normal gameplay.
 
-Customization is divided into five stable layers:
+Customization is divided into six stable layers:
 
 | Layer | Responsibility | Primary extension mechanism |
 |---|---|---|
 | Game profile | Selects and tunes the overall experience | Named, versioned, validated configuration |
 | Controller | Decides how one object behaves | Strategy factory registered by stable name |
-| Object catalog | Defines appearance, anchors, capabilities, and destruction | Object-definition factory registered by stable name |
+| Object catalog | Defines identity, anchors, capabilities, collision, and destruction | Object-definition factory registered by stable name |
+| Appearance | Selects a logical object's 3D, billboard, or other visual representation | Named presentation registered independently from the object definition |
 | Rendering | Selects optional visibility and presentation processing | Named pipeline profile assembled from rendering stages |
 | Cinematic | Orchestrates actors, cameras, text, and transitions | Named cut-scene definition with validated timeline tracks |
 
@@ -479,9 +662,9 @@ use.
 
 ### Registries and Factories
 
-Controllers, catalog objects, rendering profiles, and cut scenes are selected
-through registries keyed by stable, namespaced identifiers such as
-`builtin/pursuit`, `builtin/twin-panel-fighter`, `builtin/arcade`, and
+Controllers, catalog objects, appearances, rendering profiles, and cut scenes
+are selected through registries keyed by stable, namespaced identifiers such as
+`builtin/pursuit`, `builtin/tie-fighter`, `builtin/arcade`, and
 `builtin/opening-flyby`. Registry entries contain factories or immutable
 definitions plus configuration validation, not shared mutable instances.
 Per-object controller state and pseudo-random state remain isolated on the
@@ -508,6 +691,15 @@ Catalog styling will be parameterized independently from geometry. A style or
 theme selects colors, line widths, and faction presentation while the same
 model, anchors, collision properties, and destruction topology are reused.
 
+Logical object definitions and appearances are independently selectable. A
+single Death Star object definition may therefore use an arcade billboard or a
+sparse orbital wireframe without duplicating identity, collision, targeting,
+environment attachment, or multiplayer state. Presentation definitions declare
+their geometry kind (`model-3d`, `vector-billboard`, or a later extension),
+immutable detail layers, projected-size rules, and styling. Built-in appearances
+use the same registry available to contributors; neither the game loop nor the
+renderer switches on a Death Star object type.
+
 ### Composable Rendering Profiles
 
 The current edge-level `Culler` is an interim hook. It can remove complete
@@ -533,6 +725,32 @@ it does not manipulate renderer internals directly. Contributors may register
 alternative visibility resolvers or presentation stages such as vector glow,
 provided they preserve the stage contract and declare whether they operate per
 object or across the complete scene.
+
+### Large-object detail selection
+
+Fixed large objects may provide immutable `far`, `medium`, and `near` geometry
+or presentation layers. The renderer selects among them using configurable projected
+screen size thresholds, rather than raw world distance, so selection accounts
+for object radius, camera field of view, zoom, and viewport size. The Death Star
+will be the first user, but its default arcade appearance uses one scalable
+billboard drawing with stable optional detail primitives rather than discrete
+replacement models. Its base outline, stripe, and dish remain visible while
+additional seeded lines and dots reveal progressively with projected size.
+Towers, cannons, panels, and the finite physical trench are rendered only by the
+local near-surface environment rather than exterior whole-object LOD.
+
+Thresholds belong to the object definition or resolved display profile and are
+validated when the session is created. Use separate enter/leave thresholds (or
+a small hysteresis band) to prevent detail flicker when a viewpoint sits near a
+boundary. Detail selection is renderer-owned and must not change simulation,
+collision, targeting, ownership, or network snapshot state. All representations
+are generated or cached once; crossing a threshold selects existing geometry
+rather than rebuilding it during a frame. Objects without detail variants
+continue through the current rendering path unchanged.
+
+For the Death Star, whole-object LOD applies only to orbital viewing. Close
+surface gameplay transitions to a separate local tiled representation rather
+than selecting an impractically dense whole-sphere mesh.
 
 ### Simulation Boundary
 
@@ -680,7 +898,7 @@ controllers remain the baseline for tests and offline play.
 2. Ebiten hello world — window, draw single line
 3. Math package — Vec3, Mat4, rotate/translate/scale, perspective projection
 4. Static wireframe cube — validate pipeline end to end
-5. First fighter model — hardcoded original verts/edges, render wireframe
+5. First fighter model — hardcoded original TIE-style verts/edges, render wireframe
 6. Scene objects — transforms, multipart styling, multiple object instances
 7. Kinematics — pose, quaternion orientation, signed axial speed, yaw/pitch/roll
 8. Input — keyboard/mouse intent, dead zone, reticle, throttle, yaw/pitch/roll
@@ -695,10 +913,10 @@ controllers remain the baseline for tests and offline play.
 17. Object-definition registry — generic construction, styles, anchors, capabilities, fragments, and polygon shards without fighter-specific game logic
 18. Composable rendering profiles — replace the interim culler with optional backface, hidden-line, scene-occlusion, and depth-cue stages plus the interactive realism selector
 19. Simulation extraction — stable IDs and renderer-independent fixed-tick world updates behind snapshot and command APIs; move gameplay tests into this headless layer wherever possible
-20. Death Star — reusable registered surface modules, trench, towers, targeting reticle
+20. Death Star and reusable large-object environments — canonical TIE naming; generic bidirectional exterior/local-frame transitions; default scalable arcade billboard with deterministic proximity-revealed detail; optional sparse 3D orbital presentation; configurable approach threshold; per-fighter two-second roll transition; fully flyable tiled tangent-space surface with a finite trench, matched collision floors, walls, structures, towers, cannons, panels, targeting, and distance detail
 21. Generalized camera anchors — cockpit, chase, spectator, and Death Star viewpoints selected independently from control ownership
-22. Cut-scene orchestration — registered actor, path, camera, text, event, skip, and level-transition timelines
-23. Authoritative server — fixed ticks, autonomous objects, sessions, profiles, snapshots
+22. General cut-scene orchestration — expand the Step 20 approach-transition subset into registered actor, path, camera, text, event, skip, and level-transition timelines
+23. Authoritative server — first-class participant IDs, ownership and control authorization, fixed ticks, autonomous objects, sessions, profiles, snapshots, and headless multi-player tests
 24. Rule-driven intelligence library — patrol, pursuit, evasion, targeting, and formations registered through the controller API
 25. Multiplayer client — control input, interpolation, ownership, view switching
 26. External agent adapter — asynchronous AI/MCP decisions and safe fallback
@@ -758,3 +976,116 @@ and built-in progressive profiles (`arcade`, `culled`, `hidden-line`, and
 `depth-cue`). Profiles are selected from `Display.RenderingProfile`; legacy
 culler support remains compatible while back-face culling and later visibility
 stages can evolve independently.
+
+Step 19 implementation is complete. `internal/sim` provides a validated,
+deterministically ordered world, fixed-tick kinematic stepping, immutable-style
+snapshots, and validated add/remove/motion commands. The Ebitengine adapter now
+uses that world as the authoritative motion boundary and exposes snapshots and
+command application without coupling callers to rendering. Collision, combat,
+controller, and respawn policies remain adapter-owned systems that can be moved
+behind the same command boundary incrementally.
+
+Before Step 20 geometry work, correct the original fighter naming. The current
+`TwinPanelFighter` is the project's TIE-style Imperial fighter and will become
+the canonical `TIEFighter` model and `builtin/tie-fighter` catalog definition.
+Remove the old `builtin/twin-panel-fighter` identifier completely and migrate
+profiles, tests, documentation, and all call sites as one atomic rename; the
+project is early enough that a compatibility alias would add needless cruft.
+Reserve `XWingFighter` and `builtin/x-wing-fighter` for a future distinct Rebel
+fighter with its own geometry, anchors, collision bounds, fragments, and style.
+Do not use a generic `fighter` type switch: player and swarm roles must continue
+to select independently registered object definitions so either faction's craft
+can occupy either role.
+
+Step 20 exterior prototype is ready for replacement. The fighter has been
+canonically renamed to `TIEFighter`/`builtin/tie-fighter` with no legacy alias.
+Profiles can place arbitrary registered world objects, and scene objects now
+separate targetability from hit/destruction behavior and carry renderer-only
+detail tiers. Generic model transform/merge and spherical-placement helpers
+support reusable surface modules. The current registered orbital
+`builtin/death-star` uses only a sparse spherical body and recessed
+upper-hemisphere superlaser dish; retain it as the optional
+`builtin/death-star-orbital-wireframe` appearance. Replace its default exterior
+presentation with one scalable 2D arcade drawing whose seeded lines and dots are
+progressively revealed by projected size. All other physical surface geometry
+belongs exclusively to the local environment. Projected-size detail selection
+uses hysteresis, and the cockpit HUD can mark any
+targetable object intersected by its aim ray. Visual density, scale, colors, and
+thresholds remain tuning items after interactive inspection.
+
+The first scale refinement models the Death Star at radius 300 world units and
+places its centre 400 units ahead, leaving the approaching fighters roughly 100
+units from the near surface. The current sparse sphere-and-dish geometry remains
+available as an alternate presentation. Towers, cannon emplacements, panels,
+trench geometry, and their collision state are generated by nearby
+local-environment tiles rather than retained in either exterior appearance.
+
+Step 20 local-environment implementation is in progress. The first vertical
+slice adds host-relative spatial frames to the authoritative simulation,
+host-specific environment instances, pose-preserving frame transfers, and
+transition events carrying object, host, environment, anchor, frame, and tick
+identity. `internal/environment` now owns registered large-object environment
+definitions and generated tiles; the initial Death Star tangent frame maps
+local `+Y` away from the near surface and local `+Z` along the trench. Generated
+surface tiles provide sparse vector decks and addressable tower/cannon features.
+Nearby deterministic tiles are generated in two dimensions around
+local craft, producing effectively unbounded surface flight without retaining
+the whole surface. A finite four-tile trench run replaces the surface only at
+its declared coordinates and provides an open top, recessed floor, side walls,
+closed ends, and an addressable exhaust port in the terminal floor. Local entry
+starts above ordinary surface with the trench nearby rather than placing the
+fighter inside it.
+
+Local collision uses swept fighter/projectile spheres against finite planes
+and oriented boxes generated alongside the visible tile geometry. Surviving
+fighter contacts resolve outside the collider, deflect and slow the craft, and
+receive a short contact grace interval; lethal contacts reuse the normal shield
+and disintegration flow. Rendering, targeting, combat projectiles, debris,
+solid collisions, and autonomous-controller context are frame-aware, so objects
+in different local environments cannot interact merely because their local
+coordinates overlap. Environment frame IDs include the concrete host object ID,
+allowing multiple instances and per-fighter zone membership.
+
+The appearance registry and default arcade billboard are implemented. The
+approach-volume crossing now starts a per-fighter deterministic transition: the
+craft is held out of normal input and simulation, the camera follows it in an
+external chase view, its world pose eases toward the declared local entry pose,
+and orientation uses smooth alignment plus one deliberate 180-degree local-axis
+roll. During the roll, the presentation also renders a compact host-transformed
+preview of the destination surface, so the approach visibly closes onto the
+Death Star rather than revealing the local environment only after the cut scene.
+The same transition path is used by autonomous fighters, allowing swarm
+members to follow the player into surface flight without controller-specific
+or renderer-specific branches. At the two-second endpoint (or on Escape) the authoritative frame transfer
+occurs and the prior camera mode, motion, and gameplay state are restored. The
+Pursuit intent is a simulation concern separate from frame membership: an
+actively pursuing fighter may be scheduled to follow its target through either
+direction of an exterior/local transition, and resume pursuit after the
+authoritative transfer. This must work for surface entry and surface exit and
+must not make unrelated swarm members cross environments automatically.
+The controller API now exposes this capability through the optional
+`PursuitFollower` interface; the game uses it to propagate player entry
+transitions to eligible swarm members while preserving frame isolation for all
+other controllers.
+Non-pursuit autonomous objects now receive a generic proximity-and-heading
+commitment path: when travelling toward a transitionable host within the
+configured approach radius, they latch the intent and enter through the normal
+transition pipeline. This keeps the decision reusable for future randomized or
+scripted strategies.
+Transition decisions also have a host-approach path: an autonomous controller
+may make a deliberate commitment when it is close to a transitionable large
+object and its velocity is directed toward the object's approach volume. Once
+committed, it continues along that heading until the normal transition is
+entered, rather than allowing wander or avoidance noise to cancel the intent.
+This is separate from target pursuit and random transition requests, and the
+proximity, heading, commitment duration, and cancellation rules remain
+configurable by the controller strategy.
+Swarm wave respawns are anchored just outside a host Death Star hangar, with
+outward-facing poses and host-relative spacing; the default initial profile
+uses a matching launch formation so fighters visibly emerge together before
+engaging.
+The player starts well back in open space while the initial formation is
+already active near the hangar, making the launch and approach visible before
+the first player shot.
+next tuning work is procedural surface density, landmark visibility, trench
+dimensions, and installation combat feedback through interactive play.

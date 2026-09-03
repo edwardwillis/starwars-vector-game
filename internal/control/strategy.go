@@ -33,6 +33,14 @@ type Strategy interface {
 	Decide(context Context) Decision
 }
 
+// PursuitFollower identifies controllers whose target relationship should be
+// preserved when the target crosses an environment boundary. It is optional so
+// custom strategies remain valid without being forced to participate.
+type PursuitFollower interface {
+	Strategy
+	PursuesTarget() bool
+}
+
 type PursuitConfig struct {
 	PreferredDistance   float64
 	MinSpeed            float64
@@ -157,6 +165,10 @@ func NewPursuit(seed uint64, config PursuitConfig) *Pursuit {
 	pursuit.attackGap = pursuit.randomRange(config.AttackMinGap, config.AttackMaxGap)
 	return pursuit
 }
+
+// PursuesTarget marks this strategy as eligible to follow its target through
+// exterior/local environment transitions.
+func (p *Pursuit) PursuesTarget() bool { return true }
 
 // AttackIntent reports whether the most recent Step selected a firing moment.
 func (p *Pursuit) AttackIntent() bool {

@@ -61,6 +61,10 @@ func TestCloneOwnsSwarmPositions(t *testing.T) {
 	if original.Swarm.InitialPositions[0].X == 999 {
 		t.Fatal("Clone retained caller-owned swarm position storage")
 	}
+	clone.World.Objects[0].Definition = "changed"
+	if original.World.Objects[0].Definition == "changed" {
+		t.Fatal("Clone retained caller-owned world placement storage")
+	}
 }
 
 func TestValidateRejectsInvalidConfiguration(t *testing.T) {

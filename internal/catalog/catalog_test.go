@@ -18,13 +18,13 @@ func TestCubeReturnsValidObject(t *testing.T) {
 	}
 }
 
-func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
-	fighter := TwinPanelFighter(1, kinematics.Pose{})
+func TestTIEFighterReturnsValidMultipartObject(t *testing.T) {
+	fighter := TIEFighter(1, kinematics.Pose{})
 	if err := fighter.Validate(); err != nil {
-		t.Fatalf("TwinPanelFighter returned an invalid object: %v", err)
+		t.Fatalf("TIEFighter returned an invalid object: %v", err)
 	}
 	if len(fighter.Parts) != 2 {
-		t.Fatalf("TwinPanelFighter returned %d parts, want 2", len(fighter.Parts))
+		t.Fatalf("TIEFighter returned %d parts, want 2", len(fighter.Parts))
 	}
 	if fighter.Parts[0].Color == fighter.Parts[1].Color {
 		t.Fatal("fighter hull and window use the same color")
@@ -48,9 +48,9 @@ func TestTwinPanelFighterReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
-func TestTwinPanelFighterFragmentIsNonCollidingDebris(t *testing.T) {
+func TestTIEFighterFragmentIsNonCollidingDebris(t *testing.T) {
 	for index := range 3 {
-		fragment := TwinPanelFighterFragment(scene.ObjectID(index+1), index, kinematics.Pose{})
+		fragment := TIEFighterFragment(scene.ObjectID(index+1), index, kinematics.Pose{})
 		if err := fragment.Validate(); err != nil {
 			t.Fatalf("fragment %d is invalid: %v", index, err)
 		}
@@ -62,13 +62,13 @@ func TestTwinPanelFighterFragmentIsNonCollidingDebris(t *testing.T) {
 	}
 }
 
-func TestTwinPanelFighterPolygonsAreFinalVisualDebris(t *testing.T) {
+func TestTIEFighterPolygonsAreFinalVisualDebris(t *testing.T) {
 	for component := range 3 {
-		count := TwinPanelFighterPolygonCount(component)
+		count := TIEFighterPolygonCount(component)
 		if count == 0 {
 			t.Fatalf("component %d has no constituent polygons", component)
 		}
-		polygon := TwinPanelFighterPolygon(1, component, 0, kinematics.Pose{})
+		polygon := TIEFighterPolygon(1, component, 0, kinematics.Pose{})
 		if err := polygon.Validate(); err != nil {
 			t.Fatalf("component %d polygon is invalid: %v", component, err)
 		}
@@ -80,9 +80,9 @@ func TestTwinPanelFighterPolygonsAreFinalVisualDebris(t *testing.T) {
 	}
 }
 
-func TestTwinPanelFighterInstancesShareImmutableGeometry(t *testing.T) {
-	first := TwinPanelFighter(1, kinematics.Pose{})
-	second := TwinPanelFighter(2, kinematics.Pose{})
+func TestTIEFighterInstancesShareImmutableGeometry(t *testing.T) {
+	first := TIEFighter(1, kinematics.Pose{})
+	second := TIEFighter(2, kinematics.Pose{})
 	if &first.Parts[0].Mesh.Verts[0] != &second.Parts[0].Mesh.Verts[0] {
 		t.Fatal("fighter instances do not share catalog hull geometry")
 	}
@@ -104,5 +104,24 @@ func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
 	}
 	if bolt.CollisionRole != scene.CollisionProjectile || bolt.CollisionRadius <= 0 {
 		t.Fatal("laser bolt has incorrect collision metadata")
+	}
+}
+
+func TestDeathStarIsAValidStaticLargeObject(t *testing.T) {
+	object := DeathStar(10, kinematics.Pose{})
+	if err := object.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if object.Motion != (kinematics.Motion{}) {
+		t.Fatalf("motion=%+v", object.Motion)
+	}
+	if !object.Physical || !object.Hittable || !object.Targetable || object.Destructible {
+		t.Fatalf("unexpected capabilities: %+v", object)
+	}
+	if len(object.Parts) != 2 || object.VisualRadius != object.CollisionRadius {
+		t.Fatalf("parts=%d visual=%v collision=%v", len(object.Parts), object.VisualRadius, object.CollisionRadius)
+	}
+	if object.Parts[0].Name != "sphere" || object.Parts[1].Name != "superlaser dish" {
+		t.Fatalf("orbital parts=%q, %q", object.Parts[0].Name, object.Parts[1].Name)
 	}
 }

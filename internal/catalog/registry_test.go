@@ -7,26 +7,26 @@ import (
 
 func TestDefaultRegistryCreatesLifecycleObjects(t *testing.T) {
 	r := DefaultRegistry()
-	object, err := r.Create(TwinPanelFighterName, 1, kinematics.Pose{})
-	if err != nil || object.Definition != TwinPanelFighterName {
+	object, err := r.Create(TIEFighterName, 1, kinematics.Pose{})
+	if err != nil || object.Definition != TIEFighterName {
 		t.Fatalf("create fighter: %v, definition=%q", err, object.Definition)
 	}
-	fragment, err := r.CreateFragment(TwinPanelFighterName, 2, 0, kinematics.Pose{})
-	if err != nil || fragment.Definition != TwinPanelFighterName {
+	fragment, err := r.CreateFragment(TIEFighterName, 2, 0, kinematics.Pose{})
+	if err != nil || fragment.Definition != TIEFighterName {
 		t.Fatalf("create fragment: %v", err)
 	}
-	count, err := r.PolygonCount(TwinPanelFighterName, 0)
+	count, err := r.PolygonCount(TIEFighterName, 0)
 	if err != nil || count == 0 {
 		t.Fatalf("polygon count: %d, %v", count, err)
 	}
-	if _, err := r.CreatePolygon(TwinPanelFighterName, 3, 0, 0, kinematics.Pose{}); err != nil {
+	if _, err := r.CreatePolygon(TIEFighterName, 3, 0, 0, kinematics.Pose{}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRegistryRejectsUnknownAndDuplicateDefinitions(t *testing.T) {
 	r := NewRegistry()
-	def := Definition{Name: "test/object", Create: TwinPanelFighter}
+	def := Definition{Name: "test/object", Create: TIEFighter}
 	if err := r.Register(def); err != nil {
 		t.Fatal(err)
 	}
@@ -35,5 +35,15 @@ func TestRegistryRejectsUnknownAndDuplicateDefinitions(t *testing.T) {
 	}
 	if _, err := r.Create("missing", 1, kinematics.Pose{}); err == nil {
 		t.Fatal("unknown definition accepted")
+	}
+}
+
+func TestDefaultRegistryCreatesDeathStar(t *testing.T) {
+	object, err := DefaultRegistry().Create(DeathStarName, 20, kinematics.Pose{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.Definition != DeathStarName {
+		t.Fatalf("definition=%q", object.Definition)
 	}
 }

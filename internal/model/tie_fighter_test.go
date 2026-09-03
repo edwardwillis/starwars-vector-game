@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestTwinPanelFighterIsValidAndSymmetrical(t *testing.T) {
-	fighter := TwinPanelFighter()
+func TestTIEFighterIsValidAndSymmetrical(t *testing.T) {
+	fighter := TIEFighter()
 	if len(fighter.Verts) != 56 {
 		t.Fatalf("fighter has %d vertices, want 56", len(fighter.Verts))
 	}
@@ -14,7 +14,7 @@ func TestTwinPanelFighterIsValidAndSymmetrical(t *testing.T) {
 		t.Fatalf("fighter has %d edges, want 112", len(fighter.Edges))
 	}
 	if err := fighter.Validate(); err != nil {
-		t.Fatalf("TwinPanelFighter returned an invalid model: %v", err)
+		t.Fatalf("TIEFighter returned an invalid model: %v", err)
 	}
 
 	minX, maxX := fighter.Verts[0].X, fighter.Verts[0].X
@@ -30,8 +30,8 @@ func TestTwinPanelFighterIsValidAndSymmetrical(t *testing.T) {
 	}
 }
 
-func TestTwinPanelFighterWindowIsValid(t *testing.T) {
-	window := TwinPanelFighterWindow()
+func TestTIEFighterWindowIsValid(t *testing.T) {
+	window := TIEFighterWindow()
 	if len(window.Verts) != 9 {
 		t.Fatalf("window has %d vertices, want 9", len(window.Verts))
 	}
@@ -39,13 +39,13 @@ func TestTwinPanelFighterWindowIsValid(t *testing.T) {
 		t.Fatalf("window has %d edges, want 16", len(window.Edges))
 	}
 	if err := window.Validate(); err != nil {
-		t.Fatalf("TwinPanelFighterWindow returned an invalid model: %v", err)
+		t.Fatalf("TIEFighterWindow returned an invalid model: %v", err)
 	}
 }
 
-func TestTwinPanelFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
-	hull := TwinPanelFighter()
-	fragments := TwinPanelFighterFragments()
+func TestTIEFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
+	hull := TIEFighter()
+	fragments := TIEFighterFragments()
 	edgeCount := 0
 	faceCount := 0
 	for index, fragment := range fragments {

@@ -20,7 +20,7 @@ func TestCycleVisitsEveryMode(t *testing.T) {
 }
 
 func TestCockpitLooksAlongObjectForwardAxis(t *testing.T) {
-	object := catalog.TwinPanelFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	object := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	camera := New(object.ID)
 	camera.Mode = Cockpit
 	viewPoint := camera.View([]scene.Object{object}).TransformPoint(math3d.Vec3{Z: 2})

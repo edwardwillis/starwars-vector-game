@@ -94,6 +94,16 @@ type SwarmConfig struct {
 	Pursuit          control.PursuitConfig
 }
 
+type ObjectPlacement struct {
+	Definition string
+	Appearance string
+	Pose       kinematics.Pose
+}
+
+type WorldConfig struct {
+	Objects []ObjectPlacement
+}
+
 // GameProfile is the fully resolved configuration for one game session.
 type GameProfile struct {
 	Name       string
@@ -106,6 +116,7 @@ type GameProfile struct {
 	Combat     CombatConfig
 	Player     PlayerConfig
 	Swarm      SwarmConfig
+	World      WorldConfig
 	Difficulty DifficultyConfig
 }
 
@@ -146,7 +157,7 @@ func Pilot() GameProfile {
 	pursuit.AttackMaxRadius = 14.0
 	pursuit.AttackFireMinGap = 0.90
 	pursuit.AttackFireMaxGap = 1.60
-	pursuit.AttackRange = 34.0
+	pursuit.AttackRange = 68.0
 	// Attack runs may fire throughout the arc; projectile aiming applies the
 	// configured deterministic error independently.
 	pursuit.AttackAimDot = -1.0
@@ -166,7 +177,7 @@ func Pilot() GameProfile {
 			RenderingProfile:        "builtin/arcade",
 			VerticalFOV:             math.Pi / 3,
 			NearPlane:               0.1,
-			FarPlane:                100,
+			FarPlane:                1000,
 		},
 		Input: InputConfig{
 			MouseDeadzone:    0.08,
@@ -182,9 +193,9 @@ func Pilot() GameProfile {
 			BeamTime:      0.08,
 		},
 		Player: PlayerConfig{
-			Object: "builtin/twin-panel-fighter",
+			Object: "builtin/tie-fighter",
 			InitialPose: kinematics.Pose{
-				Position:    math3d.Vec3{Z: -7},
+				Position:    math3d.Vec3{Z: -450},
 				Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, 0),
 			},
 			AutopilotMotion: kinematics.Motion{
@@ -201,7 +212,7 @@ func Pilot() GameProfile {
 			},
 		},
 		Swarm: SwarmConfig{
-			Object:     "builtin/twin-panel-fighter",
+			Object:     "builtin/tie-fighter",
 			Count:      5,
 			Controller: control.PursuitName,
 			Flight: control.Limits{
@@ -212,7 +223,8 @@ func Pilot() GameProfile {
 				MaxPitchRate: pursuit.MaxPitchRate,
 				MaxRollRate:  pursuit.MaxRollRate,
 			},
-			InitialPositions: []math3d.Vec3{{X: -28, Y: 6, Z: 40}, {X: 28, Y: -6, Z: 40}, {X: -20, Y: -8, Z: 52}, {X: 20, Y: 8, Z: 52}, {X: 0, Y: 18, Z: 46}},
+			// Launch formation just outside the Death Star's forward hangar.
+			InitialPositions: []math3d.Vec3{{X: -14, Y: -10, Z: 88}, {X: 0, Y: -10, Z: 88}, {X: 14, Y: -10, Z: 88}, {X: -7, Y: 8, Z: 88}, {X: 7, Y: 8, Z: 88}},
 			InitialSpeed:     2.85,
 			SpeedStep:        0.12,
 			AimError:         3.2,
@@ -221,6 +233,11 @@ func Pilot() GameProfile {
 			RespawnDistance:  48.0,
 			Pursuit:          pursuit,
 		},
+		World: WorldConfig{Objects: []ObjectPlacement{{
+			Definition: "builtin/death-star",
+			Appearance: "builtin/death-star-arcade-billboard",
+			Pose:       kinematics.Pose{Position: math3d.Vec3{Z: 400}, Orientation: math3d.IdentityQuaternion()},
+		}}},
 		Difficulty: DifficultyConfig{Name: PilotName},
 	}
 }
@@ -273,8 +290,8 @@ func Nightmare() GameProfile {
 	profile.Difficulty.Name = NightmareName
 	profile.Swarm.Count = 7
 	profile.Swarm.InitialPositions = append(profile.Swarm.InitialPositions,
-		math3d.Vec3{X: -34, Y: 14, Z: 60},
-		math3d.Vec3{X: 34, Y: -14, Z: 60},
+		math3d.Vec3{X: -21, Y: 8, Z: 88},
+		math3d.Vec3{X: 21, Y: 8, Z: 88},
 	)
 	profile.Swarm.InitialSpeed = 3.25
 	profile.Swarm.AimError = 1.25
@@ -320,6 +337,7 @@ func Builtin(name string) (GameProfile, error) {
 // Clone protects a running session from mutations to caller-owned slices.
 func (profile GameProfile) Clone() GameProfile {
 	profile.Swarm.InitialPositions = append([]math3d.Vec3(nil), profile.Swarm.InitialPositions...)
+	profile.World.Objects = append([]ObjectPlacement(nil), profile.World.Objects...)
 	return profile
 }
 
@@ -338,6 +356,11 @@ func (profile GameProfile) Validate() error {
 	}
 	if profile.Swarm.Object == "" {
 		return fmt.Errorf("swarm object definition is required")
+	}
+	for index, placement := range profile.World.Objects {
+		if placement.Definition == "" {
+			return fmt.Errorf("world object %d definition is required", index)
+		}
 	}
 	if err := validatePositive("zoom speed", profile.Display.ZoomSpeed); err != nil {
 		return err

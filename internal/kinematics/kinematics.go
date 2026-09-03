@@ -29,6 +29,15 @@ func Compose(parent, local Pose) Pose {
 	}
 }
 
+// Relative expresses world in parent's local coordinate frame.
+func Relative(parent, world Pose) Pose {
+	inverse := parent.Orientation.Normalize().Conjugate()
+	return Pose{
+		Position:    inverse.Rotate(world.Position.Sub(parent.Position)),
+		Orientation: inverse.Mul(world.Orientation.Normalize()).Normalize(),
+	}
+}
+
 // ViewMatrix returns the inverse of the pose's world transform.
 func (p Pose) ViewMatrix() math3d.Mat4 {
 	inverseRotation := p.Orientation.Normalize().Conjugate().Matrix()

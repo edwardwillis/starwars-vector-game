@@ -71,3 +71,39 @@ func polygonVertexIndices(count int) []int {
 	}
 	return indices
 }
+
+// Transform returns a copy of a model transformed into another local frame.
+func Transform(source Model, transform math3d.Mat4) Model {
+	result := Model{
+		Verts: make([]math3d.Vec3, len(source.Verts)),
+		Edges: append([]Edge(nil), source.Edges...),
+		Faces: make([]Face, len(source.Faces)),
+	}
+	for index, vertex := range source.Verts {
+		result.Verts[index] = transform.TransformPoint(vertex)
+	}
+	for index, face := range source.Faces {
+		result.Faces[index].Vertices = append([]int(nil), face.Vertices...)
+	}
+	return result
+}
+
+// Merge combines models into one index space without sharing mutable slices.
+func Merge(models ...Model) Model {
+	var result Model
+	for _, source := range models {
+		base := len(result.Verts)
+		result.Verts = append(result.Verts, source.Verts...)
+		for _, edge := range source.Edges {
+			result.Edges = append(result.Edges, Edge{A: base + edge.A, B: base + edge.B})
+		}
+		for _, face := range source.Faces {
+			vertices := make([]int, len(face.Vertices))
+			for index, vertex := range face.Vertices {
+				vertices[index] = base + vertex
+			}
+			result.Faces = append(result.Faces, Face{Vertices: vertices})
+		}
+	}
+	return result
+}

@@ -76,6 +76,7 @@ func FireLaserTowardWithConfig(shooter scene.Object, id scene.ObjectID, muzzle s
 	pitch := -math.Asin(max(-1, min(1, direction.Y)))
 	pose.Orientation = math3d.QuaternionFromYawPitchRoll(yaw, pitch, 0)
 	bolt := catalog.LaserBolt(id, pose)
+	bolt.Frame = shooter.Frame
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,
 		RollRate: config.SpinRate,
@@ -100,6 +101,7 @@ func FireLaserWithConfig(shooter scene.Object, id scene.ObjectID, muzzle string,
 		return Spawn{}, fmt.Errorf("object %d has no %q anchor", shooter.ID, muzzle)
 	}
 	bolt := catalog.LaserBolt(id, pose)
+	bolt.Frame = shooter.Frame
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,
 		RollRate: config.SpinRate,
