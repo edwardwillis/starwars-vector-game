@@ -24,6 +24,15 @@ func TestDefaultRegistryCreatesLifecycleObjects(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryCreatesXWingLifecycleObjects(t *testing.T) {
+	r := DefaultRegistry()
+	object, err := r.Create(XWingName, 10, kinematics.Pose{})
+	if err != nil || object.Definition != XWingName { t.Fatalf("create X-Wing: %v, definition=%q", err, object.Definition) }
+	fragment, err := r.CreateFragment(XWingName, 11, 0, kinematics.Pose{})
+	if err != nil { t.Fatalf("create X-Wing fragment: %v", err) }
+	if count := XWingPolygonCount(0); count == 0 || fragment.Definition != XWingName { t.Fatalf("X-Wing lifecycle incomplete: count=%d", count) }
+}
+
 func TestRegistryRejectsUnknownAndDuplicateDefinitions(t *testing.T) {
 	r := NewRegistry()
 	def := Definition{Name: "test/object", Create: TIEFighter}

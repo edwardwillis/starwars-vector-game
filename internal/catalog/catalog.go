@@ -17,9 +17,12 @@ var (
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
-	tieFighterHull          = model.TIEFighter()
-	tieFighterWindow        = model.TIEFighterWindow()
+	tieFighterHull          = model.Transform(model.TIEFighter(), math3d.Scaling(0.72, 0.72, 0.72))
+	tieFighterWindow        = model.Transform(model.TIEFighterWindow(), math3d.Scaling(0.72, 0.72, 0.72))
 	tieFighterDebris        = model.TIEFighterFragments()
+	xWingHull                = model.XWing()
+	xWingWindow              = model.XWingWindow()
+	xWingDebris              = model.XWingFragments()
 	laserBoltRays           = model.LaserBoltRays()
 	laserBoltTips           = model.LaserBoltBranches()
 	tieFighterPolygonShards = buildTIEFighterPolygonShards()
@@ -29,11 +32,28 @@ var (
 const (
 	CubeName       = "builtin/cube"
 	TIEFighterName = "builtin/tie-fighter"
+	XWingName      = "builtin/x-wing"
 	LaserBoltName  = "builtin/laser-bolt"
 	DeathStarName  = "builtin/death-star"
 )
 
 const standardLineWidth float32 = 2
+
+// Specification is the compact technical data shown by the fighter showcase.
+type Specification struct {
+	Title, Type, Role, Description, Description2, Length, Crew, Passengers, MaxSpeed, Hyperdrive, Weapons, Ordnance, Shields string
+}
+
+func SpecificationFor(definition string) (Specification, bool) {
+	switch definition {
+	case XWingName:
+		return Specification{Title: "ALLIANCE X WING STARFIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "REBEL ALLIANCE", Description: "VERSATILE ALLIANCE FIGHTER", Description2: "FOR FAST TORPEDO RUNS", Length: "12.5 METERS", Crew: "1 PILOT AND ASTROMECH", Passengers: "NONE", MaxSpeed: "1050 KM PER HOUR", Hyperdrive: "YES", Weapons: "4 LASER CANNONS", Ordnance: "2 PROTON TORPEDO LAUNCHERS", Shields: "YES"}, true
+	case TIEFighterName:
+		return Specification{Title: "IMPERIAL TIE FIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "PRIMARY IMPERIAL SPACE", Description2: "SUPERIORITY FIGHTER", Length: "6.3 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "1200 KM PER HOUR", Hyperdrive: "NO", Weapons: "2 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
+	default:
+		return Specification{}, false
+	}
+}
 
 // Cube returns a styled cube object suitable for pipeline demonstrations and
 // scene-layout tests.
@@ -53,6 +73,53 @@ func Cube(id scene.ObjectID, size float64, pose kinematics.Pose) scene.Object {
 			"center": {Orientation: math3d.IdentityQuaternion()},
 		},
 	}
+}
+
+// XWing returns the sparse Rebel fighter with four open S-foils, engines, and
+// prominent wingtip cannons.
+func XWing(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	return scene.Object{
+		ID: id, Name: "X-Wing", Definition: XWingName, Pose: pose,
+		Parts: []scene.Part{
+			{Name: "hull and S-foils", Mesh: xWingHull, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "cockpit window", Mesh: xWingWindow, Color: windowAmber, LineWidth: standardLineWidth},
+		},
+		Anchors: map[string]kinematics.Pose{
+			"center": {Orientation: math3d.IdentityQuaternion()},
+			"cockpit": {Position: math3d.Vec3{Y: 0.34, Z: 0.78}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"chase": {Position: math3d.Vec3{Y: 1.8, Z: -5.8}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"muzzle-upper-left": {Position: math3d.Vec3{X: -2.35, Y: 0.72, Z: 1.02}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-upper-right": {Position: math3d.Vec3{X: 2.35, Y: 0.72, Z: 1.02}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-lower-left": {Position: math3d.Vec3{X: -1.65, Y: -0.72, Z: 1.02}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-lower-right": {Position: math3d.Vec3{X: 1.65, Y: -0.72, Z: 1.02}, Orientation: math3d.IdentityQuaternion()},
+		},
+		CollisionRole: scene.CollisionSolid, CollisionRadius: 2.4,
+		Physical: true, Hittable: true, Targetable: true, Destructible: true,
+		DestructionStage: scene.DestructionIntact, VisualRadius: 4.3,
+		DetailThresholds: scene.DetailThresholds{MediumPixels: 32, NearPixels: 90},
+	}
+}
+
+func XWingFragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
+	if index < 0 || index >= len(xWingDebris) { panic("catalog: X-Wing fragment index out of range") }
+	return scene.Object{ID: id, Name: "X-Wing debris", Definition: XWingName, Pose: pose,
+		Parts: []scene.Part{{Name: "fragment", Mesh: xWingDebris[index], Color: vectorGreen, LineWidth: standardLineWidth}},
+		CollisionRole: scene.CollisionDebris, CollisionRadius: 1.2, Hittable: true, Destructible: true,
+		DestructionStage: scene.DestructionComponent}
+}
+
+func XWingPolygonCount(component int) int {
+	if component < 0 || component >= len(xWingDebris) { return 0 }
+	return len(xWingDebris[component].PolygonModels())
+}
+
+func XWingPolygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
+	if component < 0 || component >= len(xWingDebris) { panic("catalog: X-Wing polygon component out of range") }
+	polygons := xWingDebris[component].PolygonModels()
+	if polygon < 0 || polygon >= len(polygons) { panic("catalog: X-Wing polygon index out of range") }
+	return scene.Object{ID: id, Name: "X-Wing polygon shard", Definition: XWingName, Pose: pose,
+		Parts: []scene.Part{{Name: "polygon", Mesh: polygons[polygon], Color: vectorGreen, LineWidth: standardLineWidth}},
+		CollisionRole: scene.CollisionDebris, CollisionRadius: .15, DestructionStage: scene.DestructionPolygon}
 }
 
 // TIEFighterFragment returns one of three non-colliding debris pieces.
@@ -191,13 +258,13 @@ func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			},
 		},
 		CollisionRole:    scene.CollisionSolid,
-		CollisionRadius:  1.8,
+		CollisionRadius:  1.3,
 		Physical:         true,
 		Hittable:         true,
 		Targetable:       true,
 		Destructible:     true,
 		DestructionStage: scene.DestructionIntact,
-		VisualRadius:     1.8,
+		VisualRadius:     1.3,
 	}
 }
 

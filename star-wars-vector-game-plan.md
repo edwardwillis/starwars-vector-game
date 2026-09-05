@@ -991,8 +991,14 @@ the canonical `TIEFighter` model and `builtin/tie-fighter` catalog definition.
 Remove the old `builtin/twin-panel-fighter` identifier completely and migrate
 profiles, tests, documentation, and all call sites as one atomic rename; the
 project is early enough that a compatibility alias would add needless cruft.
-Reserve `XWingFighter` and `builtin/x-wing-fighter` for a future distinct Rebel
-fighter with its own geometry, anchors, collision bounds, fragments, and style.
+The distinct Rebel X-Wing is now implemented as `XWing` and registered as
+`builtin/x-wing`, with its own geometry, anchors, collision bounds, fragments,
+and style. The player profile uses it while the swarm remains
+`builtin/tie-fighter`.
+The game also includes a presentation-only fighter showcase toggled with `C`;
+it instantiates registered fighter definitions and rotates them independently
+of gameplay, providing a foundation for a later faction/fighter selection
+screen.
 Do not use a generic `fighter` type switch: player and swarm roles must continue
 to select independently registered object definitions so either faction's craft
 can occupy either role.

@@ -124,10 +124,13 @@ type GameProfile struct {
 // the gameplay tuning that preceded profile extraction.
 func Pilot() GameProfile {
 	manual := control.DefaultManualConfig()
+	// Gameplay units use the X-Wing's 1050 km/h specification as the baseline;
+	// the TIE's 1200 km/h maximum is represented as a 15% advantage.
+	manual.MaxForward = 3.0
 	pursuit := control.DefaultPursuitConfig()
 	pursuit.PreferredDistance = 10.0
 	pursuit.MinSpeed = 2.80
-	pursuit.MaxSpeed = 3.40
+	pursuit.MaxSpeed = manual.MaxForward * (1200.0 / 1050.0)
 	pursuit.Acceleration = 2.20
 	pursuit.ApproachGain = 0.28
 	pursuit.MaxYawRate = 1.15
@@ -193,7 +196,7 @@ func Pilot() GameProfile {
 			BeamTime:      0.08,
 		},
 		Player: PlayerConfig{
-			Object: "builtin/tie-fighter",
+			Object: "builtin/x-wing",
 			InitialPose: kinematics.Pose{
 				Position:    math3d.Vec3{Z: -450},
 				Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, 0),

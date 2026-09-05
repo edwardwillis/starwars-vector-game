@@ -90,7 +90,8 @@ go run . -profile ace
 go run . -profile nightmare
 ```
 
-You should see a 960×540 dark window with green, low-poly TIE fighters and a
+You should see a 960×540 dark window with a green, low-poly Rebel X-Wing facing
+green Imperial TIE fighters and a
 sparse vector Death Star ahead of the engagement.
 The launch card starts inside the player's cockpit at maximum forward speed.
 Press `S`, `F`, or the left mouse button to begin heading toward the selected

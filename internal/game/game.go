@@ -9,12 +9,14 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
+	"github.com/edwardwillis/starwars-vector-game/internal/cockpit"
 	"github.com/edwardwillis/starwars-vector-game/internal/collision"
 	"github.com/edwardwillis/starwars-vector-game/internal/combat"
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	modelpkg "github.com/edwardwillis/starwars-vector-game/internal/model"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
@@ -86,6 +88,7 @@ type Game struct {
 	controllerRegistry       *control.Registry
 	catalogRegistry          *catalog.Registry
 	appearanceRegistry       *appearance.Registry
+	cockpitRegistry          *cockpit.Registry
 	environmentRegistry      *environment.Registry
 	environments             []localEnvironment
 	transitions              map[scene.ObjectID]environmentTransition
@@ -96,9 +99,18 @@ type Game struct {
 	autoMotion               kinematics.Motion
 	mode                     flightMode
 	paused                   bool
+	quitPrompt               bool
 	started                  bool
 	swarmLaunched            bool
 	showHUD                  bool
+	showcaseActive            bool
+	showcaseTime              float64
+	showcaseObjects           []scene.Object
+	showcaseStarField         *starfield.Field
+	showcaseDistance          float64
+	showcaseSelected          int
+	showcaseSlide             float64
+	showcasePreviousMode      camera.Mode
 	viewCamera               *camera.Camera
 	nextObjectID             scene.ObjectID
 	projectiles              map[scene.ObjectID]float64
@@ -227,6 +239,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		controllerRegistry:  registry,
 		catalogRegistry:     catalogRegistry,
 		appearanceRegistry:  appearanceRegistry,
+		cockpitRegistry:     cockpit.DefaultRegistry(),
 		environmentRegistry: environmentRegistry,
 		pipeline:            render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
 		objects:             objects,
@@ -251,6 +264,9 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		detailLevels:        make(map[scene.ObjectID]scene.DetailTier),
 	}
 	game.pipeline.Stages = render.StagesForProfile(gameProfile.Display.RenderingProfile)
+	game.showcaseObjects = game.createShowcaseObjects()
+	game.showcaseStarField = starfield.New(500, gameProfile.Starfield.Seed+101, 90, math3d.Vec3{})
+	game.showcaseDistance = 16
 	world, err := sim.New(objects)
 	if err != nil {
 		return nil, fmt.Errorf("create simulation world: %w", err)
@@ -267,6 +283,23 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	}
 	game.pipeline.View = game.viewCamera.View(game.objects)
 	return game, nil
+}
+
+func (g *Game) createShowcaseObjects() []scene.Object {
+	objects := make([]scene.Object, 0, 2)
+	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName} {
+		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
+			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
+		})
+		if err == nil {
+			scale := 1.65
+			for partIndex := range object.Parts {
+				object.Parts[partIndex].Mesh = modelpkg.Transform(object.Parts[partIndex].Mesh, math3d.Scaling(scale, scale, scale))
+			}
+			objects = append(objects, object)
+		}
+	}
+	return objects
 }
 
 func (g *Game) launchSwarm() {
@@ -310,6 +343,79 @@ func (g *Game) Update() error {
 	questionPressed := questionKeyJustPressed()
 	if questionPressed {
 		g.toggleControls()
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyC) || (g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape)) {
+		g.showcaseActive = !g.showcaseActive
+		g.showcaseTime = 0
+		if g.showcaseActive {
+			g.showcasePreviousMode = g.viewCamera.Mode
+			g.viewCamera.Mode = camera.Fixed
+		} else {
+			g.viewCamera.Mode = g.showcasePreviousMode
+		}
+	}
+	if !g.showcaseActive && g.quitPrompt {
+		if inpututil.IsKeyJustPressed(ebiten.KeyY) {
+			return ebiten.Termination
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyN) {
+			g.quitPrompt = false
+			g.paused = false
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+			g.quitPrompt = false
+			g.paused = false
+		}
+		g.pipeline.View = g.viewCamera.View(g.objects)
+		return nil
+	}
+	if !g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		g.paused = true
+		g.quitPrompt = true
+		g.pipeline.View = g.viewCamera.View(g.objects)
+		return nil
+	}
+	if g.showcaseActive {
+		g.handleRealismSliderClick()
+		if len(g.showcaseObjects) > 0 {
+			if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
+				g.showcaseSelected = (g.showcaseSelected + len(g.showcaseObjects) - 1) % len(g.showcaseObjects)
+				g.showcaseSlide = -1
+				g.showcaseTime = 0
+			}
+			if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) {
+				g.showcaseSelected = (g.showcaseSelected + 1) % len(g.showcaseObjects)
+				g.showcaseSlide = 1
+				g.showcaseTime = 0
+			}
+			g.showcaseSlide *= max(0, 1-seconds*5)
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyBracketLeft) {
+			g.setRealismLevel(g.realismLevel - 1)
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
+			g.setRealismLevel(g.realismLevel + 1)
+		}
+		if !g.paused {
+			g.showcaseTime += seconds
+			_, wheelY := ebiten.Wheel()
+			g.showcaseDistance = max(16, min(90, g.showcaseDistance-wheelY*2.5))
+			mouseX, mouseY := ebiten.CursorPosition()
+			yaw := (float64(mouseX)-ScreenWidth/2) / (ScreenWidth/2) * 0.65
+			pitch := (float64(mouseY)-ScreenHeight/2) / (ScreenHeight/2) * 0.35
+			angle := g.showcaseTime * 0.7
+			for index := range g.showcaseObjects {
+				offset := float64(index-g.showcaseSelected) + g.showcaseSlide
+				if len(g.showcaseObjects) == 2 {
+					if offset > 1 { offset -= float64(len(g.showcaseObjects)) }
+					if offset < -1 { offset += float64(len(g.showcaseObjects)) }
+				}
+				g.showcaseObjects[index].Pose.Position = math3d.Vec3{X: offset * 28, Z: -g.showcaseDistance - math.Abs(offset)*18}
+				g.showcaseObjects[index].Pose.Orientation = math3d.QuaternionFromYawPitchRoll(angle+offset*0.25+yaw, 0.12+pitch, 0)
+			}
+		}
+		g.pipeline.View = math3d.Identity()
+		return nil
 	}
 	g.updateControls(seconds)
 	if !g.started {
@@ -410,6 +516,10 @@ func (g *Game) Update() error {
 	g.updateAutonomous(seconds)
 	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	if ebiten.IsKeyPressed(ebiten.KeyF) || ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+		if g.showHUD && g.handleRealismSliderClick() {
+			g.pipeline.View = g.viewCamera.View(g.objects)
+			return nil
+		}
 		g.launchSwarm()
 		g.fireLaser()
 	}
@@ -1672,10 +1782,9 @@ func navigationInputPressed() bool {
 func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	cyan := color.RGBA{R: 40, G: 255, B: 224, A: 255}
 	amber := color.RGBA{R: 255, G: 176, B: 32, A: 255}
-	red := color.RGBA{R: 255, G: 36, B: 28, A: 255}
-	blue := color.RGBA{R: 32, G: 80, B: 255, A: 255}
 	cx, cy, targetInRange := g.cockpitTarget()
 	g.drawShieldIndicator(screen)
+	g.drawSpeedIndicator(screen)
 	g.drawThreatIndicator(screen)
 	g.drawTargetableIndicator(screen)
 	targetColor := color.Color(cyan)
@@ -1698,11 +1807,16 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 
 	// Perspective wireframe cannons: red recessed housings surround three blue
 	// barrel rails, echoing the layered vector assemblies of the arcade cockpit.
-	cannons := [...][2]float32{{72, 152}, {888, 152}, {82, 432}, {878, 432}}
-	var muzzleTops [len(cannons)][2]float32
+	layout, exists := g.cockpitRegistry.ForDefinition("builtin/tie-fighter")
+	if target := g.objectByID(g.viewCamera.TargetID); target != nil {
+		if candidate, ok := g.cockpitRegistry.ForDefinition(target.Definition); ok { layout, exists = candidate, true }
+	}
+	if !exists { layout = cockpit.Fallback() }
+	cannons := layout.Cannons
+	muzzleTops := make([][2]float32, len(cannons))
 	for index, cannon := range cannons {
-		drawCockpitCannon(screen, cannon[0], cannon[1], cx, cy, red, blue)
-		muzzleTops[index] = cockpitCannonMuzzleTop(cannon[0], cannon[1], cx, cy)
+		drawCockpitCannon(screen, cannon.X, cannon.Y, cx, cy, cannon.Housing, cannon.Barrel)
+		muzzleTops[index] = cockpitCannonMuzzleTop(cannon.X, cannon.Y, cx, cy)
 	}
 
 	if g.laserBeamTime <= 0 {
@@ -1715,6 +1829,16 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	}
 	vector.StrokeLine(screen, muzzleTops[start][0], muzzleTops[start][1], cx-5, cy, 3, beamColor, true)
 	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
+}
+
+func (g *Game) drawSpeedIndicator(screen *ebiten.Image) {
+	fighter := g.objectByID(fighterID)
+	if fighter == nil || g.profile.Player.Flight.MaxForward <= 0 {
+		return
+	}
+	mlgt := int(math.Round(fighter.Motion.Speed / g.profile.Player.Flight.MaxForward * 100))
+	color := color.RGBA{R: 64, G: 180, B: 160, A: 220}
+	drawVectorText(screen, 850, 505, fmt.Sprintf("SPD %03d MLGT", max(-99, min(999, mlgt))), color)
 }
 
 func (g *Game) drawTargetableIndicator(screen *ebiten.Image) {
@@ -1888,6 +2012,10 @@ func drawVectorText(screen *ebiten.Image, centerX, topY float32, text string, li
 }
 
 func drawVectorGlyph(screen *ebiten.Image, left, top float32, letter rune, lineColor color.Color) {
+	if letter >= '0' && letter <= '9' {
+		drawVectorShieldDigit(screen, left+4, top-2, int(letter-'0'), lineColor)
+		return
+	}
 	right, middle, bottom := left+8, top+5, top+10
 	segments := map[rune][][4]float32{
 		'S': {{left, top, right, top}, {left, top, left, middle}, {left, middle, right, middle}, {right, middle, right, bottom}, {left, bottom, right, bottom}},
@@ -1901,9 +2029,23 @@ func drawVectorGlyph(screen *ebiten.Image, left, top float32, letter rune, lineC
 		'R': {{left, top, right - 2, top}, {left, top, left, bottom}, {right - 2, top, right, middle}, {left, middle, right - 2, middle}, {left + 1, middle, right, bottom}},
 		'T': {{left, top, right, top}, {left + 4, top, left + 4, bottom}},
 		'O': {{left, top, right, top}, {left, top, left, bottom}, {right, top, right, bottom}, {left, bottom, right, bottom}},
+		'Q': {{left, top, right, top}, {left, top, left, bottom}, {right, top, right, bottom}, {left, bottom, right, bottom}, {right - 2, bottom - 2, right, bottom}},
 		'A': {{left, bottom, left, top + 2}, {left, top + 2, left + 4, top}, {left + 4, top, right, top + 2}, {right, top + 2, right, bottom}, {left, middle, right, middle}},
 		'U': {{left, top, left, bottom}, {right, top, right, bottom}, {left, bottom, right, bottom}},
 		'Y': {{left, top, left + 4, middle}, {right, top, left + 4, middle}, {left + 4, middle, left + 4, bottom}},
+		'N': {{left, bottom, left, top}, {left, top, right, bottom}, {right, bottom, right, top}},
+		'G': {{right, top, left, top}, {left, top, left, bottom}, {left, bottom, right, bottom}, {right, bottom, right, middle}, {right, middle, left + 4, middle}},
+		'M': {{left, bottom, left, top}, {left, top, left + 4, middle}, {left + 4, middle, right, top}, {right, top, right, bottom}},
+		'V': {{left, top, left + 4, bottom}, {left + 4, bottom, right, top}},
+		'W': {{left, top, left + 2, bottom}, {left + 2, bottom, left + 4, middle}, {left + 4, middle, left + 6, bottom}, {left + 6, bottom, right, top}},
+		'K': {{left, top, left, bottom}, {left, middle, right, top}, {left, middle, right, bottom}},
+		'C': {{right, top, left, top}, {left, top, left, bottom}, {left, bottom, right, bottom}},
+		'B': {{left, top, left, bottom}, {left, top, right - 2, top}, {right - 2, top, right - 2, middle}, {left, middle, right - 2, middle}, {right - 2, middle, right - 2, bottom}, {left, bottom, right - 2, bottom}},
+		'X': {{left, top, right, bottom}, {right, top, left, bottom}},
+		'.': {{left + 4, bottom - 1, left + 4, bottom}},
+		'/': {{right, top, left, bottom}},
+		'+': {{left + 4, top + 2, left + 4, bottom - 2}, {left + 1, middle, right - 1, middle}},
+		':': {{left + 4, top + 2, left + 4, top + 3}, {left + 4, bottom - 2, left + 4, bottom - 1}},
 		'!': {{left + 4, top, left + 4, bottom - 3}, {left + 4, bottom, left + 4, bottom}},
 	}
 	for _, segment := range segments[letter] {
@@ -2261,6 +2403,16 @@ func (g *Game) updateZoom() {
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(background)
+	if g.showcaseActive {
+		if g.showcaseStarField != nil {
+			for _, star := range g.showcaseStarField.Project(g.pipeline) {
+				starColor := color.RGBA{R: star.Brightness, G: star.Brightness, B: star.Brightness, A: 255}
+				vector.DrawFilledCircle(screen, float32(star.X), float32(star.Y), star.Size, starColor, false)
+			}
+		}
+		g.drawShowcase(screen)
+		return
+	}
 	g.drawStarfield(screen)
 	visibleObjects := 0
 	viewFrame := g.activeViewFrame()
@@ -2350,12 +2502,88 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
 	}
+	if g.quitPrompt {
+		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-24), "PAUSED", color.RGBA{R: 96, G: 220, B: 255, A: 255})
+		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-8), "QUIT GAME? Y/N", color.RGBA{R: 255, G: 224, B: 32, A: 255})
+	}
 	if g.controlsVisible() {
 		ebitenutil.DebugPrintAt(screen, controlsText(!g.playerDestroyed), 16, 16)
 	}
 	if g.showHUD {
 		ebitenutil.DebugPrint(screen, g.hudText())
 		g.drawRealismSlider(screen)
+	}
+}
+
+func (g *Game) drawShowcase(screen *ebiten.Image) {
+	for _, object := range g.showcaseObjects {
+		for _, part := range object.Parts {
+			for _, line := range g.pipeline.Render(part.Mesh, object.WorldMatrix()) {
+				drawLine(screen, line, part.Color, part.LineWidth)
+			}
+		}
+	}
+	title := "FIGHTER SHOWCASE"
+	if len(g.showcaseObjects) > 0 {
+		if spec, ok := catalog.SpecificationFor(g.showcaseObjects[g.showcaseSelected%len(g.showcaseObjects)].Definition); ok {
+			title = spec.Title
+		}
+	}
+	titleColor := color.RGBA{R: 80, G: 180, B: 255, A: 255}
+	drawVectorText(screen, ScreenWidth/2, 18, title, titleColor)
+	drawVectorText(screen, ScreenWidth/2, 34, "LEFT RIGHT SELECT", titleColor)
+	g.drawShowcaseSpecs(screen)
+	g.drawRealismSlider(screen)
+}
+
+func (g *Game) drawShowcaseSpecs(screen *ebiten.Image) {
+	if len(g.showcaseObjects) == 0 {
+		return
+	}
+	selected := g.showcaseObjects[g.showcaseSelected%len(g.showcaseObjects)]
+	spec, ok := catalog.SpecificationFor(selected.Definition)
+	if !ok {
+		return
+	}
+	left, top, right, bottom := float32(ScreenWidth*0.32), float32(ScreenHeight-195), float32(ScreenWidth-18), float32(ScreenHeight-18)
+	lineColor := color.RGBA{R: 96, G: 255, B: 128, A: 255}
+	vector.StrokeLine(screen, left, top, right, top, 2, lineColor, true)
+	vector.StrokeLine(screen, right, top, right, bottom, 2, lineColor, true)
+	vector.StrokeLine(screen, right, bottom, left, bottom, 2, lineColor, true)
+	vector.StrokeLine(screen, left, bottom, left, top, 2, lineColor, true)
+	weapons := "WEAPONS " + spec.Weapons
+	if spec.Ordnance != "NONE" {
+		weapons += " " + spec.Ordnance
+	}
+	lines := []string{spec.Description, spec.Description2, "LENGTH: " + spec.Length, "CREW: " + spec.Crew, "PASSENGERS: " + spec.Passengers, "MAX SPEED: " + spec.MaxSpeed, "HYPERDRIVE: " + spec.Hyperdrive, "WEAPONS: " + weapons[len("WEAPONS "):], "SHIELDS: " + spec.Shields}
+	for index, line := range lines {
+		y := top + 20 + float32(index*15)
+		if index < 2 {
+			drawVectorText(screen, (left+right)/2, y, line, color.RGBA{R: 80, G: 180, B: 255, A: 255})
+		} else {
+			drawVectorTextWithNumericHighlight(screen, (left+right)/2, y, line)
+		}
+	}
+}
+
+func drawVectorTextWithNumericHighlight(screen *ebiten.Image, centerX, topY float32, text string) {
+	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
+	total := float32(0)
+	for _, character := range text {
+		if character == ' ' { total += spaceWidth + glyphGap } else { total += glyphWidth + glyphGap }
+	}
+	left := centerX - (total-glyphGap)/2
+	for _, character := range text {
+		if character == ' ' { left += spaceWidth + glyphGap; continue }
+		textColor := color.RGBA{R: 190, G: 235, B: 255, A: 255}
+		if character >= '0' && character <= '9' {
+			textColor = color.RGBA{R: 64, G: 255, B: 128, A: 255}
+		}
+		if character == ':' {
+			textColor = color.RGBA{R: 190, G: 235, B: 255, A: 255}
+		}
+		drawVectorGlyph(screen, left, topY, character, textColor)
+		left += glyphWidth + glyphGap
 	}
 }
 
@@ -2508,7 +2736,29 @@ func (g *Game) drawRealismSlider(screen *ebiten.Image) {
 	}
 	px := x + width*float32(g.realismLevel)/float32(len(renderingProfiles)-1)
 	vector.DrawFilledCircle(screen, px, y, 6, lineColor, true)
-	drawVectorText(screen, x, y-12, fmt.Sprintf("REALISM %s  [ / ]", renderingProfiles[g.realismLevel]), lineColor)
+	drawVectorText(screen, x+width/2, y-14, fmt.Sprintf("REALISM: %s", realismProfileLabel(g.realismLevel)), lineColor)
+}
+
+func realismProfileLabel(level int) string {
+	labels := []string{"ARCADE", "CULLED", "HIDDEN LINE", "DEPTH CUE"}
+	if level < 0 || level >= len(labels) {
+		return "ARCADE"
+	}
+	return labels[level]
+}
+
+func (g *Game) handleRealismSliderClick() bool {
+	if !inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		return false
+	}
+	mouseX, mouseY := ebiten.CursorPosition()
+	const sliderY = ScreenHeight - 28
+	if mouseY < sliderY-14 || mouseY > sliderY+14 || mouseX < 24 || mouseX > 244 {
+		return false
+	}
+	level := int(math.Round(float64(mouseX-24) / 220 * float64(len(renderingProfiles)-1)))
+	g.setRealismLevel(level)
+	return true
 }
 
 func controlsText(startPrompt bool) string {
@@ -2518,6 +2768,7 @@ func controlsText(startPrompt bool) string {
 		"Right mouse button  steer fighter\n" +
 		"F / left mouse  fire    G  mouse flight\n" +
 		"V  view   Shift  follow fighter   Space  HUD\n" +
+		"C  fighter showcase\n" +
 		"[ / ]  rendering realism\n" +
 		"?  show / hide controls\n\n"
 	if startPrompt {
