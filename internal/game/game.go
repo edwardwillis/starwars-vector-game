@@ -135,6 +135,8 @@ type Game struct {
 	kills                    int
 	collisions               int
 	visibleObjects           int
+	renderStats              render.Stats
+	depthBuffer              *render.DepthBuffer
 	world                    *sim.World
 	detailLevels             map[scene.ObjectID]scene.DetailTier
 	shieldStrength           int
@@ -145,7 +147,7 @@ type Game struct {
 	realismLevel             int
 }
 
-var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue"}
+var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
 
 func New() *Game {
 	game, err := NewWithProfile(profile.Pilot())
@@ -281,6 +283,8 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 			break
 		}
 	}
+	game.pipeline.MinLinePixels = realismLineThreshold(game.realismLevel)
+	game.pipeline.Stats = &game.renderStats
 	game.pipeline.View = game.viewCamera.View(game.objects)
 	return game, nil
 }
@@ -2401,8 +2405,67 @@ func (g *Game) updateZoom() {
 	g.viewCamera.AdjustZoom(zoomInput*g.profile.Display.ZoomSpeed*g.profile.Simulation.TickSeconds + wheelY*0.2)
 }
 
+// rasterizeDepthFrame builds the optional CPU occlusion surface from physical
+// polygon geometry in the active coordinate frame. Decorative vector-only
+// models (laser bolts, HUD art, and billboards) deliberately do not contribute
+// depth, so they remain visible as line art while surface objects can hide
+// their rear edges.
+func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthBuffer) {
+	if depth == nil {
+		return
+	}
+	for _, object := range g.objects {
+		if !g.swarmLaunched {
+			if _, autonomous := g.controllers[object.ID]; autonomous { continue }
+		}
+		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+			continue
+		}
+		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
+			continue
+		}
+		detail := g.objectDetailTier(object)
+		for partIndex, part := range object.Parts {
+			if part.Detail > detail || len(part.Mesh.Faces) == 0 {
+				continue
+			}
+			insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
+			if insideTargetCockpit && !part.VisibleInCockpit {
+				continue
+			}
+			if !insideTargetCockpit && part.CockpitOnly {
+				continue
+			}
+			g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
+		}
+	}
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID != viewFrame {
+			continue
+		}
+		for _, tile := range runtime.tiles {
+			for _, part := range tile.Parts {
+				if len(part.Mesh.Faces) > 0 && g.meshInView(part.Mesh, math3d.Identity()) {
+					g.pipeline.RasterizeDepth(part.Mesh, math3d.Identity(), depth)
+				}
+			}
+			for _, feature := range tile.Features {
+				if runtime.destroyed[feature.ID] {
+					continue
+				}
+				for _, part := range feature.Parts {
+					if len(part.Mesh.Faces) > 0 && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+						g.pipeline.RasterizeDepth(part.Mesh, feature.Pose.Matrix(), depth)
+					}
+				}
+			}
+		}
+	}
+}
+
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(background)
+	if g.pipeline.Stats != nil { *g.pipeline.Stats = render.Stats{} }
 	if g.showcaseActive {
 		if g.showcaseStarField != nil {
 			for _, star := range g.showcaseStarField.Project(g.pipeline) {
@@ -2416,6 +2479,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawStarfield(screen)
 	visibleObjects := 0
 	viewFrame := g.activeViewFrame()
+	var depth *render.DepthBuffer
+	if g.realismLevel >= 3 {
+		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
+			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
+		}
+		g.depthBuffer.Clear()
+		depth = g.depthBuffer
+		g.rasterizeDepthFrame(viewFrame, depth)
+	}
 	// Occlusion masks are drawn before any world geometry so a distant solid
 	// billboard hides only the starfield, while nearby fighters remain visible.
 	for _, object := range g.objects {
@@ -2427,6 +2499,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if normalizedObjectFrame(object) != viewFrame {
 			continue
 		}
+		if !g.objectInView(object) { continue }
 		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" && definition.Billboard.Occludes {
 			g.drawBillboardOcclusion(screen, object)
 		}
@@ -2440,15 +2513,21 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if normalizedObjectFrame(object) != viewFrame {
 			continue
 		}
+		if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsInput++ }
+		if !g.objectInView(object) {
+			if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsCulled++ }
+			continue
+		}
 		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
 			if g.drawBillboard(screen, object, definition.Billboard) {
 				visibleObjects++
+				if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsVisible++ }
 			}
 			continue
 		}
 		objectVisible := false
 		detail := g.objectDetailTier(object)
-		for _, part := range object.Parts {
+		for partIndex, part := range object.Parts {
 			if part.Detail > detail {
 				continue
 			}
@@ -2459,13 +2538,20 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			if !insideTargetCockpit && part.CockpitOnly {
 				continue
 			}
-			for _, line := range g.pipeline.Render(part.Mesh, object.WorldMatrix()) {
+			var lines []render.Line
+			if depth != nil {
+				lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
+			} else {
+				lines = g.pipeline.Render(part.Mesh, object.WorldMatrix())
+			}
+			for _, line := range lines {
 				objectVisible = true
 				drawLine(screen, line, part.Color, part.LineWidth)
 			}
 		}
 		if objectVisible {
 			visibleObjects++
+			if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsVisible++ }
 		}
 	}
 	for _, runtime := range g.environments {
@@ -2474,7 +2560,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 		for _, tile := range runtime.tiles {
 			for _, part := range tile.Parts {
-				for _, line := range g.pipeline.Render(part.Mesh, math3d.Identity()) {
+				if !g.meshInView(part.Mesh, math3d.Identity()) { continue }
+				var lines []render.Line
+				if depth != nil {
+					lines = g.pipeline.RenderWithDepth(part.Mesh, math3d.Identity(), depth)
+				} else {
+					lines = g.pipeline.Render(part.Mesh, math3d.Identity())
+				}
+				for _, line := range lines {
 					drawLine(screen, line, part.Color, part.LineWidth)
 				}
 			}
@@ -2483,7 +2576,14 @@ func (g *Game) Draw(screen *ebiten.Image) {
 					continue
 				}
 				for _, part := range feature.Parts {
-					for _, line := range g.pipeline.Render(part.Mesh, feature.Pose.Matrix()) {
+					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) { continue }
+					var lines []render.Line
+					if depth != nil {
+						lines = g.pipeline.RenderWithDepth(part.Mesh, feature.Pose.Matrix(), depth)
+					} else {
+						lines = g.pipeline.Render(part.Mesh, feature.Pose.Matrix())
+					}
+					for _, line := range lines {
 						drawLine(screen, line, part.Color, part.LineWidth)
 					}
 				}
@@ -2516,9 +2616,24 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func (g *Game) drawShowcase(screen *ebiten.Image) {
+	var depth *render.DepthBuffer
+	if g.realismLevel >= 3 {
+		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
+			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
+		}
+		g.depthBuffer.Clear()
+		depth = g.depthBuffer
+		for _, object := range g.showcaseObjects {
+			for partIndex, part := range object.Parts {
+				if len(part.Mesh.Faces) > 0 { g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex)) }
+			}
+		}
+	}
 	for _, object := range g.showcaseObjects {
-		for _, part := range object.Parts {
-			for _, line := range g.pipeline.Render(part.Mesh, object.WorldMatrix()) {
+		for partIndex, part := range object.Parts {
+			var lines []render.Line
+				if depth != nil { lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex)) } else { lines = g.pipeline.Render(part.Mesh, object.WorldMatrix()) }
+			for _, line := range lines {
 				drawLine(screen, line, part.Color, part.LineWidth)
 			}
 		}
@@ -2640,6 +2755,52 @@ func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
 	}
 }
 
+// objectInView rejects whole objects before any part geometry is transformed.
+// The conservative projected sphere intentionally keeps intersecting objects
+// alive when their center lies just outside the viewport.
+func (g *Game) objectInView(object scene.Object) bool {
+	if object.VisualRadius <= 0 { return true }
+	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
+	depth := -cameraPoint.Z
+	radius := object.VisualRadius
+	if depth+radius < g.pipeline.Near { return false }
+	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far { return false }
+	if depth <= 0 { return true }
+	projectedRadius := radius / depth * g.pipeline.Projection[1][1]
+	return cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
+		cameraPoint.X/depth*g.pipeline.Projection[0][0] <= 1+projectedRadius &&
+		cameraPoint.Y/depth*g.pipeline.Projection[1][1] >= -1-projectedRadius &&
+		cameraPoint.Y/depth*g.pipeline.Projection[1][1] <= 1+projectedRadius
+}
+
+// renderOwner gives each physical part of an object its own depth identity.
+// This preserves same-part structural edges while allowing one part (such as
+// a TIE foil) to occlude another part (such as its cockpit) within one object.
+func renderOwner(objectID scene.ObjectID, partIndex int) uint64 {
+	return (uint64(objectID) << 32) | uint64(partIndex+1)
+}
+
+// meshInView applies the same conservative projected-sphere test to streamed
+// environment modules. Their compiled model bounds provide a cheap hierarchy
+// level between a whole surface frame and individual faces.
+func (g *Game) meshInView(mesh modelpkg.Model, world math3d.Mat4) bool {
+	prepared := modelpkg.Prepare(mesh)
+	if prepared.Topology == nil || prepared.Topology.BoundsRadius <= 0 { return true }
+	center := world.TransformPoint(prepared.Topology.BoundsCenter)
+	radius := world.TransformDirection(math3d.Vec3{X: prepared.Topology.BoundsRadius}).Length()
+	if radius <= 0 { radius = prepared.Topology.BoundsRadius }
+	cameraPoint := g.pipeline.View.TransformPoint(center)
+	depth := -cameraPoint.Z
+	if depth+radius < g.pipeline.Near { return false }
+	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far { return false }
+	if depth <= 0 { return true }
+	projectedRadius := radius / depth * g.pipeline.Projection[1][1]
+	return cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
+		cameraPoint.X/depth*g.pipeline.Projection[0][0] <= 1+projectedRadius &&
+		cameraPoint.Y/depth*g.pipeline.Projection[1][1] >= -1-projectedRadius &&
+		cameraPoint.Y/depth*g.pipeline.Projection[1][1] <= 1+projectedRadius
+}
+
 func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboard appearance.Billboard) bool {
 	center, visible := g.pipeline.ProjectPoint(object.Pose.Position)
 	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
@@ -2724,6 +2885,22 @@ func (g *Game) setRealismLevel(level int) {
 	}
 	g.realismLevel = level
 	g.pipeline.Stages = render.StagesForProfile(renderingProfiles[level])
+	g.pipeline.MinLinePixels = realismLineThreshold(level)
+}
+
+func realismLineThreshold(level int) float64 {
+	switch level {
+	case 0:
+		return 0.55
+	case 1:
+		return 0.35
+	case 2:
+		return 0.20
+	case 3:
+		return 0.10
+	default:
+		return 0.05
+	}
 }
 
 func (g *Game) drawRealismSlider(screen *ebiten.Image) {
@@ -2740,7 +2917,7 @@ func (g *Game) drawRealismSlider(screen *ebiten.Image) {
 }
 
 func realismProfileLabel(level int) string {
-	labels := []string{"ARCADE", "CULLED", "HIDDEN LINE", "DEPTH CUE"}
+	labels := []string{"ARCADE", "CULLED", "ENHANCED", "HIDDEN LINE", "MAXIMUM"}
 	if level < 0 || level >= len(labels) {
 		return "ARCADE"
 	}
@@ -2839,7 +3016,8 @@ func (g *Game) hudText() string {
 	}
 	return fmt.Sprintf(
 		"Profile: %s | Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Tempo: %.1fx | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
-			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
+		"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
+			"Render: %d/%d objects, %d vertices, %d edges in, %d backface, %d depth, %d tiny, %d lines out\n"+
 			"W/S throttle  Mouse/arrows yaw/pitch  Q/E roll  Space stop\nF/left-click fire  G mouse  M mode  V view  P pause  R reset  +/- or wheel zoom",
 		g.profile.Name,
 		g.mode,
@@ -2861,6 +3039,14 @@ func (g *Game) hudText() string {
 		g.profile.Player.Shield.Maximum,
 		g.kills,
 		g.collisions,
+		g.renderStats.ObjectsVisible,
+		g.renderStats.ObjectsCulled,
+		g.renderStats.TransformedVertices,
+		g.renderStats.InputEdges,
+		g.renderStats.BackfaceRejected,
+		g.renderStats.DepthRejected,
+		g.renderStats.TinyEdges,
+		g.renderStats.OutputEdges,
 	)
 }
 

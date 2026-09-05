@@ -23,10 +23,10 @@ func TestTIEFighterReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TIEFighter returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 2 {
-		t.Fatalf("TIEFighter returned %d parts, want 2", len(fighter.Parts))
+	if len(fighter.Parts) != 4 {
+		t.Fatalf("TIEFighter returned %d parts, want 4", len(fighter.Parts))
 	}
-	if fighter.Parts[0].Color == fighter.Parts[1].Color {
+	if fighter.Parts[0].Color == fighter.Parts[3].Color || fighter.Parts[1].Color == fighter.Parts[3].Color || fighter.Parts[2].Color == fighter.Parts[3].Color {
 		t.Fatal("fighter hull and window use the same color")
 	}
 	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
@@ -34,7 +34,7 @@ func TestTIEFighterReturnsValidMultipartObject(t *testing.T) {
 		fighter.DestructionStage != scene.DestructionIntact {
 		t.Fatalf("fighter has incorrect collision metadata")
 	}
-	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit {
+	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit || fighter.Parts[2].VisibleInCockpit || fighter.Parts[3].VisibleInCockpit {
 		t.Fatal("fighter hull or windscreen is visible from inside the cockpit")
 	}
 	for _, name := range []string{
@@ -84,9 +84,15 @@ func TestTIEFighterInstancesShareImmutableGeometry(t *testing.T) {
 	first := TIEFighter(1, kinematics.Pose{})
 	second := TIEFighter(2, kinematics.Pose{})
 	if &first.Parts[0].Mesh.Verts[0] != &second.Parts[0].Mesh.Verts[0] {
-		t.Fatal("fighter instances do not share catalog hull geometry")
+		t.Fatal("fighter instances do not share catalog core geometry")
 	}
 	if &first.Parts[1].Mesh.Verts[0] != &second.Parts[1].Mesh.Verts[0] {
+		t.Fatal("fighter instances do not share catalog foil geometry")
+	}
+	if &first.Parts[2].Mesh.Verts[0] != &second.Parts[2].Mesh.Verts[0] {
+		t.Fatal("fighter instances do not share catalog foil geometry")
+	}
+	if &first.Parts[3].Mesh.Verts[0] != &second.Parts[3].Mesh.Verts[0] {
 		t.Fatal("fighter instances do not share catalog window geometry")
 	}
 }

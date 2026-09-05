@@ -5,7 +5,7 @@ import "github.com/edwardwillis/starwars-vector-game/internal/math3d"
 // Cube returns a cube centered at the origin. Size is the length of each side.
 func Cube(size float64) Model {
 	half := size / 2
-	return Model{
+	return Prepare(Model{
 		Verts: []math3d.Vec3{
 			{X: -half, Y: -half, Z: -half},
 			{X: half, Y: -half, Z: -half},
@@ -22,12 +22,12 @@ func Cube(size float64) Model {
 			{A: 0, B: 4}, {A: 1, B: 5}, {A: 2, B: 6}, {A: 3, B: 7},
 		},
 		Faces: []Face{
-			{Vertices: []int{0, 1, 2, 3}},
-			{Vertices: []int{4, 7, 6, 5}},
-			{Vertices: []int{0, 4, 5, 1}},
-			{Vertices: []int{1, 5, 6, 2}},
-			{Vertices: []int{2, 6, 7, 3}},
-			{Vertices: []int{3, 7, 4, 0}},
+			{Vertices: []int{0, 3, 2, 1}},
+			{Vertices: []int{4, 5, 6, 7}},
+			{Vertices: []int{0, 1, 5, 4}},
+			{Vertices: []int{1, 2, 6, 5}},
+			{Vertices: []int{2, 3, 7, 6}},
+			{Vertices: []int{3, 0, 4, 7}},
 		},
-	}
+	})
 }

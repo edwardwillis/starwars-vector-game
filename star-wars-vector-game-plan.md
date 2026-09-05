@@ -1095,3 +1095,304 @@ already active near the hangar, making the launch and approach visible before
 the first player shot.
 next tuning work is procedural surface density, landmark visibility, trench
 dimensions, and installation combat feedback through interactive play.
+
+## Approved renderer migration — model-switch handoff (2026-09-05)
+
+Status: Phase 1 inspection and architectural review complete; user approved the
+plan and requested a model switch before implementation. The renderer/model
+migration is now underway against the sequence below; no further architecture
+approval is required for this agreed scope.
+This section supersedes earlier rendering plans wherever they conflict,
+especially optional back-face culling and the old four-level realism mapping.
+
+### Objective and non-negotiable requirements
+
+Improve visual fidelity AND aggressively reduce geometry reaching vector draw
+submission. Preserve sparse Atari-style luminous lines, strong silhouettes,
+negative space, and readable fast movement. Maximum realism must not disable
+optimisation. The slider remains the control, with at most five coherent modes.
+Physical surface geometry must support mandatory back-face classification and
+culling at EVERY level, including retro. Do not retain model-specific culling
+exceptions, normal-axis heuristics, automatic reversed-visibility fallbacks, or
+missing-face workarounds. Explicit line art (lasers, HUD, reticles, billboard
+artwork) is the legitimate exception. Do not implement a TIE Interceptor yet:
+it does not exist in the catalog and is the first intended post-migration model.
+
+Keep topology truth, visual policy, and visibility mechanisms separate. Avoid
+unrelated controller, gameplay, physics, camera-control, or multiplayer rewrites.
+
+### Verified Phase 1 findings
+
+- `internal/model/model.go`: `Model` contains `Verts`, `Edges`, `Faces`;
+  `Edge` contains only A/B indices; `Face` contains only polygon vertex indices.
+  Validation checks index range and at least three face entries, not distinct
+  vertices, degeneracy, planarity, manifoldness, or winding. No cached normals,
+  adjacency, edge kinds, model bounds, or explicit sidedness exists.
+- `internal/render/pipeline.go`: each Render call allocates/transforms every
+  vertex in a part using View*World, then processes edges and projects endpoints
+  repeatedly. Near/far camera-space line clipping and Cohen–Sutherland viewport
+  clipping exist. Polygon and complete pre-projection frustum clipping do not.
+- Current BackfaceStage recomputes cross products and edge maps each call. An
+  X-dominant normal can bypass culling for a whole mesh; an empty front set can
+  be replaced by the back set. These are defects to remove after topology repair.
+  Arcade has no stages. HiddenLineStage and DepthCueStage are no-op placeholders.
+- `internal/scene/object.go`: objects have manual VisualRadius/CollisionRadius;
+  parts have style, cockpit flags and DetailTier. There are no geometry-derived
+  conservative bounds used for early object culling. Do not use collision radii
+  as rendering bounds: they serve a different gameplay purpose.
+- `internal/game/game.go`: immediate per-part Render/draw in gameplay, showcase,
+  environment tiles/features and transition preview. objectDetailTier has
+  projected-size thresholds and hysteresis, but environment paths bypass it.
+  HUD counts total/visible objects, not stage work. Four profile IDs, friendly
+  labels and stage mappings are spread across game/render code.
+- `internal/catalog/registry.go`: lifecycle factories for intact objects,
+  fragments and polygon shards; current registry includes TIE, X-Wing, laser,
+  Death Star. Cube is a reusable primitive/catalog helper. Model templates are
+  already shared in catalog package variables, but slices are not immutable.
+- `internal/environment/death_star.go`: streamed tiles and features provide a
+  useful hierarchy but no render bounds. Surface/trench have collision planes
+  yet line-only render geometry; tower/cannon cube faces are explicitly erased.
+- `internal/appearance`: default Death Star is an intentional vector billboard
+  with deterministic detail reveal and a black circular starfield mask. This
+  is not a shared depth buffer or inter-object hidden-line implementation.
+- Camera uses -Z forward in view space; model flight forward is +Z. Existing
+  pose/world/view/projection math can be retained. The installed Ebitengine
+  v2.9.9 image/triangle API is a 2D draw interface, not a conventional exposed
+  application depth attachment; prefer CPU depth initially.
+
+### Required model migrations
+
+| Model/generator | Correction |
+| --- | --- |
+| Cube and appendBox | Current face winding is inward under the new outward convention; fix shared primitives first. |
+| TIE fighter | Correct cockpit/pylon winding, extrude zero-thickness hexagonal panels into thin solids, establish attachment topology and explicit brace/detail ownership. Never exempt whole panels from culling. |
+| X-Wing | Correct inconsistent winding across fuselage sides/caps, canopy, prism and wings; validate/triangulate nonplanar polygons; close cannon cylinders as appropriate; remove duplicate nacelle edges; distinguish cap triangulation from authored structure. |
+| Orbital Death Star sphere | Replace duplicate polar rings/degenerate polar quads with proper pole triangles; enforce outward winding. |
+| Orbital dish | Construct concave face topology for currently line-only dish; separate meaningful ring/spoke detail. Integrate dish opening/occluder geometry so a sphere does not hide its own recessed dish. |
+| Surface/trench | Generate decks, floor, walls and finite end faces from the same dimensions as colliders; orient toward navigable space, preserve open trench top, classify grid markings as surface-associated detail. |
+| Towers/cannons | Retain corrected cube faces instead of setting Faces=nil. |
+| Fragments/shards | Current edges/faces are partitioned independently; rebuild coherent adjacency per fragment, compact unused vertices, handle exposed fracture surfaces deliberately. Detached polygon shards are explicitly double-sided. |
+| Laser/HUD/reticles/billboard | Explicit line-art representation; retain clipping, projected-size filtering and suitable depth policy, without fabricated faces. |
+
+The whole fighter need not be a single manifold solid: individually valid
+closed components can intersect as an assembly. Open surfaces must declare
+their intended side(s). An arbitrary object's centroid cannot establish outward
+normals for concave or disconnected components. Do not blindly flip all faces.
+
+### Approved representation direction
+
+Use simple procedural source geometry followed by a compilation step producing
+immutable shared render meshes. Exact Go field names are implementation choices.
+
+- Canonical winding: counter-clockwise viewed from outside; right-hand normal
+  points outward. Open terrain faces point from material into navigable space.
+- Cache face normals/plane constants and validated triangulations once. Depth
+  triangles must not automatically become visible wireframe diagonals.
+- Derive edge adjacency from faces; retain all incident-face information to
+  diagnose non-manifold geometry rather than silently dropping a third face.
+- Store authored structural/crease, detail/decorative and internal/construction
+  edge intent plus importance. Silhouette and front/back are runtime outcomes.
+- Standalone decorative lines bypass face classification; surface-associated
+  markings follow their owner's visibility and depth rules.
+- Derive conservative local bounds, LOD geometry/group sets and bounded child
+  nodes with local transforms. Cache static tiles/modules and reuse geometry.
+- Validate finite coordinates, distinct indices, zero-area faces, planarity,
+  shared-edge winding, adjacency coverage, and closed-component orientation
+  where feasible. Use generator-specific tests for open/concave outward intent.
+- Transform/Merge, showcase scaling, fragmentation and factory registration
+  must preserve metadata or rebuild compiled topology. Handle reflection and
+  nonuniform scale correctly; runtime object poses are normally rigid.
+
+### Approved frame pipeline
+
+1. Gather objects only from the active coordinate frame/presentation context.
+2. Cull conservative object bounds against the frustum before vertex work.
+3. Traverse bounded regions/modules; select projected-size LOD with hysteresis.
+4. Classify cached face planes against camera position expressed in model space
+   for rigid instances, before transforming unnecessary vertices.
+5. Classify candidate edges through adjacency and profile policy. Back/back
+   rejects, front/back preserves silhouette; front/front obeys authored policy.
+6. Transform surviving line vertices and vertices required by visible occluders;
+   clip lines and polygons to near/far/side frustum planes before perspective.
+7. At high levels, resolve a shared depth pass from ALL surviving occluders.
+8. Project candidates, reject insignificant projected lengths, depth-test and
+   split partially hidden lines, then viewport-clip final segments and draw.
+
+Replace immediate per-part output with frame collection/resolution so another
+object's surfaces can occlude a line regardless of submission order. A surface
+can occlude even if its own edges are removed by LOD/policy. Use reusable scratch
+buffers and concrete structs, not per-frame topology maps or unnecessary stage
+interfaces. Instrument allocation cost before clever optimisations.
+
+Use an invisible CPU depth buffer first, pretriangulated/clipped front surfaces,
+perspective-correct reciprocal-depth interpolation and line interval sampling.
+Tune depth bias/resolution against thin panels, nearby trench walls and surface
+markings. Keep final output vector strokes, not visible raster-filled surfaces.
+Maximum mode improves useful detail/depth precision and optional restrained
+depth cues. Future coarse occlusion/hierarchical-Z can be inserted after bounded
+node collection using the shared depth representation; no BVH/octree required
+initially. Cache topology, normals, adjacency, bounds and LODs, not dynamic
+camera-relative visibility without explicit invalidation.
+
+Billboard appearance remains first-class: define an appropriate generic depth
+proxy/occlusion contract for it; do not accidentally depth-render an unrelated
+whole orbital mesh behind the arcade drawing. Cockpit-excluded own-ship geometry
+must not become an invisible blocker. HUD stays a final overlay. Transition
+preview and showcase must use the same visibility mechanisms with correct frames.
+
+### Five profiles (common baseline applies to all)
+
+Common: mandatory surface back-face classification/culling, object/module bounds
+rejection, robust clipping, projected-size detail filtering and tiny-edge tests.
+
+| Level | Policy |
+| --- | --- |
+| 1 Retro Wireframe | Coarse authored geometry and sparse structural/decorative lines; aggressive detail reduction; no depth hidden lines. |
+| 2 Clean Wireframe | Projected-size LOD, adjacency visibility, preserved silhouettes and controlled structural detail. |
+| 3 Enhanced Vector | Suppress coplanar/internal edges, prioritize silhouettes, retain more useful close detail. |
+| 4 Hidden-Line Vector | Shared depth, inter-object occlusion, partial line visibility, detailed useful geometry. |
+| 5 Maximum Realism | Finest useful LOD and more precise depth/line sampling; restrained optional depth cues; all optimisations remain active. |
+
+Centralize labels, IDs, policies and thresholds in render profiles, consumed by
+the existing clickable slider and keyboard controls. Update existing profile
+tests and documentation; do not carry obsolete no-op modes forward as if real.
+
+### Implementation checkpoints and verification
+
+- [ ] Capture baseline deterministic workloads BEFORE renderer changes: TIE,
+  X-Wing, orbital sphere/dish, deck/trench/tower scene, repeated instances and
+  several fixed/rotated camera poses. Record input topology, output segments,
+  elapsed time and allocations. Compare like-for-like geometry separately from
+  topology-migration changes; no invented percentage or blanket performance claim.
+- [ ] Compile topology and add normal/winding/adjacency/degeneracy tests first.
+- [ ] Repair primitives, then major models and debris. Test multiple viewpoints,
+  transformed classification, boundary/silhouette/internal/decorative behavior.
+- [ ] Remove bypasses; enforce baseline back-face behavior in every mode. Update
+  old tests such as TestRenderCubeProducesEveryEdge to the approved semantics.
+- [ ] Add bounds, frame queue, hierarchy and LOD. Test spheres outside/inside/
+  intersecting frustum, off-centre/scaled bounds, hysteresis and module rejection.
+- [ ] Add robust polygon/line frustum and viewport clipping and tiny-edge tests,
+  including near-plane crossings and huge potential projected coordinates.
+- [ ] Integrate five profiles across gameplay, showcase, surface and transition.
+- [ ] Add shared depth and partial-line tests: crossing occluders, self-occlusion,
+  submission-order independence, varying depth, bias and thin geometry.
+- [ ] Expose per-frame HUD/debug counters only when debug info is requested:
+  objects input/culled/surviving; modules culled; faces input/classified/back/front;
+  vertices transformed; input edges; rejection by back adjacency, policy, LOD,
+  tiny length and depth; clipped edges; final segments submitted; depth work.
+  Separate rejected edges from generated visible segments to avoid misleading
+  counts when hidden-line splitting increases segment count.
+- [ ] Format touched code; run package/full tests and vet, plus benchmarks. Use
+  virtual X11 if available for Ebitengine tests; otherwise report the limitation
+  and compile the game tests separately. Exercise interactive slider, cockpit,
+  showcase, surface/trench, transitions and disintegration when display permits.
+- [ ] Report measured before/after workload and allocation results, regressions
+  and tradeoffs. Document new-model authoring requirements and confirm that a
+  future Interceptor needs only topology/LOD data, registration and its own tests.
+
+### Resume notes
+
+Phase 1 baseline checks passed (2026-09-05):
+`go test ./internal/model ./internal/render ./internal/catalog
+./internal/environment ./internal/appearance ./internal/camera ./internal/math3d`.
+They establish current behavior, not valid topology. Full game tests and actual
+rendering benchmarks were NOT run in Phase 1. Worktree was clean on inspection.
+
+Workspace: `/home/ed/projects/starwars`. For reliable Go invocation here use
+`env GOCACHE=/tmp/starwars-go-build /snap/go/current/bin/go ...`.
+Use separate commands; user explicitly dislikes command chaining and long Snap
+formatter waits. Check an available direct formatter before using `/snap/bin`.
+Preserve any changes made after this handoff. Do not commit/push unless requested.
+No subagents unless the user or applicable repository instructions request them.
+
+### Migration progress (current session)
+
+The migration foundation is now implemented. `model.Prepare` compiles immutable
+face normals and plane constants, preserves all incident face adjacency,
+classifies coplanar construction seams, and derives conservative local bounds.
+Validation rejects non-finite vertices, self-loop edges, repeated face vertices,
+and zero-area faces. Cube winding is outward; generated fighter, orbital Death
+Star, surface deck, trench, tower, and cannon meshes preserve compiled topology
+through Transform/Merge. TIE solar panels are now thin extruded solids rather
+than zero-thickness sketches, and debris fragments rebuild their adjacency after
+partitioning. The Death Star sphere now uses explicit pole vertices and
+non-degenerate cap triangles; its recessed dish also has sparse concave face
+topology for depth occlusion.
+
+The mandatory back-face stage is adjacency-driven in all five profiles. The
+former axis heuristic and reverse-front fallback are gone. Decorative/detail
+lines remain explicit line art and are retained only when their owning surface
+is visible. Higher profiles remove coplanar internal seams. The renderer now
+supports conservative object bounds rejection, projected tiny-edge filtering,
+five profile mappings, per-frame visibility counters, and cached model normals
+transformed through the rigid view/object matrix.
+
+The high profiles now build a shared CPU depth surface from polygon faces before
+vector submission. Near/far depth polygons are clipped, reciprocal depth is
+rasterized, and candidate lines are sampled into visible intervals so an edge
+can be split around an occluding surface. Billboard artwork and cockpit-excluded
+parts remain outside the depth pass. HUD debug text exposes object, transform,
+back-face, depth, tiny-edge, and final-line counts. The showcase and streamed
+surface modules use the same prepared topology, profile stages, projected-size
+rejection, and (at higher levels) CPU depth surface. Environment module bounds
+are tested before transforming their vertices; the active-frame object filter
+also applies to depth generation so hidden or not-yet-launched swarm objects
+cannot become invisible occluders.
+
+The first interactive artifact pass also corrected procedural component winding
+with an explicit generator-time `OrientOutward` step for convex X-Wing/TIE
+components. The depth resolver now uses configurable relative bias and a small
+neighborhood sample around boundary pixels, while maximum-realism tiny-line
+thresholds retain more detail than the coarser profiles. These changes target
+rotation-dependent edge gaps and sparkle without disabling culling.
+
+The X-Wing S-foil slabs are now defined as coherent thin solids: the broad
+panel corners are coplanar and the rear surface is a fixed-thickness extrusion.
+Each surface is represented as planar triangles rather than warped
+quadrilateral faces. Their triangulation diagonals are explicit internal
+construction edges and are suppressed from vector submission at every profile;
+this keeps face normals and depth coverage stable while the ship rotates.
+
+Depth samples now carry a render-owner ID. A fighter's own polygons cannot erase
+its structural edges through depth sampling, while surfaces from other objects
+and environments remain valid occluders. This separates self-occlusion policy
+from inter-object hidden-line removal and is especially important for compound
+ships such as the X-Wing.
+
+Depth ownership is now assigned per physical scene part rather than only per
+object. This permits intentional intra-object occlusion: the TIE fighter's
+cockpit/pylons and solar-panel foils are separate model parts, so a foil can
+hide cockpit geometry while each part retains its own stable structural lines.
+The X-Wing follows the same rule with separate fuselage/canopy, S-foil/engine/
+cannon parts, with each of the four foil assemblies independently owned; this
+is a reusable scene composition convention, not a fighter-specific renderer
+branch. The same granularity is used for the TIE's left and right foils.
+Within each X-Wing foil assembly, the wing panel, engine nacelle and cannon
+are independently owned; the nacelle's rear and forward sections are separate
+solids as well, so mounted hardware can correctly occlude (or be occluded by)
+the panel and fuselage.
+Those nacelle sections and cannon barrels now include explicit end caps; they
+are closed solids rather than open side-only cylinders, preventing rear wing
+geometry from showing through a forward intake.
+The X-Wing fuselage and canopy are likewise separate scene parts, allowing the
+cockpit shell to occlude rear-facing details without a renderer special case.
+The S-foil geometry now uses a thin planar X-Z outline with Y-thickness and
+dihedral, keeping both root and tip edges parallel to the fuselage while the
+trailing edge sweeps aft into the fuselage's rear section.
+The canonical wing root is positioned at the fuselage side rather than near
+the centerline, matching the X-Wing front-view attachment geometry. Root and
+tip centers now share a radial angle so each foil projects as a straight,
+mirrored assembly rather than a kinked one.
+The canopy front profile is centered across the fuselage cross-section rather
+than being entirely above the centerline, keeping the cockpit visually aligned
+with the symmetric front-view wing attachment.
+
+Focused model, topology, winding, adjacency, culling, clipping, depth, profile,
+catalog, environment, and registry tests pass; `go vet ./...` passes; the game
+package compiles with `go test -c`. Full Ebitengine runtime tests and interactive
+visual checks still require an X11 display in this environment. Remaining work
+is robust side-frustum polygon clipping, tile/module bounds and hierarchy,
+allocation/workload benchmarks, richer stage counters, visual regression checks,
+and any model-specific topology corrections found during those checks. The TIE
+Interceptor remains intentionally unimplemented and is the first consumer after
+these foundations are stable.

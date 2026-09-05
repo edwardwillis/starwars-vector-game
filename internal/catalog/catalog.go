@@ -17,10 +17,13 @@ var (
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
-	tieFighterHull          = model.Transform(model.TIEFighter(), math3d.Scaling(0.72, 0.72, 0.72))
+	tieFighterCore          = model.Transform(model.TIEFighterCore(), math3d.Scaling(0.72, 0.72, 0.72))
+	tieFighterLeftFoil      = model.Transform(model.TIEFighterFoil(-1), math3d.Scaling(0.72, 0.72, 0.72))
+	tieFighterRightFoil     = model.Transform(model.TIEFighterFoil(1), math3d.Scaling(0.72, 0.72, 0.72))
 	tieFighterWindow        = model.Transform(model.TIEFighterWindow(), math3d.Scaling(0.72, 0.72, 0.72))
 	tieFighterDebris        = model.TIEFighterFragments()
-	xWingHull                = model.XWing()
+	xWingCoreParts           = model.XWingCoreParts()
+	xWingFoilParts           = model.XWingFoilParts()
 	xWingWindow              = model.XWingWindow()
 	xWingDebris              = model.XWingFragments()
 	laserBoltRays           = model.LaserBoltRays()
@@ -78,12 +81,19 @@ func Cube(id scene.ObjectID, size float64, pose kinematics.Pose) scene.Object {
 // XWing returns the sparse Rebel fighter with four open S-foils, engines, and
 // prominent wingtip cannons.
 func XWing(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	parts := []scene.Part{
+		{Name: "fuselage", Mesh: xWingCoreParts[0], Color: vectorGreen, LineWidth: standardLineWidth},
+		{Name: "canopy", Mesh: xWingCoreParts[1], Color: vectorGreen, LineWidth: standardLineWidth},
+	}
+	foilNames := [...]string{"upper-right S-foil", "upper-left S-foil", "lower-left S-foil", "lower-right S-foil"}
+	componentNames := [...]string{"wing panel", "rear engine", "forward engine", "cannon"}
+	for index, foil := range xWingFoilParts {
+		parts = append(parts, scene.Part{Name: foilNames[index/4] + " " + componentNames[index%4], Mesh: foil, Color: vectorGreen, LineWidth: standardLineWidth})
+	}
+	parts = append(parts, scene.Part{Name: "cockpit window", Mesh: xWingWindow, Color: windowAmber, LineWidth: standardLineWidth})
 	return scene.Object{
 		ID: id, Name: "X-Wing", Definition: XWingName, Pose: pose,
-		Parts: []scene.Part{
-			{Name: "hull and S-foils", Mesh: xWingHull, Color: vectorGreen, LineWidth: standardLineWidth},
-			{Name: "cockpit window", Mesh: xWingWindow, Color: windowAmber, LineWidth: standardLineWidth},
-		},
+		Parts: parts,
 		Anchors: map[string]kinematics.Pose{
 			"center": {Orientation: math3d.IdentityQuaternion()},
 			"cockpit": {Position: math3d.Vec3{Y: 0.34, Z: 0.78}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
@@ -216,8 +226,20 @@ func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 		Pose:       pose,
 		Parts: []scene.Part{
 			{
-				Name:      "hull",
-				Mesh:      tieFighterHull,
+				Name:      "cockpit and pylons",
+				Mesh:      tieFighterCore,
+				Color:     vectorGreen,
+				LineWidth: standardLineWidth,
+			},
+			{
+				Name:      "left solar-panel foil",
+				Mesh:      tieFighterLeftFoil,
+				Color:     vectorGreen,
+				LineWidth: standardLineWidth,
+			},
+			{
+				Name:      "right solar-panel foil",
+				Mesh:      tieFighterRightFoil,
 				Color:     vectorGreen,
 				LineWidth: standardLineWidth,
 			},

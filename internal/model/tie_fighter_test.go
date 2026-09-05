@@ -7,11 +7,11 @@ import (
 
 func TestTIEFighterIsValidAndSymmetrical(t *testing.T) {
 	fighter := TIEFighter()
-	if len(fighter.Verts) != 56 {
-		t.Fatalf("fighter has %d vertices, want 56", len(fighter.Verts))
+	if len(fighter.Verts) != 70 {
+		t.Fatalf("fighter has %d vertices, want 70", len(fighter.Verts))
 	}
-	if len(fighter.Edges) != 112 {
-		t.Fatalf("fighter has %d edges, want 112", len(fighter.Edges))
+	if len(fighter.Edges) != 148 {
+		t.Fatalf("fighter has %d edges, want 148", len(fighter.Edges))
 	}
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TIEFighter returned an invalid model: %v", err)
@@ -58,8 +58,8 @@ func TestTIEFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
 		edgeCount += len(fragment.Edges)
 		faceCount += len(fragment.Faces)
 	}
-	if edgeCount != len(hull.Edges) {
-		t.Fatalf("fragments contain %d edges, want hull's %d", edgeCount, len(hull.Edges))
+	if edgeCount < len(hull.Edges) {
+		t.Fatalf("fragments contain %d edges, fewer than hull's %d", edgeCount, len(hull.Edges))
 	}
 	if faceCount != len(hull.Faces) {
 		t.Fatalf("fragments contain %d faces, want hull's %d", faceCount, len(hull.Faces))

@@ -9,7 +9,7 @@ import (
 )
 
 func TestStagesForProfileAreProgressive(t *testing.T) {
-	if got := len(StagesForProfile("builtin/arcade")); got != 0 {
+	if got := len(StagesForProfile("builtin/arcade")); got != 1 {
 		t.Fatalf("arcade stages = %d", got)
 	}
 	if got := len(StagesForProfile(ProfileCulled)); got != 1 {
@@ -33,6 +33,72 @@ func TestRenderCubeProducesEveryEdge(t *testing.T) {
 		if line.X1 < 0 || line.X1 > 800 || line.X2 < 0 || line.X2 > 800 ||
 			line.Y1 < 0 || line.Y1 > 600 || line.Y2 < 0 || line.Y2 > 600 {
 			t.Fatalf("line lies outside screen: %+v", line)
+		}
+	}
+}
+
+func TestBackfaceCullingUsesFaceWindingAndKeepsDecorativeLines(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage()}
+	front := model.Model{
+		Verts: []math3d.Vec3{{X: -1, Y: -1, Z: -5}, {X: 1, Y: -1, Z: -5}, {Y: 1, Z: -5}, {X: -2, Y: 1, Z: -5}, {X: 2, Y: 1, Z: -5}},
+		Edges: []model.Edge{{A: 3, B: 4, Kind: model.EdgeDecorative}},
+		Faces: []model.Face{{Vertices: []int{0, 1, 2}}},
+	}
+	if got := pipeline.Render(front, math3d.Identity()); len(got) != 4 {
+		t.Fatalf("front face produced %d lines, want 4 including decorative line", len(got))
+	}
+	back := front
+	back.Faces = []model.Face{{Vertices: []int{2, 1, 0}}}
+	if got := pipeline.Render(back, math3d.Identity()); len(got) != 1 {
+		t.Fatalf("back face produced %d lines, want decorative line only", len(got))
+	}
+	pipeline.Stages = []Stage{BackfaceStage(), HiddenLineStage()}
+	if got := pipeline.Render(back, math3d.Identity()); len(got) != 1 {
+		t.Fatalf("hidden-line stage reintroduced %d back-face lines, want decorative line only", len(got))
+	}
+}
+
+func TestBackfaceCullingFollowsRigidRotation(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage()}
+	mesh := model.Model{
+		Verts: []math3d.Vec3{{X: -1, Y: -1, Z: 0}, {X: 1, Y: -1, Z: 0}, {Y: 1, Z: 0}},
+		Faces: []model.Face{{Vertices: []int{0, 1, 2}}},
+	}
+	if got := pipeline.Render(mesh, math3d.Translation(0, 0, -5)); len(got) != 3 {
+		t.Fatalf("unrotated front face produced %d lines, want 3", len(got))
+	}
+	if got := pipeline.Render(mesh, math3d.Translation(0, 0, -5).Mul(math3d.RotationY(math.Pi))); len(got) != 0 {
+		t.Fatalf("rotated back face produced %d lines, want 0", len(got))
+	}
+}
+
+func TestExistingFighterTopologySurvivesViewRotations(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage()}
+	for _, mesh := range []model.Model{model.TIEFighter(), model.XWing()} {
+		for _, angle := range []float64{0, math.Pi / 3, math.Pi, 5 * math.Pi / 3} {
+			world := math3d.Translation(0, 0, -12).Mul(math3d.RotationY(angle))
+			if got := pipeline.Render(mesh, world); len(got) == 0 {
+				t.Fatalf("fighter topology vanished at yaw %.2f", angle)
+			}
+		}
+	}
+}
+
+func TestXWingSelfDepthDoesNotEraseItsWingEdges(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
+	mesh := model.XWing()
+	for _, yaw := range []float64{0, math.Pi / 5, math.Pi / 2, math.Pi, 7 * math.Pi / 4} {
+		world := math3d.Translation(0, 0, -12).Mul(math3d.RotationY(yaw))
+		withoutDepth := pipeline.Render(mesh, world)
+		depth := NewDepthBuffer(800, 600)
+		pipeline.RasterizeDepthOwned(mesh, world, depth, 41)
+		withOwnDepth := pipeline.RenderWithDepthOwned(mesh, world, depth, 41)
+		if len(withOwnDepth) != len(withoutDepth) {
+			t.Fatalf("yaw %.2f: self depth reduced X-Wing edges from %d to %d", yaw, len(withoutDepth), len(withOwnDepth))
 		}
 	}
 }

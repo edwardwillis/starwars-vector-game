@@ -22,6 +22,19 @@ type Point struct {
 	Depth float64
 }
 
+// Stats records work performed by one or more Render calls. A pointer can be
+// attached to Pipeline during development; nil keeps the hot path lightweight.
+type Stats struct {
+	InputVertices, TransformedVertices int
+	InputEdges, OutputEdges            int
+	TinyEdges                          int
+	InputFaces                         int
+	BackfaceRejected, PolicyRejected  int
+	DepthRejected, ClippedEdges        int
+	ObjectsInput, ObjectsCulled        int
+	ObjectsVisible                     int
+}
+
 // Ray describes a world-space half-line produced by a screen-space aim point.
 type Ray struct {
 	Origin    math3d.Vec3
@@ -57,17 +70,22 @@ const (
 	ProfileCulled     = "culled"
 	ProfileHiddenLine = "hidden-line"
 	ProfileDepthCue   = "depth-cue"
+	ProfileMaximum    = "maximum"
 )
 
 func StagesForProfile(name string) []Stage {
 	name = strings.ToLower(name)
 	name = strings.TrimPrefix(name, "builtin/")
 	switch name {
+	case ProfileArcade:
+		return []Stage{BackfaceStage()}
 	case ProfileCulled:
 		return []Stage{BackfaceStage()}
 	case ProfileHiddenLine:
 		return []Stage{BackfaceStage(), HiddenLineStage()}
 	case ProfileDepthCue:
+		return []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
+	case ProfileMaximum:
 		return []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
 	default:
 		return nil
@@ -76,74 +94,69 @@ func StagesForProfile(name string) []Stage {
 
 func BackfaceStage() Stage { return stageFunc{"backface-culling", backfaceCull} }
 func HiddenLineStage() Stage {
-	return stageFunc{"hidden-line-removal", func(v []math3d.Vec3, m model.Model, e []model.Edge) []model.Edge { return e }}
+	return stageFunc{"hidden-line-removal", removeInternalEdges}
 }
 func DepthCueStage() Stage {
 	return stageFunc{"depth-cue", func(v []math3d.Vec3, m model.Model, e []model.Edge) []model.Edge { return e }}
+}
+
+// removeInternalEdges removes edges between coplanar faces. These are usually
+// triangulation/construction seams and do not contribute to a clean vector
+// silhouette. True inter-object hidden-line removal is added by the later depth
+// resolver; this cheap policy is useful at all higher profiles.
+func removeInternalEdges(v []math3d.Vec3, mesh model.Model, edges []model.Edge) []model.Edge {
+	out := make([]model.Edge, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Kind == model.EdgeInternal { continue }
+		out = append(out, edge)
+	}
+	return out
 }
 
 func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []model.Edge {
 	if len(mesh.Faces) == 0 {
 		return edges
 	}
-	// Open wireframe assemblies such as the twin-panel fighter contain thin
-	// side panels with no closed volume. Face-level culling makes one panel pop
-	// in and out independently, so preserve the complete outline for these
-	// meshes and reserve culling for volumetric geometry.
-	for _, face := range mesh.Faces {
+	prepared := model.Prepare(mesh)
+	front := make([]bool, len(mesh.Faces))
+	for faceIndex, face := range prepared.Faces {
 		if len(face.Vertices) < 3 {
 			continue
 		}
-		a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
-		n := b.Sub(a).Cross(c.Sub(a))
-		if math.Abs(n.X) > math.Abs(n.Z)*2 && math.Abs(n.X) > math.Abs(n.Y)*2 {
-			return edges
+		n := face.Normal
+		if n.Length() <= 1e-9 {
+			a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
+			n = b.Sub(a).Cross(c.Sub(a)).Normalize()
 		}
+		center := math3d.Vec3{}
+		for _, vertex := range face.Vertices { center = center.Add(verts[vertex]) }
+		center = center.Scale(1 / float64(len(face.Vertices)))
+		front[faceIndex] = n.Dot(center.Scale(-1)) > 1e-9 || face.DoubleSided
 	}
-	front := make(map[model.Edge]bool)
-	back := make(map[model.Edge]bool)
-	for _, face := range mesh.Faces {
-		if len(face.Vertices) < 3 {
+	out := make([]model.Edge, 0, len(prepared.Topology.Edges))
+	for _, edge := range prepared.Topology.Edges {
+		// Internal diagonals exist only to make non-planar authored surfaces
+		// explicit triangles. They must never become visible vector strokes,
+		// including in the deliberately sparse arcade profile.
+		if edge.Kind == model.EdgeInternal {
 			continue
 		}
-		a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
-		n := b.Sub(a).Cross(c.Sub(a))
-		center := a.Add(b).Add(c).Scale(1.0 / 3)
-		facing := n.Dot(center.Scale(-1))
-		target := front
-		// Thin panel surfaces are intentionally visible as vector outlines even
-		// when viewed nearly edge-on. Their normal is dominated by X, so a strict
-		// solid-surface culler would make a wing blink out as the craft rotates.
-		if math.Abs(n.X) > math.Abs(n.Z)*2 && math.Abs(n.X) > math.Abs(n.Y)*2 {
-			target = front
-		} else if math.Abs(facing) < 1e-9 {
-			// Edge-on faces have no reliable front/back classification; retaining
-			// their boundary keeps thin panels visible from side and follow views.
-			target = front
-		} else if facing < 0 {
-			target = back
+		adjacent := edge.AdjacentFaces
+		if len(adjacent) == 0 && edge.FaceA < 0 && edge.FaceB < 0 {
+			out = append(out, edge)
+			continue
 		}
-		for i, index := range face.Vertices {
-			next := face.Vertices[(i+1)%len(face.Vertices)]
-			if index > next {
-				index, next = next, index
+		visible := false
+		for _, faceIndex := range adjacent {
+			if faceIndex >= 0 && faceIndex < len(front) && front[faceIndex] {
+				visible = true
+				break
 			}
-			target[model.Edge{A: index, B: next}] = true
 		}
-	}
-	// Catalog meshes may use either winding convention. If the camera-facing
-	// orientation produced no edges, use the opposite convention rather than
-	// making an entire open panel disappear.
-	if len(front) == 0 && len(back) > 0 {
-		front = back
-	}
-	out := make([]model.Edge, 0, len(edges))
-	for _, edge := range edges {
-		key := edge
-		if key.A > key.B {
-			key.A, key.B = key.B, key.A
+		if len(adjacent) == 0 {
+			visible = (edge.FaceA >= 0 && front[edge.FaceA]) || (edge.FaceB >= 0 && front[edge.FaceB])
 		}
-		if front[key] {
+		if visible {
 			out = append(out, edge)
 		}
 	}
@@ -160,6 +173,9 @@ type Pipeline struct {
 	Projection math3d.Mat4
 	Culler     Culler
 	Stages     []Stage
+	MinLinePixels float64
+	DepthBias  float64
+	Stats      *Stats
 }
 
 func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
@@ -170,29 +186,68 @@ func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
 		Far:        far,
 		View:       math3d.Identity(),
 		Projection: math3d.Perspective(verticalFOV, float64(width)/float64(height), near, far),
+		DepthBias:  0.08,
 	}
 }
 
 // Render transforms a model into visible screen-space lines. The camera uses a
 // right-handed coordinate system and looks down negative Z.
 func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
+	return p.renderLines(mesh, world, nil, 0)
+}
+
+// RenderWithDepth applies the same vector pipeline while rejecting line
+// segments whose midpoint is behind a previously rasterized surface.
+func (p Pipeline) RenderWithDepth(mesh model.Model, world math3d.Mat4, depth *DepthBuffer) []Line {
+	return p.RenderWithDepthOwned(mesh, world, depth, 0)
+}
+
+// RenderWithDepthOwned leaves an object's own depth samples out of the
+// occlusion query. Callers can assign distinct owners to separate physical
+// parts of one object, allowing a nearer panel to hide a rear body while a
+// part's own structural edges remain stable.
+func (p Pipeline) RenderWithDepthOwned(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64) []Line {
+	return p.renderLines(mesh, world, depth, owner)
+}
+
+func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64) []Line {
 	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 {
 		return nil
 	}
 
 	viewWorld := p.View.Mul(world)
-	verts := make([]math3d.Vec3, len(mesh.Verts))
-	for index, vertex := range mesh.Verts {
+	prepared := model.Prepare(mesh)
+	stageMesh := prepared
+	if len(prepared.Faces) > 0 {
+		stageMesh.Faces = append([]model.Face(nil), prepared.Faces...)
+		for index := range stageMesh.Faces {
+			stageMesh.Faces[index].Normal = viewWorld.TransformDirection(prepared.Faces[index].Normal).Normalize()
+		}
+	}
+	verts := make([]math3d.Vec3, len(prepared.Verts))
+	if p.Stats != nil { p.Stats.InputVertices += len(mesh.Verts); p.Stats.TransformedVertices += len(mesh.Verts) }
+	if p.Stats != nil { p.Stats.InputFaces += len(mesh.Faces) }
+	for index, vertex := range prepared.Verts {
 		verts[index] = viewWorld.TransformPoint(vertex)
 	}
 
 	edges := mesh.Edges
+	if p.Stats != nil { p.Stats.InputEdges += len(edges) }
 	if p.Culler != nil {
 		edges = p.Culler.Cull(verts, edges)
 	}
 	for _, stage := range p.Stages {
 		if stage != nil {
-			edges = stage.Process(verts, mesh, edges)
+			before := len(edges)
+			edges = stage.Process(verts, stageMesh, edges)
+			if p.Stats != nil && before > len(edges) {
+				switch stage.Name() {
+				case "backface-culling":
+					p.Stats.BackfaceRejected += before - len(edges)
+				default:
+					p.Stats.PolicyRejected += before - len(edges)
+				}
+			}
 		}
 	}
 
@@ -202,7 +257,8 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 			continue
 		}
 
-		a, b, visible := clipNear(verts[edge.A], verts[edge.B], p.Near)
+		originalA, originalB := verts[edge.A], verts[edge.B]
+		a, b, visible := clipNear(originalA, originalB, p.Near)
 		if !visible {
 			continue
 		}
@@ -210,6 +266,10 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 		if !visible {
 			continue
 		}
+		if p.Stats != nil && (a != originalA || b != originalB) {
+			p.Stats.ClippedEdges++
+		}
+		depthA, depthB := -a.Z, -b.Z
 
 		a = p.Projection.TransformPoint(a)
 		b = p.Projection.TransformPoint(b)
@@ -220,10 +280,70 @@ func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
 			Y2: (1 - b.Y) * 0.5 * float64(p.Height),
 		}
 		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
-			lines = append(lines, clipped)
+			segments := []Line{clipped}
+			if depth != nil {
+				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias)
+				if len(segments) == 0 && p.Stats != nil { p.Stats.DepthRejected++ }
+			}
+			for _, segment := range segments {
+				if p.MinLinePixels > 0 && math.Hypot(segment.X2-segment.X1, segment.Y2-segment.Y1) < p.MinLinePixels {
+					if p.Stats != nil { p.Stats.TinyEdges++ }
+					continue
+				}
+				lines = append(lines, segment)
+			}
 		}
 	}
+	if p.Stats != nil { p.Stats.OutputEdges += len(lines) }
 	return lines
+}
+
+// visibleDepthSegments samples a projected edge against the CPU depth surface
+// and returns visible intervals. Sampling keeps final drawing vector-based while
+// allowing a line to disappear only where it passes behind another surface.
+func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64) []Line {
+	length := math.Hypot(line.X2-line.X1, line.Y2-line.Y1)
+	samples := int(math.Ceil(length / 6))
+	if samples < 4 { samples = 4 }
+	if samples > 64 { samples = 64 }
+	visibleAt := func(t float64) bool {
+		x := int(math.Round(line.X1 + (line.X2-line.X1)*t))
+		y := int(math.Round(line.Y1 + (line.Y2-line.Y1)*t))
+		// Perspective-correct interpolation matches the reciprocal-depth
+		// interpolation used by RasterizeDepth. Linear world-depth interpolation
+		// would make oblique edges appear artificially behind their own surfaces.
+		lineDepth := 1 / ((1/depthA)*(1-t) + (1/depthB)*t)
+		// Use a small relative bias: the line is normally coplanar with the
+		// surface that produced the depth sample, and numerical/raster coverage
+		// error should not make that structural edge sparkle or disappear.
+		bias := math.Max(baseBias, lineDepth*0.003)
+		return depth.nearestOtherAt(x, y, 1, owner)+bias >= lineDepth
+	}
+	segments := make([]Line, 0, samples)
+	runStart := 0.0
+	running := false
+	for index := 0; index <= samples; index++ {
+		t := float64(index) / float64(samples)
+		visible := visibleAt(t)
+		if visible && !running {
+			runStart, running = t, true
+		}
+		if !visible && running {
+			segments = append(segments, interpolateLine(line, runStart, t))
+			running = false
+		}
+	}
+	if running { segments = append(segments, interpolateLine(line, runStart, 1)) }
+	return segments
+}
+
+func interpolateLine(line Line, start, end float64) Line {
+	return Line{
+		X1: line.X1 + (line.X2-line.X1)*start,
+		Y1: line.Y1 + (line.Y2-line.Y1)*start,
+		X2: line.X1 + (line.X2-line.X1)*end,
+		Y2: line.Y1 + (line.Y2-line.Y1)*end,
+	}
 }
 
 // ProjectPoint transforms a world-space point through the active camera and

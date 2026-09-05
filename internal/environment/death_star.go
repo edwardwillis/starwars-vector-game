@@ -112,19 +112,36 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 
 func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Model {
 	mesh := model.Model{}
-	for i := 0; i <= divisions; i++ {
-		x := minX + (maxX-minX)*float64(i)/float64(divisions)
-		base := len(mesh.Verts)
-		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: x, Y: y, Z: zCenter - length/2}, math3d.Vec3{X: x, Y: y, Z: zCenter + length/2})
-		mesh.Edges = append(mesh.Edges, model.Edge{A: base, B: base + 1})
+	columns, rows := divisions+1, divisions+1
+	index := func(row, column int) int { return row*columns + column }
+	for row := 0; row < rows; row++ {
+		z := zCenter - length/2 + length*float64(row)/float64(divisions)
+		for column := 0; column < columns; column++ {
+			x := minX + (maxX-minX)*float64(column)/float64(divisions)
+			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: x, Y: y, Z: z})
+		}
 	}
-	for i := 0; i <= divisions; i++ {
-		z := zCenter - length/2 + length*float64(i)/float64(divisions)
-		base := len(mesh.Verts)
-		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: minX, Y: y, Z: z}, math3d.Vec3{X: maxX, Y: y, Z: z})
-		mesh.Edges = append(mesh.Edges, model.Edge{A: base, B: base + 1})
+	for row := 0; row < divisions; row++ {
+		for column := 0; column < divisions; column++ {
+			a, b := index(row, column), index(row, column+1)
+			c, d := index(row+1, column+1), index(row+1, column)
+			mesh.Faces = append(mesh.Faces, model.Face{Vertices: []int{d, c, b, a}})
+		}
 	}
-	return mesh
+	// Grid markings are intentional surface-associated detail. They remain
+	// eligible for face visibility and depth tests but are not mistaken for
+	// coplanar construction seams by the hidden-line policy.
+	for row := 0; row < rows; row++ {
+		for column := 0; column < divisions; column++ {
+			mesh.Edges = append(mesh.Edges, model.Edge{A: index(row, column), B: index(row, column+1), Kind: model.EdgeDecorative, Importance: .4})
+		}
+	}
+	for column := 0; column < columns; column++ {
+		for row := 0; row < divisions; row++ {
+			mesh.Edges = append(mesh.Edges, model.Edge{A: index(row, column), B: index(row+1, column), Kind: model.EdgeDecorative, Importance: .4})
+		}
+	}
+	return model.Prepare(mesh)
 }
 
 func trenchWireframe(centerX, halfWidth, depth, zCenter, length float64) model.Model {
@@ -140,10 +157,15 @@ func trenchWireframe(centerX, halfWidth, depth, zCenter, length float64) model.M
 			{X: centerX + halfWidth, Y: -depth, Z: zCenter + length/2},
 		},
 		Edges: []model.Edge{
-			{A: 0, B: 1}, {A: 2, B: 3}, {A: 4, B: 5}, {A: 6, B: 7},
-			{A: 0, B: 4}, {A: 1, B: 5}, {A: 2, B: 6}, {A: 3, B: 7},
-			{A: 4, B: 6}, {A: 5, B: 7},
+			{A: 0, B: 1, Kind: model.EdgeDecorative}, {A: 2, B: 3, Kind: model.EdgeDecorative}, {A: 4, B: 5, Kind: model.EdgeDecorative}, {A: 6, B: 7, Kind: model.EdgeDecorative},
+			{A: 0, B: 4, Kind: model.EdgeDecorative}, {A: 1, B: 5, Kind: model.EdgeDecorative}, {A: 2, B: 6, Kind: model.EdgeDecorative}, {A: 3, B: 7, Kind: model.EdgeDecorative},
+			{A: 4, B: 6, Kind: model.EdgeDecorative}, {A: 5, B: 7, Kind: model.EdgeDecorative},
 		},
+	}
+	mesh.Faces = []model.Face{
+		{Vertices: []int{0, 1, 5, 4}}, // left wall, outward normal +X
+		{Vertices: []int{2, 6, 7, 3}}, // right wall, outward normal -X
+		{Vertices: []int{4, 5, 7, 6}}, // floor, navigable side +Y
 	}
 	for i := 1; i < 8; i++ {
 		z := zCenter - length/2 + length*float64(i)/8
@@ -159,7 +181,7 @@ func trenchWireframe(centerX, halfWidth, depth, zCenter, length float64) model.M
 			model.Edge{A: base + 2, B: base + 3},
 		)
 	}
-	return mesh
+	return model.Prepare(mesh)
 }
 
 func trenchPlanes(centerX, zCenter, halfLength, halfWidth, depth float64) []collision.FinitePlane {
@@ -196,9 +218,6 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 		variation := (coordinate.X*17 + coordinate.Z*31 + index + 3000) % 3
 		width := 4.0 + float64(variation)
 		localGeometry := model.Transform(model.Cube(1), math3d.Scaling(width, height, width))
-		// Keep every finite-depth outline visible under optional back-face
-		// culling. The oriented box remains the authoritative solid collider.
-		localGeometry.Faces = nil
 		kind := "tower"
 		if index == 1 {
 			kind = "cannon"

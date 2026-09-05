@@ -23,7 +23,7 @@ func LaserBoltRays() Model {
 		mesh.Verts = append(mesh.Verts, direction.Scale(laserRayLength))
 		mesh.Edges = append(mesh.Edges, Edge{A: 0, B: endpoint})
 	}
-	return mesh
+	return Prepare(mesh)
 }
 
 // LaserBoltBranches returns six short blue branches around the end of every
@@ -53,7 +53,7 @@ func LaserBoltBranches() Model {
 			mesh.Edges = append(mesh.Edges, Edge{A: centerIndex, B: endpoint})
 		}
 	}
-	return mesh
+	return Prepare(mesh)
 }
 
 func laserDirections() []math3d.Vec3 {

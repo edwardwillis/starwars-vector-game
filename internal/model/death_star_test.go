@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+)
 
 func TestDeathStarGeometryIsValidAndSparse(t *testing.T) {
 	geometry := DeathStar(15)
@@ -14,6 +18,14 @@ func TestDeathStarGeometryIsValidAndSparse(t *testing.T) {
 			t.Fatalf("%s has no edges", name)
 		}
 		totalEdges += len(mesh.Edges)
+	}
+	for index, face := range geometry.Sphere.Faces {
+		center := math3d.Vec3{}
+		for _, vertex := range face.Vertices { center = center.Add(geometry.Sphere.Verts[vertex]) }
+		center = center.Scale(1 / float64(len(face.Vertices)))
+		if geometry.Sphere.Faces[index].Normal.Dot(center) <= 0 {
+			t.Fatalf("sphere face %d normal points inward", index)
+		}
 	}
 	if totalEdges > 250 {
 		t.Fatalf("orbital Death Star uses %d edges, want at most 250", totalEdges)

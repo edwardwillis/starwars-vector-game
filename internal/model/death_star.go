@@ -25,7 +25,10 @@ func DeathStar(radius float64) DeathStarGeometry {
 func sparseSphere(radius float64, longitudeSegments, latitudeBands int) Model {
 	mesh := Model{}
 	columns := longitudeSegments
-	for band := 0; band <= latitudeBands; band++ {
+	south := len(mesh.Verts)
+	mesh.Verts = append(mesh.Verts, math3d.Vec3{Y: -radius})
+	ring := func(band int) int { return 1 + (band-1)*columns }
+	for band := 1; band < latitudeBands; band++ {
 		latitude := -math.Pi/2 + math.Pi*float64(band)/float64(latitudeBands)
 		sinLat, cosLat := math.Sincos(latitude)
 		for column := 0; column < columns; column++ {
@@ -34,21 +37,27 @@ func sparseSphere(radius float64, longitudeSegments, latitudeBands int) Model {
 			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: radius * cosLat * sinLon, Y: radius * sinLat, Z: radius * cosLat * cosLon})
 		}
 	}
-	for band := 0; band <= latitudeBands; band++ {
+	north := len(mesh.Verts)
+	mesh.Verts = append(mesh.Verts, math3d.Vec3{Y: radius})
+	for column := 0; column < columns; column++ {
+		next := (column + 1) % columns
+		mesh.Edges = append(mesh.Edges, Edge{A: south, B: ring(1) + column})
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{south, ring(1) + next, ring(1) + column}})
+	}
+	for band := 1; band < latitudeBands-1; band++ {
 		for column := 0; column < columns; column++ {
 			next := (column + 1) % columns
-			if band > 0 && band < latitudeBands {
-				mesh.Edges = append(mesh.Edges, Edge{A: band*columns + column, B: band*columns + next})
-			}
-			if band < latitudeBands {
-				mesh.Edges = append(mesh.Edges, Edge{A: band*columns + column, B: (band+1)*columns + column})
-			}
-			if band < latitudeBands {
-				mesh.Faces = append(mesh.Faces, Face{Vertices: []int{band*columns + column, band*columns + next, (band+1)*columns + next, (band+1)*columns + column}})
-			}
+			current, upper := ring(band)+column, ring(band+1)+column
+			mesh.Edges = append(mesh.Edges, Edge{A: current, B: ring(band) + next}, Edge{A: current, B: upper})
+			mesh.Faces = append(mesh.Faces, Face{Vertices: []int{current, ring(band) + next, ring(band+1) + next, upper}})
 		}
 	}
-	return mesh
+	for column := 0; column < columns; column++ {
+		next := (column + 1) % columns
+		mesh.Edges = append(mesh.Edges, Edge{A: ring(latitudeBands-1) + column, B: north})
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{north, ring(latitudeBands-1) + column, ring(latitudeBands-1) + next}})
+	}
+	return Prepare(mesh)
 }
 
 func recessedDish(radius float64, segments int) Model {
@@ -65,8 +74,20 @@ func recessedDish(radius float64, segments int) Model {
 	}
 	center := len(mesh.Verts)
 	mesh.Verts = append(mesh.Verts, math3d.Vec3{Z: -radius * 0.32})
-	for segment := 0; segment < segments; segment += 2 {
-		mesh.Edges = append(mesh.Edges, Edge{A: segment, B: center})
+	for segment := 0; segment < segments; segment++ {
+		mesh.Edges = append(mesh.Edges, Edge{A: 2*segments + segment, B: center, Kind: EdgeDecorative})
 	}
-	return mesh
+	for ring := 0; ring < len(rings)-1; ring++ {
+		base, nextBase := ring*segments, (ring+1)*segments
+		for segment := 0; segment < segments; segment++ {
+			next := (segment + 1) % segments
+			mesh.Faces = append(mesh.Faces, Face{Vertices: []int{base + segment, base + next, nextBase + next, nextBase + segment}})
+		}
+	}
+	innerBase := 2 * segments
+	for segment := 0; segment < segments; segment++ {
+		next := (segment + 1) % segments
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{innerBase + segment, innerBase + next, center}})
+	}
+	return Prepare(mesh)
 }
