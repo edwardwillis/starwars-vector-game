@@ -6,6 +6,19 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 )
 
+const (
+	xWingWingRootX           = 0.55
+	xWingWingTipX            = 3.25
+	xWingEngineMountX        = 1.02
+	xWingEngineMountZ        = -0.55
+	xWingCannonMountZ        = 0.02
+	xWingCannonBarrelLength  = 1.60
+	xWingCannonBarrelCenterZ = 0.25
+	xWingCannonMountCenterZ  = -0.32
+	xWingCannonMountDepth    = 0.40
+	xWingCannonMuzzleZ       = xWingCannonMountZ + xWingCannonBarrelCenterZ + xWingCannonBarrelLength/2
+)
+
 // XWing returns a sparse Rebel fighter assembled from a hull, four reusable
 // S-foil assemblies, engines, and wingtip cannons. +Z is the nose direction.
 func XWing() Model {
@@ -27,61 +40,124 @@ func XWingCoreParts() []Model {
 
 // XWingFoils contains the four rotated wing, engine and cannon assemblies.
 func XWingFoils() Model {
-	parts := XWingFoilModels()
+	return Merge(XWingFoilParts()...)
+}
+
+// XWingFoilAssembly groups the four independently drawable components of one
+// deployed S-foil. Keeping the names with the geometry avoids fragile
+// index-based grouping in catalog composition.
+type XWingFoilAssembly struct {
+	Name          string
+	Roll          float64
+	Wing          Model
+	RearEngine    Model
+	ForwardEngine Model
+	Cannon        Model
+	Muzzle        math3d.Vec3
+}
+
+// XWingGeometry contains the immutable geometry variants shared by catalog
+// objects, debris generation, and showcase rendering.
+type XWingGeometry struct {
+	Fuselage  Model
+	Canopy    Model
+	Foils     []XWingFoilAssembly
+	Window    Model
+	Fragments [3]Model
+}
+
+// XWingGeometryData builds the X-Wing geometry family once for callers that
+// need both drawable parts and destruction fragments.
+func XWingGeometryData() XWingGeometry {
+	fuselage := xWingFuselage()
+	canopy := xWingCanopy()
+	foils := XWingFoilAssemblies()
+	window := Transform(canopy, math3d.Translation(0, 0, 0.015))
+	full := mergeXWingParts(fuselage, canopy, foils)
+	return XWingGeometry{
+		Fuselage:  fuselage,
+		Canopy:    canopy,
+		Foils:     foils,
+		Window:    window,
+		Fragments: splitXWingFragments(full),
+	}
+}
+
+func mergeXWingParts(fuselage, canopy Model, foils []XWingFoilAssembly) Model {
+	parts := []Model{fuselage, canopy}
+	for _, foil := range foils {
+		parts = append(parts, foil.Wing, foil.RearEngine, foil.ForwardEngine, foil.Cannon)
+	}
 	return Merge(parts...)
+}
+
+// XWingFoilAssemblies returns the four named, transformed S-foil assemblies.
+func XWingFoilAssemblies() []XWingFoilAssembly {
+	wing := wingSlab()
+	engineParts := xWingEngineParts()
+	cannon := Transform(xWingCannon(), math3d.Translation(xWingWingTipX, .70, xWingCannonMountZ))
+	placements := []struct {
+		name   string
+		roll   float64
+		mountY float64
+	}{
+		{name: "upper-right S-foil", roll: math.Pi * 8 / 180, mountY: .30},
+		{name: "upper-left S-foil", roll: math.Pi * 148 / 180, mountY: .15},
+		{name: "lower-left S-foil", roll: math.Pi * 188 / 180, mountY: .30},
+		{name: "lower-right S-foil", roll: math.Pi * 328 / 180, mountY: .15},
+	}
+	assemblies := make([]XWingFoilAssembly, 0, len(placements))
+	for _, placement := range placements {
+		rotation := math3d.RotationZ(placement.roll)
+		assembly := XWingFoilAssembly{
+			Name: placement.name,
+			Roll: placement.roll,
+			Wing: Transform(wing, rotation),
+		}
+		for index, engine := range engineParts {
+			mounted := Transform(engine, math3d.Translation(xWingEngineMountX, placement.mountY, xWingEngineMountZ))
+			mounted = Transform(mounted, rotation)
+			if index == 0 {
+				assembly.RearEngine = mounted
+			} else {
+				assembly.ForwardEngine = mounted
+			}
+		}
+		mountedCannon := Transform(cannon, rotation)
+		muzzle := rotation.TransformPoint(math3d.Vec3{X: xWingWingTipX, Y: .70, Z: xWingCannonMuzzleZ})
+		if math.Sin(placement.roll) > 0 {
+			mountedCannon = Transform(mountedCannon, math3d.Translation(0, .10, 0))
+			muzzle.Y += .10
+		} else {
+			mountedCannon = Transform(mountedCannon, math3d.Translation(0, -.10, 0))
+			muzzle.Y -= .10
+		}
+		assembly.Cannon = mountedCannon
+		assembly.Muzzle = muzzle
+		assemblies = append(assemblies, assembly)
+	}
+	return assemblies
 }
 
 // XWingFoilModels returns the four independently occluding S-foil assemblies.
 // Each assembly includes its engine and wingtip cannon.
 func XWingFoilModels() []Model {
-	parts := XWingFoilParts()
-	assemblies := make([]Model, 0, 4)
-	for index := 0; index < 4; index++ {
-		assemblies = append(assemblies, Merge(parts[index*4:index*4+4]...))
+	assemblies := XWingFoilAssemblies()
+	models := make([]Model, 0, len(assemblies))
+	for _, assembly := range assemblies {
+		models = append(models, Merge(assembly.Wing, assembly.RearEngine, assembly.ForwardEngine, assembly.Cannon))
 	}
-	return assemblies
+	return models
 }
 
 // XWingFoilParts returns independently occluding wing slabs, engine nacelles
 // and cannons for all four S-foil assemblies. This is the scene-composition
 // form used when physical subcomponents need separate depth ownership.
 func XWingFoilParts() []Model {
-	wing := wingSlab()
-	engineParts := xWingEngineParts()
-	// Start the cannon at the wingtip centreline; the upper/lower surface
-	// offset is applied in world Y after each S-foil rotation below.
-	cannon := Transform(xWingCannon(), math3d.Translation(3.25, .70, .02))
-	parts := make([]Model, 0, 16)
-	// The slab itself splays outward by roughly 12 degrees from its local X
-	// axis. These rolls compensate for that built-in splay so the four visible
-	// wing axes have the same absolute inclination from the fuselage centreline
-	// in a front view (20, 160, 200 and 340 degrees). MountY is deliberately
-	// explicit: in the front view the two upper nacelles sit above their wings
-	// and the two lower nacelles sit below, while the top-left and bottom-right
-	// diagonal assemblies use a smaller offset to remain close to their panels.
-	foils := []struct {
-		roll   float64
-		mountY float64
-	}{
-		{roll: math.Pi * 8 / 180, mountY: .30},
-		{roll: math.Pi * 148 / 180, mountY: .15},
-		{roll: math.Pi * 188 / 180, mountY: .30},
-		{roll: math.Pi * 328 / 180, mountY: .15},
-	}
-	for _, foil := range foils {
-		rotation := math3d.RotationZ(foil.roll)
-		parts = append(parts, Transform(wing, rotation))
-		for _, engine := range engineParts {
-			mounted := Transform(engine, math3d.Translation(1.02, foil.mountY, -.55))
-			parts = append(parts, Transform(mounted, rotation))
-		}
-		mountedCannon := Transform(cannon, rotation)
-		if math.Sin(foil.roll) > 0 {
-			mountedCannon = Transform(mountedCannon, math3d.Translation(0, .10, 0))
-		} else {
-			mountedCannon = Transform(mountedCannon, math3d.Translation(0, -.10, 0))
-		}
-		parts = append(parts, mountedCannon)
+	assemblies := XWingFoilAssemblies()
+	parts := make([]Model, 0, len(assemblies)*4)
+	for _, assembly := range assemblies {
+		parts = append(parts, assembly.Wing, assembly.RearEngine, assembly.ForwardEngine, assembly.Cannon)
 	}
 	return parts
 }
@@ -128,7 +204,9 @@ func xWingFuselage() Model {
 			next := (i + 1) % segments
 			mesh.Edges = append(mesh.Edges, Edge{A: center, B: base + i})
 			vertices := []int{center, base + i, base + next}
-			if ring == len(sections)-1 { vertices = []int{center, base + next, base + i} }
+			if ring == len(sections)-1 {
+				vertices = []int{center, base + next, base + i}
+			}
 			mesh.Faces = append(mesh.Faces, Face{Vertices: vertices})
 		}
 	}
@@ -157,13 +235,6 @@ func xWingCanopy() Model {
 	return OrientOutward(mesh)
 }
 
-func xWingCanonicalWing() Model {
-	wing := wingSlab()
-	engine := Transform(xWingEngine(), math3d.Translation(1.02, .30, -.55))
-	cannon := Transform(xWingCannon(), math3d.Translation(3.25, .80, .02))
-	return Merge(wing, engine, cannon)
-}
-
 // wingSlab builds one canonical upper-right S-foil. Its broad Z chord runs
 // from behind the cockpit toward the compact rear body; rotation around Z
 // supplies the other three wings while preserving a thin physical thickness.
@@ -174,15 +245,19 @@ func wingSlab() Model {
 	// extrusion gives the panel a real solid thickness without distorting its
 	// top-view silhouette.
 	profile := []math3d.Vec3{
-		{X: .55, Y: .12, Z: .05},
-		{X: 3.25, Y: .70, Z: -.10},
-		{X: 3.25, Y: .70, Z: -.50},
-		{X: .55, Y: .12, Z: -1.10},
+		{X: xWingWingRootX, Y: .12, Z: .05},
+		{X: xWingWingTipX, Y: .70, Z: -.10},
+		{X: xWingWingTipX, Y: .70, Z: -.50},
+		{X: xWingWingRootX, Y: .12, Z: -1.10},
 	}
 	const thickness = .06
 	mesh := Model{}
-	for _, point := range profile { mesh.Verts = append(mesh.Verts, point.Add(math3d.Vec3{Y: thickness / 2})) }
-	for _, point := range profile { mesh.Verts = append(mesh.Verts, point.Sub(math3d.Vec3{Y: thickness / 2})) }
+	for _, point := range profile {
+		mesh.Verts = append(mesh.Verts, point.Add(math3d.Vec3{Y: thickness / 2}))
+	}
+	for _, point := range profile {
+		mesh.Verts = append(mesh.Verts, point.Sub(math3d.Vec3{Y: thickness / 2}))
+	}
 	for i := range profile {
 		next := (i + 1) % len(profile)
 		mesh.Edges = append(mesh.Edges,
@@ -208,19 +283,15 @@ func wingSlab() Model {
 	return OrientOutward(mesh)
 }
 
-func xWingEngine() Model {
-	return Merge(xWingEngineParts()...)
-}
-
 // xWingEngineParts returns the narrow rear and wider forward sections as
 // separate solids. The assembled engine remains one model, while scene users
 // can give each section an independent depth owner where self-occlusion matters.
 func xWingEngineParts() []Model {
 	const (
-		radius       = 0.27
-		rearLength   = 1.16
-		frontLength  = 0.62
-		shoulderZ    = 0.16
+		radius      = 0.27
+		rearLength  = 1.16
+		frontLength = 0.62
+		shoulderZ   = 0.16
 		// Extend the forward cylinder toward the rear of the wing while
 		// keeping its nose close to the wing leading edge.
 		frontShiftBack = 0.12
@@ -233,9 +304,14 @@ func xWingEngineParts() []Model {
 func xWingCannon() Model {
 	// Keep the muzzle at the forward end while making the rear housing span
 	// the wingtip chord and letting the slim barrel project just past it.
-	barrel := cylinder(0.045, 1.60, 6)
-	mount := prism([]math3d.Vec3{{X: -.09, Y: -.09, Z: -.32}, {X: .09, Y: -.09, Z: -.32}, {X: .09, Y: .09, Z: -.32}, {X: -.09, Y: .09, Z: -.32}}, .40)
-	return Merge(Transform(barrel, math3d.Translation(0, 0, .25)), mount)
+	barrel := cylinder(0.045, xWingCannonBarrelLength, 6)
+	mount := prism([]math3d.Vec3{
+		{X: -.09, Y: -.09, Z: xWingCannonMountCenterZ},
+		{X: .09, Y: -.09, Z: xWingCannonMountCenterZ},
+		{X: .09, Y: .09, Z: xWingCannonMountCenterZ},
+		{X: -.09, Y: .09, Z: xWingCannonMountCenterZ},
+	}, xWingCannonMountDepth)
+	return Merge(Transform(barrel, math3d.Translation(0, 0, xWingCannonBarrelCenterZ)), mount)
 }
 
 func cylinder(radius, length float64, segments int) Model {
@@ -270,54 +346,6 @@ func cylinder(radius, length float64, segments int) Model {
 	return OrientOutward(mesh)
 }
 
-// nacelle is a fuller, closed three-section engine pod. With +Z forward, the
-// aft half is narrow and the forward half is enlarged with an instantaneous
-// shoulder at the midpoint, matching the chunky X-Wing engine silhouette.
-func nacelle(radius, length float64, segments int) Model {
-	mesh := Model{}
-	// Duplicate the midpoint ring so the diameter change is a hard shoulder,
-	// not a diagonal/tapered connection between unequal radii.
-	radii := []float64{radius * 0.52, radius * 0.52, radius * 1.12, radius * 1.12}
-	// The larger forward section begins about two-thirds along the wing chord.
-	shoulderZ := length * 0.08
-	for section, z := range []float64{-length / 2, shoulderZ, shoulderZ, length / 2} {
-		for i := 0; i < segments; i++ {
-			a := 2 * math.Pi * float64(i) / float64(segments)
-			s, c := math.Sincos(a)
-			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: radii[section] * c, Y: radii[section] * s, Z: z})
-		}
-	}
-	for ring := 0; ring < 3; ring++ {
-		base := ring * segments
-		nextBase := (ring + 1) * segments
-		for i := 0; i < segments; i++ {
-			next := (i + 1) % segments
-			mesh.Edges = append(mesh.Edges,
-				Edge{A: base + i, B: base + next},
-				Edge{A: nextBase + i, B: nextBase + next},
-				Edge{A: base + i, B: nextBase + i},
-			)
-			mesh.Faces = append(mesh.Faces, Face{Vertices: []int{base + i, base + next, nextBase + next, nextBase + i}})
-		}
-	}
-	frontCenter := len(mesh.Verts)
-	mesh.Verts = append(mesh.Verts, math3d.Vec3{Z: -length / 2})
-	rearCenter := len(mesh.Verts)
-	mesh.Verts = append(mesh.Verts, math3d.Vec3{Z: length / 2})
-	for i := 0; i < segments; i++ {
-		next := (i + 1) % segments
-		mesh.Edges = append(mesh.Edges,
-			Edge{A: frontCenter, B: i},
-			Edge{A: rearCenter, B: 3*segments + i},
-		)
-		mesh.Faces = append(mesh.Faces,
-			Face{Vertices: []int{frontCenter, next, i}},
-			Face{Vertices: []int{rearCenter, 3*segments + i, 3*segments + next}},
-		)
-	}
-	return OrientOutward(mesh)
-}
-
 func prism(profile []math3d.Vec3, depth float64) Model {
 	mesh := Model{}
 	for _, point := range profile {
@@ -344,7 +372,10 @@ func prism(profile []math3d.Vec3, depth float64) Model {
 
 // XWingFragments partitions the model into three spatial debris groups.
 func XWingFragments() [3]Model {
-	hull := XWing()
+	return splitXWingFragments(XWing())
+}
+
+func splitXWingFragments(hull Model) [3]Model {
 	fragments := [3]Model{{Verts: hull.Verts}, {Verts: hull.Verts}, {Verts: hull.Verts}}
 	for _, edge := range hull.Edges {
 		mid := (hull.Verts[edge.A].X + hull.Verts[edge.B].X) / 2
@@ -358,11 +389,18 @@ func XWingFragments() [3]Model {
 	}
 	for _, face := range hull.Faces {
 		centroid := 0.0
-		for _, vertex := range face.Vertices { centroid += hull.Verts[vertex].X }
+		for _, vertex := range face.Vertices {
+			centroid += hull.Verts[vertex].X
+		}
 		index := 1
-		if centroid/float64(len(face.Vertices)) < -1 { index = 0 } else if centroid/float64(len(face.Vertices)) > 1 { index = 2 }
+		if centroid/float64(len(face.Vertices)) < -1 {
+			index = 0
+		} else if centroid/float64(len(face.Vertices)) > 1 {
+			index = 2
+		}
 		fragments[index].Faces = append(fragments[index].Faces, face)
 	}
+	addFractureCaps(hull, &fragments, []float64{-1, 1})
 	for index := range fragments {
 		fragments[index] = Prepare(fragments[index])
 	}

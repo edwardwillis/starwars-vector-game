@@ -43,6 +43,23 @@ func TestApplyMapsAndReleasesAngularControls(t *testing.T) {
 	}
 }
 
+func TestApplyWithLimitsRampsAutonomousAngularRates(t *testing.T) {
+	limits := Limits{
+		AngularAcceleration: 2,
+		MaxYawRate:          1,
+		MaxPitchRate:        1,
+		MaxRollRate:         1,
+	}
+	motion := ApplyWithLimits(kinematics.Motion{}, Intent{Yaw: 1, Pitch: -1, Roll: 1}, limits, 0.1)
+	if motion.YawRate != 0.2 || motion.PitchRate != -0.2 || motion.RollRate != 0.2 {
+		t.Fatalf("angular rates jumped instead of ramping: %+v", motion)
+	}
+	motion = ApplyWithLimits(motion, Intent{Yaw: -1, Pitch: 1, Roll: -1}, limits, 0.1)
+	if motion.YawRate != 0 || motion.PitchRate != 0 || motion.RollRate != 0 {
+		t.Fatalf("angular rates reversed too quickly: %+v", motion)
+	}
+}
+
 func TestStopTakesPrecedence(t *testing.T) {
 	motion := Apply(kinematics.Motion{Speed: 1}, Intent{Throttle: 1, Stop: true}, DefaultManualConfig(), 1)
 	if motion.Speed != 0 {

@@ -7,34 +7,92 @@ import (
 
 func TestXWingGeometry(t *testing.T) {
 	ship := XWing()
-	if err := ship.Validate(); err != nil { t.Fatal(err) }
-	if len(ship.Verts) == 0 || len(ship.Edges) == 0 || len(ship.Faces) == 0 { t.Fatal("X-Wing geometry is empty") }
-	if len(ship.Verts) < 100 { t.Fatalf("vertices=%d, want substantial composed geometry", len(ship.Verts)) }
+	if err := ship.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(ship.Verts) == 0 || len(ship.Edges) == 0 || len(ship.Faces) == 0 {
+		t.Fatal("X-Wing geometry is empty")
+	}
+	if len(ship.Verts) < 100 {
+		t.Fatalf("vertices=%d, want substantial composed geometry", len(ship.Verts))
+	}
 }
 
 func TestXWingFacesForwardAlongPositiveZ(t *testing.T) {
 	ship := XWing()
 	minZ, maxZ := math.Inf(1), math.Inf(-1)
-	for _, vertex := range ship.Verts { minZ = math.Min(minZ, vertex.Z); maxZ = math.Max(maxZ, vertex.Z) }
-	if maxZ-minZ < 3.5 || maxZ <= 0 { t.Fatalf("unexpected longitudinal extent: %v..%v", minZ, maxZ) }
+	for _, vertex := range ship.Verts {
+		minZ = math.Min(minZ, vertex.Z)
+		maxZ = math.Max(maxZ, vertex.Z)
+	}
+	if maxZ-minZ < 3.5 || maxZ <= 0 {
+		t.Fatalf("unexpected longitudinal extent: %v..%v", minZ, maxZ)
+	}
 }
 
 func TestXWingHasSymmetricSeparatedFoils(t *testing.T) {
 	ship := XWing()
 	upper, lower := false, false
 	for _, vertex := range ship.Verts {
-		if vertex.Y > 0.65 { upper = true }
-		if vertex.Y < -0.65 { lower = true }
+		if vertex.Y > 0.65 {
+			upper = true
+		}
+		if vertex.Y < -0.65 {
+			lower = true
+		}
 	}
-	if !upper || !lower { t.Fatal("S-foils lack meaningful vertical separation") }
+	if !upper || !lower {
+		t.Fatal("S-foils lack meaningful vertical separation")
+	}
 	minX, maxX := math.Inf(1), math.Inf(-1)
-	for _, vertex := range ship.Verts { minX = math.Min(minX, vertex.X); maxX = math.Max(maxX, vertex.X) }
-	if math.Abs(minX+maxX) > 1e-9 { t.Fatalf("left/right bounds are asymmetric: %v..%v", minX, maxX) }
+	for _, vertex := range ship.Verts {
+		minX = math.Min(minX, vertex.X)
+		maxX = math.Max(maxX, vertex.X)
+	}
+	if math.Abs(minX+maxX) > 1e-9 {
+		t.Fatalf("left/right bounds are asymmetric: %v..%v", minX, maxX)
+	}
 }
 
 func TestXWingFragmentsValidate(t *testing.T) {
 	for index, fragment := range XWingFragments() {
-		if err := fragment.Validate(); err != nil { t.Fatalf("fragment %d: %v", index, err) }
+		if err := fragment.Validate(); err != nil {
+			t.Fatalf("fragment %d: %v", index, err)
+		}
+	}
+}
+
+func TestXWingFoilAssembliesAreNamedAndComplete(t *testing.T) {
+	assemblies := XWingFoilAssemblies()
+	if len(assemblies) != 4 {
+		t.Fatalf("assemblies=%d, want 4", len(assemblies))
+	}
+	wantNames := []string{"upper-right S-foil", "upper-left S-foil", "lower-left S-foil", "lower-right S-foil"}
+	for index, assembly := range assemblies {
+		if assembly.Name != wantNames[index] {
+			t.Fatalf("assembly %d name=%q, want %q", index, assembly.Name, wantNames[index])
+		}
+		for component, mesh := range []Model{assembly.Wing, assembly.RearEngine, assembly.ForwardEngine, assembly.Cannon} {
+			if err := mesh.Validate(); err != nil {
+				t.Fatalf("assembly %d component %d: %v", index, component, err)
+			}
+		}
+	}
+}
+
+func TestXWingGeometryDataIncludesSharedVariants(t *testing.T) {
+	geometry := XWingGeometryData()
+	for name, mesh := range map[string]Model{
+		"fuselage": geometry.Fuselage,
+		"canopy":   geometry.Canopy,
+		"window":   geometry.Window,
+	} {
+		if err := mesh.Validate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if len(geometry.Fragments) != 3 || len(geometry.Foils) != 4 {
+		t.Fatalf("geometry variants: fragments=%d foils=%d", len(geometry.Fragments), len(geometry.Foils))
 	}
 }
 
@@ -62,7 +120,9 @@ func TestXWingWingSlabUsesPlanarSurfaceFaces(t *testing.T) {
 		}
 	}
 	minZ := math.Inf(1)
-	for _, vertex := range wing.Verts { minZ = math.Min(minZ, vertex.Z) }
+	for _, vertex := range wing.Verts {
+		minZ = math.Min(minZ, vertex.Z)
+	}
 	if minZ > -0.75 {
 		t.Fatalf("wing trailing edge does not sweep aft enough: minimum Z=%v", minZ)
 	}

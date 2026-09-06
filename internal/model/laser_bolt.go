@@ -17,11 +17,11 @@ const (
 // LaserBoltRays returns sixteen red radial spokes distributed around a point in
 // 3D using a deterministic Fibonacci-sphere layout.
 func LaserBoltRays() Model {
-	mesh := Model{Verts: []math3d.Vec3{{}}}
+	mesh := Model{Verts: []math3d.Vec3{{}}, SkipDepth: true}
 	for _, direction := range laserDirections() {
 		endpoint := len(mesh.Verts)
 		mesh.Verts = append(mesh.Verts, direction.Scale(laserRayLength))
-		mesh.Edges = append(mesh.Edges, Edge{A: 0, B: endpoint})
+		mesh.Edges = append(mesh.Edges, Edge{A: 0, B: endpoint, Kind: EdgeDecorative})
 	}
 	return Prepare(mesh)
 }
@@ -29,7 +29,7 @@ func LaserBoltRays() Model {
 // LaserBoltBranches returns six short blue branches around the end of every
 // radial spoke. Each branch cluster lies mostly in the tangent plane of its ray.
 func LaserBoltBranches() Model {
-	mesh := Model{}
+	mesh := Model{SkipDepth: true}
 	for _, direction := range laserDirections() {
 		center := direction.Scale(laserRayLength)
 		centerIndex := len(mesh.Verts)
@@ -50,7 +50,7 @@ func LaserBoltBranches() Model {
 				Normalize()
 			endpoint := len(mesh.Verts)
 			mesh.Verts = append(mesh.Verts, center.Add(branchDirection.Scale(laserBranchLength)))
-			mesh.Edges = append(mesh.Edges, Edge{A: centerIndex, B: endpoint})
+			mesh.Edges = append(mesh.Edges, Edge{A: centerIndex, B: endpoint, Kind: EdgeDecorative})
 		}
 	}
 	return Prepare(mesh)

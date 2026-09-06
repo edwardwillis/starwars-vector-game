@@ -73,6 +73,10 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 	amber := color.RGBA{R: 255, G: 192, B: 48, A: 255}
 	isTrench := coordinate.X == trenchTileX && coordinate.Z >= trenchFirstTileZ && coordinate.Z <= trenchLastTileZ
 	deck := gridPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines)
+	// The deck is a flat wireframe reference surface. It remains visible line
+	// art, but does not need to occupy the CPU depth buffer for fighters flying
+	// above it; trench walls/floors and solid features still provide occlusion.
+	deck.SkipDepth = true
 	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: green, LineWidth: 1}}
 	planes := []collision.FinitePlane{{
 		Center: math3d.Vec3{X: xCenter, Z: zCenter}, Normal: math3d.Vec3{Y: 1},
@@ -83,6 +87,7 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 			gridPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
 			gridPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
 		)
+		deck.SkipDepth = true
 		parts[0].Mesh = deck
 		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: amber, LineWidth: 2})
 		planes = trenchPlanes(xCenter, zCenter, outerHalf, trenchHalf, depth)

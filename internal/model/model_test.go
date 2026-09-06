@@ -60,9 +60,13 @@ func TestPrepareCompilesNormalsAndAdjacency(t *testing.T) {
 	}
 	for index, face := range prepared.Faces {
 		center := math3d.Vec3{}
-		for _, vertex := range face.Vertices { center = center.Add(prepared.Verts[vertex]) }
+		for _, vertex := range face.Vertices {
+			center = center.Add(prepared.Verts[vertex])
+		}
 		center = center.Scale(1 / float64(len(face.Vertices)))
-		if prepared.Topology.FaceNormals[index].Dot(center) <= 0 { t.Fatalf("face %d normal is not outward: %v at %v", index, prepared.Topology.FaceNormals[index], center) }
+		if prepared.Topology.FaceNormals[index].Dot(center) <= 0 {
+			t.Fatalf("face %d normal is not outward: %v at %v", index, prepared.Topology.FaceNormals[index], center)
+		}
 	}
 	for _, edge := range prepared.Topology.Edges {
 		if edge.FaceA < 0 || edge.FaceB < 0 {
@@ -97,7 +101,9 @@ func TestPrepareRetainsNonManifoldFaceAdjacency(t *testing.T) {
 	})
 	for _, edge := range mesh.Topology.Edges {
 		if edge.A == 0 && edge.B == 1 {
-			if len(edge.AdjacentFaces) != 3 { t.Fatalf("shared edge adjacency=%v, want 3 faces", edge.AdjacentFaces) }
+			if len(edge.AdjacentFaces) != 3 {
+				t.Fatalf("shared edge adjacency=%v, want 3 faces", edge.AdjacentFaces)
+			}
 			return
 		}
 	}

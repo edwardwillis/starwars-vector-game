@@ -27,10 +27,35 @@ func TestDefaultRegistryCreatesLifecycleObjects(t *testing.T) {
 func TestDefaultRegistryCreatesXWingLifecycleObjects(t *testing.T) {
 	r := DefaultRegistry()
 	object, err := r.Create(XWingName, 10, kinematics.Pose{})
-	if err != nil || object.Definition != XWingName { t.Fatalf("create X-Wing: %v, definition=%q", err, object.Definition) }
+	if err != nil || object.Definition != XWingName {
+		t.Fatalf("create X-Wing: %v, definition=%q", err, object.Definition)
+	}
 	fragment, err := r.CreateFragment(XWingName, 11, 0, kinematics.Pose{})
-	if err != nil { t.Fatalf("create X-Wing fragment: %v", err) }
-	if count := XWingPolygonCount(0); count == 0 || fragment.Definition != XWingName { t.Fatalf("X-Wing lifecycle incomplete: count=%d", count) }
+	if err != nil {
+		t.Fatalf("create X-Wing fragment: %v", err)
+	}
+	if count := XWingPolygonCount(0); count == 0 || fragment.Definition != XWingName {
+		t.Fatalf("X-Wing lifecycle incomplete: count=%d", count)
+	}
+}
+
+func TestDefaultRegistryCreatesTIEInterceptorLifecycleObjects(t *testing.T) {
+	r := DefaultRegistry()
+	object, err := r.Create(TIEInterceptorName, 12, kinematics.Pose{})
+	if err != nil || object.Definition != TIEInterceptorName {
+		t.Fatalf("create interceptor: %v, definition=%q", err, object.Definition)
+	}
+	fragment, err := r.CreateFragment(TIEInterceptorName, 13, 0, kinematics.Pose{})
+	if err != nil || fragment.Definition != TIEInterceptorName {
+		t.Fatalf("create interceptor fragment: %v", err)
+	}
+	count, err := r.PolygonCount(TIEInterceptorName, 0)
+	if err != nil || count == 0 {
+		t.Fatalf("interceptor polygon count: %d, %v", count, err)
+	}
+	if _, err := r.CreatePolygon(TIEInterceptorName, 14, 0, 0, kinematics.Pose{}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRegistryRejectsUnknownAndDuplicateDefinitions(t *testing.T) {

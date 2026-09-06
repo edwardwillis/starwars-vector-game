@@ -75,12 +75,15 @@ func DeathStarArcade() Definition {
 		}
 		details = append(details, Detail{Threshold: 0.12 + 0.82*float64(index)/71, Line: line})
 	}
-	return Definition{Name: DeathStarArcadeName, ObjectDefinition: catalog.DeathStarName, Kind: "vector-billboard", Billboard: Billboard{Name: DeathStarArcadeName, Base: base, Details: details, Occludes: true}}
+	return Definition{Name: DeathStarArcadeName, ObjectDefinition: catalog.DeathStarName, Kind: "vector-billboard", PointOccluder: "sphere", Billboard: Billboard{Name: DeathStarArcadeName, Base: base, Details: details}}
 }
 
 func DefaultRegistry() *Registry {
 	registry := NewRegistry()
 	_ = registry.Register(DeathStarArcade())
 	_ = registry.Register(Definition{Name: "builtin/death-star-orbital-wireframe", ObjectDefinition: catalog.DeathStarName, Kind: "model-3d"})
+	_ = registry.Register(Definition{Name: catalog.RebelLaserBoltAppearance, ObjectDefinition: catalog.LaserBoltName, Kind: "model-3d"})
+	_ = registry.Register(Definition{Name: catalog.ImperialLaserBoltAppearance, ObjectDefinition: catalog.LaserBoltName, Kind: "model-3d"})
+	_ = registry.Register(Definition{Name: catalog.TIEInterceptorAppearance, ObjectDefinition: catalog.TIEInterceptorName, Kind: "model-3d"})
 	return registry
 }

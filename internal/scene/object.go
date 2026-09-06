@@ -20,7 +20,11 @@ type Part struct {
 	LineWidth        float32
 	VisibleInCockpit bool
 	CockpitOnly      bool
-	Detail           DetailTier
+	// SelfOccluding makes this part test its lines against its own depth
+	// samples as well as other parts. It is useful for compound solids whose
+	// rear/internal edges must not show through their front surfaces.
+	SelfOccluding bool
+	Detail        DetailTier
 }
 
 // DetailTier orders optional visual geometry from essential silhouette to

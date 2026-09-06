@@ -21,7 +21,9 @@ func TestDeathStarGeometryIsValidAndSparse(t *testing.T) {
 	}
 	for index, face := range geometry.Sphere.Faces {
 		center := math3d.Vec3{}
-		for _, vertex := range face.Vertices { center = center.Add(geometry.Sphere.Verts[vertex]) }
+		for _, vertex := range face.Vertices {
+			center = center.Add(geometry.Sphere.Verts[vertex])
+		}
 		center = center.Scale(1 / float64(len(face.Vertices)))
 		if geometry.Sphere.Faces[index].Normal.Dot(center) <= 0 {
 			t.Fatalf("sphere face %d normal points inward", index)

@@ -27,11 +27,14 @@ type ManualConfig struct {
 // controllers share the same authoritative flight rules.
 type Limits struct {
 	Acceleration float64
-	MaxForward   float64
-	MaxReverse   float64
-	MaxYawRate   float64
-	MaxPitchRate float64
-	MaxRollRate  float64
+	// AngularAcceleration limits how quickly an object's commanded yaw, pitch,
+	// and roll rates can change. Zero preserves direct/manual control mapping.
+	AngularAcceleration float64
+	MaxForward          float64
+	MaxReverse          float64
+	MaxYawRate          float64
+	MaxPitchRate        float64
+	MaxRollRate         float64
 }
 
 func DefaultManualConfig() ManualConfig {
@@ -73,9 +76,19 @@ func ApplyWithLimits(motion kinematics.Motion, intent Intent, limits Limits, sec
 		motion.Speed += intent.Throttle * limits.Acceleration * seconds
 		motion.Speed = clamp(motion.Speed, -limits.MaxReverse, limits.MaxForward)
 	}
-	motion.YawRate = intent.Yaw * limits.MaxYawRate
-	motion.PitchRate = intent.Pitch * limits.MaxPitchRate
-	motion.RollRate = intent.Roll * limits.MaxRollRate
+	desiredYaw := intent.Yaw * limits.MaxYawRate
+	desiredPitch := intent.Pitch * limits.MaxPitchRate
+	desiredRoll := intent.Roll * limits.MaxRollRate
+	if limits.AngularAcceleration > 0 && seconds > 0 {
+		maximumDelta := limits.AngularAcceleration * seconds
+		motion.YawRate = moveToward(motion.YawRate, desiredYaw, maximumDelta)
+		motion.PitchRate = moveToward(motion.PitchRate, desiredPitch, maximumDelta)
+		motion.RollRate = moveToward(motion.RollRate, desiredRoll, maximumDelta)
+	} else {
+		motion.YawRate = desiredYaw
+		motion.PitchRate = desiredPitch
+		motion.RollRate = desiredRoll
+	}
 	return motion
 }
 

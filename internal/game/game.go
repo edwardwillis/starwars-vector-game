@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"runtime"
 	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
@@ -38,8 +42,11 @@ var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
 
 type flightMode int
 
+const swarmInterceptorSlots = 2
+
 type autonomousRespawn struct {
-	readyAt float64
+	readyAt    float64
+	definition string
 }
 
 type destructionTransient struct {
@@ -68,6 +75,38 @@ type environmentTransition struct {
 	worldVelocity math3d.Vec3
 	previousMode  camera.Mode
 	rollRadians   float64
+}
+
+// hyperspaceArrival is a presentation-only orbital-space entry. The
+// authoritative fighter remains in the exterior frame throughout the effect;
+// the world tick is paused while its pose eases in from a short distance
+// behind the normal spawn pose. Surface-frame starts deliberately bypass it.
+type hyperspaceArrival struct {
+	elapsed      float64
+	duration     float64
+	from         kinematics.Pose
+	to           kinematics.Pose
+	motion       kinematics.Motion
+	previousMode camera.Mode
+}
+
+type worldRenderJob struct {
+	mesh          modelpkg.Model
+	world         math3d.Mat4
+	depth         *render.DepthBuffer
+	owner         uint64
+	selfOccluding bool
+	objectID      scene.ObjectID
+	color         color.Color
+	lineWidth     float32
+}
+
+type worldRenderResult struct {
+	lines     []render.Line
+	stats     render.Stats
+	objectID  scene.ObjectID
+	color     color.Color
+	lineWidth float32
 }
 
 const (
@@ -103,14 +142,14 @@ type Game struct {
 	started                  bool
 	swarmLaunched            bool
 	showHUD                  bool
-	showcaseActive            bool
-	showcaseTime              float64
-	showcaseObjects           []scene.Object
-	showcaseStarField         *starfield.Field
-	showcaseDistance          float64
-	showcaseSelected          int
-	showcaseSlide             float64
-	showcasePreviousMode      camera.Mode
+	showcaseActive           bool
+	showcaseTime             float64
+	showcaseObjects          []scene.Object
+	showcaseStarField        *starfield.Field
+	showcaseDistance         float64
+	showcaseSelected         int
+	showcaseSlide            float64
+	showcasePreviousMode     camera.Mode
 	viewCamera               *camera.Camera
 	nextObjectID             scene.ObjectID
 	projectiles              map[scene.ObjectID]float64
@@ -137,6 +176,17 @@ type Game struct {
 	visibleObjects           int
 	renderStats              render.Stats
 	depthBuffer              *render.DepthBuffer
+	billboardLineCache       map[string]map[int][]appearance.Line
+	billboardBatches         []vectorLineBatch
+	worldBatches             []vectorLineBatch
+	worldJobs                []worldRenderJob
+	visibleObjectIDs         map[scene.ObjectID]bool
+	starPixel                *ebiten.Image
+	starVertices             []ebiten.Vertex
+	starIndices              []uint16
+	starPoints               []starfield.Point
+	starOccluders            render.PointOccluderSet
+	showcaseStarPoints       []starfield.Point
 	world                    *sim.World
 	detailLevels             map[scene.ObjectID]scene.DetailTier
 	shieldStrength           int
@@ -145,6 +195,7 @@ type Game struct {
 	controlsRemaining        float64
 	controlsPinned           bool
 	realismLevel             int
+	hyperspaceArrival        *hyperspaceArrival
 }
 
 var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
@@ -212,7 +263,11 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	controllers := make(map[scene.ObjectID]control.Strategy, gameProfile.Swarm.Count)
 	for index, pose := range autonomousFighterPoses(gameProfile.Swarm.InitialPositions) {
 		id := scene.ObjectID(index + 2)
-		autonomous, err := catalogRegistry.Create(gameProfile.Swarm.Object, id, pose)
+		definition := gameProfile.Swarm.Object
+		if definition == catalog.TIEFighterName && index < swarmInterceptorSlots {
+			definition = catalog.TIEInterceptorName
+		}
+		autonomous, err := catalogRegistry.Create(definition, id, pose)
 		if err != nil {
 			return nil, fmt.Errorf("create swarm object: %w", err)
 		}
@@ -237,37 +292,44 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	viewCamera := camera.New(fighterID)
 	viewCamera.Mode = camera.Cockpit
 	game := &Game{
-		profile:             gameProfile,
-		controllerRegistry:  registry,
-		catalogRegistry:     catalogRegistry,
-		appearanceRegistry:  appearanceRegistry,
-		cockpitRegistry:     cockpit.DefaultRegistry(),
-		environmentRegistry: environmentRegistry,
-		pipeline:            render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
-		objects:             objects,
-		initialPose:         initialPose,
-		autoMotion:          autoMotion,
-		viewCamera:          viewCamera,
-		nextObjectID:        nextObjectID,
-		projectiles:         make(map[scene.ObjectID]float64),
-		owners:              make(map[scene.ObjectID]scene.ObjectID),
-		starField:           starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
-		controllers:         controllers,
-		debris:              make(map[scene.ObjectID]destructionTransient),
-		environmentContacts: make(map[scene.ObjectID]float64),
-		transitions:         make(map[scene.ObjectID]environmentTransition),
+		profile:               gameProfile,
+		controllerRegistry:    registry,
+		catalogRegistry:       catalogRegistry,
+		appearanceRegistry:    appearanceRegistry,
+		cockpitRegistry:       cockpit.DefaultRegistry(),
+		environmentRegistry:   environmentRegistry,
+		pipeline:              render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
+		objects:               objects,
+		initialPose:           initialPose,
+		autoMotion:            autoMotion,
+		viewCamera:            viewCamera,
+		nextObjectID:          nextObjectID,
+		projectiles:           make(map[scene.ObjectID]float64),
+		owners:                make(map[scene.ObjectID]scene.ObjectID),
+		starField:             starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
+		controllers:           controllers,
+		debris:                make(map[scene.ObjectID]destructionTransient),
+		environmentContacts:   make(map[scene.ObjectID]float64),
+		transitions:           make(map[scene.ObjectID]environmentTransition),
 		transitionCommitments: make(map[scene.ObjectID]bool),
-		respawnSequence:     uint64(gameProfile.Swarm.Count),
-		shieldStrength:      gameProfile.Player.Shield.Maximum,
-		started:             false,
-		swarmLaunched:       true,
-		showHUD:             false,
-		controlsRemaining:   gameProfile.Display.ControlsDisplayDuration,
-		detailLevels:        make(map[scene.ObjectID]scene.DetailTier),
+		respawnSequence:       uint64(gameProfile.Swarm.Count),
+		shieldStrength:        gameProfile.Player.Shield.Maximum,
+		started:               false,
+		swarmLaunched:         true,
+		showHUD:               false,
+		controlsRemaining:     gameProfile.Display.ControlsDisplayDuration,
+		detailLevels:          make(map[scene.ObjectID]scene.DetailTier),
+		billboardLineCache:    make(map[string]map[int][]appearance.Line),
 	}
+	starfieldMode := gameProfile.Starfield.Mode
+	if starfieldMode == "" {
+		starfieldMode = profile.StarfieldModeSkyfield
+	}
+	game.starField.SetMode(starfieldMode, gameProfile.Display.FarPlane*0.85)
 	game.pipeline.Stages = render.StagesForProfile(gameProfile.Display.RenderingProfile)
 	game.showcaseObjects = game.createShowcaseObjects()
 	game.showcaseStarField = starfield.New(500, gameProfile.Starfield.Seed+101, 90, math3d.Vec3{})
+	game.showcaseStarField.SetMode(starfieldMode, gameProfile.Display.FarPlane*0.85)
 	game.showcaseDistance = 16
 	world, err := sim.New(objects)
 	if err != nil {
@@ -290,8 +352,8 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 }
 
 func (g *Game) createShowcaseObjects() []scene.Object {
-	objects := make([]scene.Object, 0, 2)
-	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName} {
+	objects := make([]scene.Object, 0, 3)
+	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName} {
 		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
 			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
 		})
@@ -405,15 +467,19 @@ func (g *Game) Update() error {
 			_, wheelY := ebiten.Wheel()
 			g.showcaseDistance = max(16, min(90, g.showcaseDistance-wheelY*2.5))
 			mouseX, mouseY := ebiten.CursorPosition()
-			yaw := (float64(mouseX)-ScreenWidth/2) / (ScreenWidth/2) * 0.65
-			pitch := (float64(mouseY)-ScreenHeight/2) / (ScreenHeight/2) * 0.35
+			yaw := (float64(mouseX) - ScreenWidth/2) / (ScreenWidth / 2) * 0.65
+			pitch := (float64(mouseY) - ScreenHeight/2) / (ScreenHeight / 2) * 0.35
 			angle := g.showcaseTime * 0.7
 			for index := range g.showcaseObjects {
-				offset := float64(index-g.showcaseSelected) + g.showcaseSlide
-				if len(g.showcaseObjects) == 2 {
-					if offset > 1 { offset -= float64(len(g.showcaseObjects)) }
-					if offset < -1 { offset += float64(len(g.showcaseObjects)) }
+				offset := float64(index - g.showcaseSelected)
+				half := float64(len(g.showcaseObjects)) / 2
+				for offset > half {
+					offset -= float64(len(g.showcaseObjects))
 				}
+				for offset < -half {
+					offset += float64(len(g.showcaseObjects))
+				}
+				offset += g.showcaseSlide
 				g.showcaseObjects[index].Pose.Position = math3d.Vec3{X: offset * 28, Z: -g.showcaseDistance - math.Abs(offset)*18}
 				g.showcaseObjects[index].Pose.Orientation = math3d.QuaternionFromYawPitchRoll(angle+offset*0.25+yaw, 0.12+pitch, 0)
 			}
@@ -429,6 +495,9 @@ func (g *Game) Update() error {
 			g.started = true
 			g.controlsRemaining = 0
 			g.controlsPinned = false
+			if fighter := g.objectByID(fighterID); fighter != nil {
+				g.beginHyperspaceArrival(fighter.Pose)
+			}
 		}
 		g.pipeline.View = g.viewCamera.View(g.objects)
 		return nil
@@ -466,6 +535,13 @@ func (g *Game) Update() error {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
 		g.toggleMouseFlight()
+	}
+	if g.hyperspaceArrival != nil {
+		if !g.paused {
+			g.advanceHyperspaceArrival(seconds)
+		}
+		g.pipeline.View = g.viewCamera.View(g.objects)
+		return nil
 	}
 	if g.mode == modeAutopilot && navigationInputPressed() {
 		g.mode = modeManual
@@ -1151,7 +1227,10 @@ func (g *Game) destroyAndDisintegrate(destroyed map[scene.ObjectID]scene.Object,
 			}
 		}
 		if _, autonomous := g.controllers[id]; autonomous {
-			g.respawns = append(g.respawns, autonomousRespawn{readyAt: g.simulationTime + g.profile.Swarm.RespawnDelay})
+			g.respawns = append(g.respawns, autonomousRespawn{
+				readyAt:    g.simulationTime + g.profile.Swarm.RespawnDelay,
+				definition: destroyed[id].Definition,
+			})
 			delete(g.controllers, id)
 		}
 	}
@@ -1340,13 +1419,13 @@ func (g *Game) updateRespawns() {
 			return
 		}
 	}
-	for range g.respawns {
-		g.spawnAutonomousFighter()
+	for _, request := range g.respawns {
+		g.spawnAutonomousFighter(request.definition)
 	}
 	g.respawns = g.respawns[:0]
 }
 
-func (g *Game) spawnAutonomousFighter() {
+func (g *Game) spawnAutonomousFighter(definition string) {
 	center := g.initialPose.Position
 	var headingTarget *scene.Object
 	if hangarPose, ok := g.hangarSpawnPose(int(g.respawnSequence)); ok {
@@ -1381,7 +1460,10 @@ func (g *Game) spawnAutonomousFighter() {
 	}
 	id := g.nextObjectID
 	g.nextObjectID++
-	fighter, err := g.catalogRegistry.Create(g.profile.Swarm.Object, id, pose)
+	if definition == "" {
+		definition = g.profile.Swarm.Object
+	}
+	fighter, err := g.catalogRegistry.Create(definition, id, pose)
 	if err != nil {
 		return
 	}
@@ -1552,6 +1634,7 @@ func (g *Game) fireAutonomousLaser(shooter, target scene.Object) bool {
 		if err != nil {
 			continue
 		}
+		spawn.Lifetime = g.laserConvergenceLifetime(spawn, aimPoint)
 		g.nextObjectID++
 		g.objects = append(g.objects, spawn.Object)
 		g.objects[len(g.objects)-1].Frame = shooter.Frame
@@ -1594,6 +1677,9 @@ func (g *Game) fireLaser() bool {
 		var err error
 		if aimed {
 			spawn, err = combat.FireLaserTowardWithConfig(*fighter, g.nextObjectID, muzzle, aimTarget, g.profile.Combat.Laser)
+			if err == nil {
+				spawn.Lifetime = g.laserConvergenceLifetime(spawn, aimTarget)
+			}
 		} else {
 			spawn, err = combat.FireLaserWithConfig(*fighter, g.nextObjectID, muzzle, g.profile.Combat.Laser)
 		}
@@ -1612,6 +1698,21 @@ func (g *Game) fireLaser() bool {
 	g.fireCooldown = g.profile.Combat.FireInterval
 	g.fireHistory = append(g.fireHistory, g.simulationTime)
 	return true
+}
+
+// laserConvergenceLifetime stops an aimed bolt at the point its cannon pair
+// was instructed to meet. World motion is advanced using MotionScale, so the
+// effective travel speed must include that multiplier.
+func (g *Game) laserConvergenceLifetime(spawn combat.Spawn, target math3d.Vec3) float64 {
+	effectiveSpeed := spawn.Object.Motion.Speed * g.profile.Simulation.MotionScale
+	if effectiveSpeed <= 0 {
+		return spawn.Lifetime
+	}
+	distance := target.Sub(spawn.Object.Pose.Position).Length()
+	if distance <= 0 {
+		return 0.01
+	}
+	return distance / effectiveSpeed
 }
 
 func (g *Game) withinFireRateLimit() bool {
@@ -1650,10 +1751,16 @@ func (g *Game) resetFighter() {
 		g.respawnPlayer()
 		return
 	}
+	// Restarting always returns the player to the shared orbital frame. A
+	// surface-frame restart must not leave the initial pose interpreted in the
+	// Death Star's local coordinates.
+	fighter.Frame = scene.ExteriorFrame
 	fighter.Pose = g.initialPose
 	g.controlsRemaining = 0
 	g.controlsPinned = false
 	g.destructionViewRemaining = 0
+	delete(g.transitions, fighterID)
+	delete(g.transitionCommitments, fighterID)
 	g.shieldStrength = g.profile.Player.Shield.Maximum
 	g.shieldQuietTime = 0
 	g.fireCooldown = 0
@@ -1664,6 +1771,66 @@ func (g *Game) resetFighter() {
 	} else {
 		fighter.Motion = kinematics.Motion{}
 	}
+	if g.started {
+		g.beginHyperspaceArrival(fighter.Pose)
+	}
+}
+
+// beginHyperspaceArrival starts the short orbital entry presentation. It is
+// intentionally gated by the player's frame so surface-flight resets and
+// future local environments retain their own presentation rules.
+func (g *Game) beginHyperspaceArrival(target kinematics.Pose) bool {
+	if g.profile.Simulation.HyperspaceArrivalTime <= 0 {
+		return false
+	}
+	fighter := g.objectByID(fighterID)
+	if fighter == nil || normalizedObjectFrame(*fighter) != scene.ExteriorFrame {
+		return false
+	}
+	forward := target.Forward()
+	if forward.Length() <= 1e-9 {
+		forward = kinematics.LocalForward
+	}
+	entry := target
+	entry.Position = target.Position.Sub(forward.Scale(72))
+	g.hyperspaceArrival = &hyperspaceArrival{
+		duration:     g.profile.Simulation.HyperspaceArrivalTime,
+		from:         entry,
+		to:           target,
+		motion:       fighter.Motion,
+		previousMode: g.viewCamera.Mode,
+	}
+	fighter.Pose = entry
+	fighter.Motion = kinematics.Motion{}
+	g.viewCamera.TargetID = fighterID
+	// A chase view makes the arrival readable as a physical re-entry while the
+	// streaks in Draw provide the hyperspace cue. The prior view is restored at
+	// the end, so a restart does not permanently change cockpit/follow mode.
+	g.viewCamera.Mode = camera.Chase
+	return true
+}
+
+func (g *Game) advanceHyperspaceArrival(seconds float64) {
+	arrival := g.hyperspaceArrival
+	if arrival == nil {
+		return
+	}
+	arrival.elapsed += max(0, seconds)
+	amount := min(1, arrival.elapsed/arrival.duration)
+	eased := amount * amount * (3 - 2*amount)
+	if fighter := g.objectByID(fighterID); fighter != nil {
+		fighter.Pose.Position = arrival.from.Position.Add(arrival.to.Position.Sub(arrival.from.Position).Scale(eased))
+		fighter.Pose.Orientation = math3d.Slerp(arrival.from.Orientation, arrival.to.Orientation, eased)
+	}
+	if amount < 1 {
+		return
+	}
+	if fighter := g.objectByID(fighterID); fighter != nil {
+		fighter.Pose = arrival.to
+		fighter.Motion = arrival.motion
+	}
+	g.viewCamera.Mode = arrival.previousMode
+	g.hyperspaceArrival = nil
 }
 
 func (g *Game) applyShieldDamage(amount int) bool {
@@ -1713,6 +1880,9 @@ func (g *Game) respawnPlayer() {
 	g.starField.Wrap(pose.Position)
 	g.viewCamera.Mode = g.playerViewMode
 	g.viewCamera.TargetID = fighterID
+	if g.started {
+		g.beginHyperspaceArrival(pose)
+	}
 }
 
 func (g *Game) safePlayerRespawnPose() kinematics.Pose {
@@ -1813,9 +1983,13 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	// barrel rails, echoing the layered vector assemblies of the arcade cockpit.
 	layout, exists := g.cockpitRegistry.ForDefinition("builtin/tie-fighter")
 	if target := g.objectByID(g.viewCamera.TargetID); target != nil {
-		if candidate, ok := g.cockpitRegistry.ForDefinition(target.Definition); ok { layout, exists = candidate, true }
+		if candidate, ok := g.cockpitRegistry.ForDefinition(target.Definition); ok {
+			layout, exists = candidate, true
+		}
 	}
-	if !exists { layout = cockpit.Fallback() }
+	if !exists {
+		layout = cockpit.Fallback()
+	}
 	cannons := layout.Cannons
 	muzzleTops := make([][2]float32, len(cannons))
 	for index, cannon := range cannons {
@@ -2416,7 +2590,9 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 	}
 	for _, object := range g.objects {
 		if !g.swarmLaunched {
-			if _, autonomous := g.controllers[object.ID]; autonomous { continue }
+			if _, autonomous := g.controllers[object.ID]; autonomous {
+				continue
+			}
 		}
 		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
 			continue
@@ -2426,7 +2602,7 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 		}
 		detail := g.objectDetailTier(object)
 		for partIndex, part := range object.Parts {
-			if part.Detail > detail || len(part.Mesh.Faces) == 0 {
+			if part.Detail > detail || len(part.Mesh.Faces) == 0 || part.Mesh.SkipDepth {
 				continue
 			}
 			insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
@@ -2445,7 +2621,7 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 		}
 		for _, tile := range runtime.tiles {
 			for _, part := range tile.Parts {
-				if len(part.Mesh.Faces) > 0 && g.meshInView(part.Mesh, math3d.Identity()) {
+				if len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth && g.meshInView(part.Mesh, math3d.Identity()) {
 					g.pipeline.RasterizeDepth(part.Mesh, math3d.Identity(), depth)
 				}
 			}
@@ -2454,7 +2630,7 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 					continue
 				}
 				for _, part := range feature.Parts {
-					if len(part.Mesh.Faces) > 0 && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+					if len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
 						g.pipeline.RasterizeDepth(part.Mesh, feature.Pose.Matrix(), depth)
 					}
 				}
@@ -2465,44 +2641,36 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(background)
-	if g.pipeline.Stats != nil { *g.pipeline.Stats = render.Stats{} }
+	if g.pipeline.Stats != nil {
+		*g.pipeline.Stats = render.Stats{}
+	}
 	if g.showcaseActive {
 		if g.showcaseStarField != nil {
-			for _, star := range g.showcaseStarField.Project(g.pipeline) {
-				starColor := color.RGBA{R: star.Brightness, G: star.Brightness, B: star.Brightness, A: 255}
-				vector.DrawFilledCircle(screen, float32(star.X), float32(star.Y), star.Size, starColor, false)
-			}
+			g.showcaseStarPoints = g.showcaseStarField.ProjectInto(g.pipeline, g.showcaseStarPoints)
+			g.drawStarPoints(screen, g.showcaseStarPoints)
 		}
 		g.drawShowcase(screen)
 		return
 	}
-	g.drawStarfield(screen)
 	visibleObjects := 0
 	viewFrame := g.activeViewFrame()
+	g.drawStarfield(screen, viewFrame)
+	g.drawHyperspaceArrival(screen)
 	var depth *render.DepthBuffer
 	if g.realismLevel >= 3 {
+		depthStart := time.Now()
 		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
 			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
 		}
 		g.depthBuffer.Clear()
 		depth = g.depthBuffer
 		g.rasterizeDepthFrame(viewFrame, depth)
+		g.renderStats.DepthRasterMS = time.Since(depthStart).Seconds() * 1000
 	}
-	// Occlusion masks are drawn before any world geometry so a distant solid
-	// billboard hides only the starfield, while nearby fighters remain visible.
-	for _, object := range g.objects {
-		if !g.swarmLaunched {
-			if _, autonomous := g.controllers[object.ID]; autonomous {
-				continue
-			}
-		}
-		if normalizedObjectFrame(object) != viewFrame {
-			continue
-		}
-		if !g.objectInView(object) { continue }
-		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" && definition.Billboard.Occludes {
-			g.drawBillboardOcclusion(screen, object)
-		}
+	g.beginWorldBatch()
+	worldJobs := g.worldJobs[:0]
+	if cap(worldJobs) < len(g.objects)*3 {
+		worldJobs = make([]worldRenderJob, 0, len(g.objects)*3)
 	}
 	for _, object := range g.objects {
 		if !g.swarmLaunched {
@@ -2513,20 +2681,26 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if normalizedObjectFrame(object) != viewFrame {
 			continue
 		}
-		if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsInput++ }
+		if g.pipeline.Stats != nil {
+			g.pipeline.Stats.ObjectsInput++
+		}
 		if !g.objectInView(object) {
-			if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsCulled++ }
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.ObjectsCulled++
+			}
 			continue
 		}
 		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
 			if g.drawBillboard(screen, object, definition.Billboard) {
 				visibleObjects++
-				if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsVisible++ }
+				if g.pipeline.Stats != nil {
+					g.pipeline.Stats.ObjectsVisible++
+				}
 			}
 			continue
 		}
-		objectVisible := false
 		detail := g.objectDetailTier(object)
+		worldMatrix := object.WorldMatrix()
 		for partIndex, part := range object.Parts {
 			if part.Detail > detail {
 				continue
@@ -2538,20 +2712,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			if !insideTargetCockpit && part.CockpitOnly {
 				continue
 			}
-			var lines []render.Line
-			if depth != nil {
-				lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
-			} else {
-				lines = g.pipeline.Render(part.Mesh, object.WorldMatrix())
-			}
-			for _, line := range lines {
-				objectVisible = true
-				drawLine(screen, line, part.Color, part.LineWidth)
-			}
-		}
-		if objectVisible {
-			visibleObjects++
-			if g.pipeline.Stats != nil { g.pipeline.Stats.ObjectsVisible++ }
+			worldJobs = append(worldJobs, worldRenderJob{
+				mesh: part.Mesh, world: worldMatrix, depth: depth,
+				owner:         renderOwner(object.ID, partIndex),
+				selfOccluding: part.SelfOccluding || object.DestructionStage >= scene.DestructionComponent,
+				objectID:      object.ID,
+				color:         part.Color, lineWidth: part.LineWidth,
+			})
 		}
 	}
 	for _, runtime := range g.environments {
@@ -2560,37 +2727,57 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 		for _, tile := range runtime.tiles {
 			for _, part := range tile.Parts {
-				if !g.meshInView(part.Mesh, math3d.Identity()) { continue }
-				var lines []render.Line
-				if depth != nil {
-					lines = g.pipeline.RenderWithDepth(part.Mesh, math3d.Identity(), depth)
-				} else {
-					lines = g.pipeline.Render(part.Mesh, math3d.Identity())
+				if !g.meshInView(part.Mesh, math3d.Identity()) {
+					continue
 				}
-				for _, line := range lines {
-					drawLine(screen, line, part.Color, part.LineWidth)
-				}
+				worldJobs = append(worldJobs, worldRenderJob{
+					mesh: part.Mesh, world: math3d.Identity(), depth: depth,
+					color: part.Color, lineWidth: part.LineWidth,
+				})
 			}
 			for _, feature := range tile.Features {
 				if runtime.destroyed[feature.ID] {
 					continue
 				}
 				for _, part := range feature.Parts {
-					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) { continue }
-					var lines []render.Line
-					if depth != nil {
-						lines = g.pipeline.RenderWithDepth(part.Mesh, feature.Pose.Matrix(), depth)
-					} else {
-						lines = g.pipeline.Render(part.Mesh, feature.Pose.Matrix())
+					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+						continue
 					}
-					for _, line := range lines {
-						drawLine(screen, line, part.Color, part.LineWidth)
-					}
+					worldJobs = append(worldJobs, worldRenderJob{
+						mesh: part.Mesh, world: feature.Pose.Matrix(), depth: depth,
+						color: part.Color, lineWidth: part.LineWidth,
+					})
 				}
 			}
 		}
 	}
+	geometryStart := time.Now()
+	results := g.renderWorldJobs(worldJobs)
+	g.worldJobs = worldJobs
+	if g.visibleObjectIDs == nil {
+		g.visibleObjectIDs = make(map[scene.ObjectID]bool)
+	}
+	for objectID := range g.visibleObjectIDs {
+		delete(g.visibleObjectIDs, objectID)
+	}
+	for _, result := range results {
+		addRenderStats(&g.renderStats, result.stats)
+		g.queueWorldLines(result.lines, result.color, result.lineWidth)
+		if result.objectID != 0 && len(result.lines) > 0 {
+			g.visibleObjectIDs[result.objectID] = true
+		}
+	}
+	for range g.visibleObjectIDs {
+		visibleObjects++
+		if g.pipeline.Stats != nil {
+			g.pipeline.Stats.ObjectsVisible++
+		}
+	}
 	g.drawTransitionEnvironment(screen)
+	g.renderStats.GeometryMS = time.Since(geometryStart).Seconds() * 1000
+	vectorSubmitStart := time.Now()
+	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
+	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
 	if g.viewCamera.Mode == camera.Cockpit {
 		g.drawCockpitOverlay(screen)
@@ -2615,6 +2802,34 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 }
 
+// drawHyperspaceArrival adds a sparse vector streak treatment behind the
+// fighter during orbital entry. It consumes the already projected/occluded
+// star points, so it neither paints a background nor submits hidden stars.
+func (g *Game) drawHyperspaceArrival(screen *ebiten.Image) {
+	arrival := g.hyperspaceArrival
+	if arrival == nil || len(g.starPoints) == 0 || arrival.duration <= 0 {
+		return
+	}
+	progress := max(0, min(1, arrival.elapsed/arrival.duration))
+	intensity := math.Sin(progress * math.Pi)
+	if intensity <= 0 {
+		return
+	}
+	centerX, centerY := float64(ScreenWidth)/2, float64(ScreenHeight)/2
+	for _, point := range g.starPoints {
+		dx, dy := point.X-centerX, point.Y-centerY
+		distance := math.Hypot(dx, dy)
+		if distance < 1 {
+			continue
+		}
+		length := (8 + 54*intensity) * min(1, distance/220)
+		startX := point.X - dx/distance*length
+		startY := point.Y - dy/distance*length
+		alpha := uint8(max(24, min(220, int(float64(point.Brightness)*intensity))))
+		vector.StrokeLine(screen, float32(startX), float32(startY), float32(point.X), float32(point.Y), 1, color.RGBA{R: 160, G: 224, B: 255, A: alpha}, true)
+	}
+}
+
 func (g *Game) drawShowcase(screen *ebiten.Image) {
 	var depth *render.DepthBuffer
 	if g.realismLevel >= 3 {
@@ -2625,14 +2840,24 @@ func (g *Game) drawShowcase(screen *ebiten.Image) {
 		depth = g.depthBuffer
 		for _, object := range g.showcaseObjects {
 			for partIndex, part := range object.Parts {
-				if len(part.Mesh.Faces) > 0 { g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex)) }
+				if len(part.Mesh.Faces) > 0 {
+					g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
+				}
 			}
 		}
 	}
 	for _, object := range g.showcaseObjects {
 		for partIndex, part := range object.Parts {
 			var lines []render.Line
-				if depth != nil { lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex)) } else { lines = g.pipeline.Render(part.Mesh, object.WorldMatrix()) }
+			if depth != nil {
+				owner := renderOwner(object.ID, partIndex)
+				if part.SelfOccluding {
+					owner = 0
+				}
+				lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, owner)
+			} else {
+				lines = g.pipeline.Render(part.Mesh, object.WorldMatrix())
+			}
 			for _, line := range lines {
 				drawLine(screen, line, part.Color, part.LineWidth)
 			}
@@ -2685,11 +2910,18 @@ func drawVectorTextWithNumericHighlight(screen *ebiten.Image, centerX, topY floa
 	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
 	total := float32(0)
 	for _, character := range text {
-		if character == ' ' { total += spaceWidth + glyphGap } else { total += glyphWidth + glyphGap }
+		if character == ' ' {
+			total += spaceWidth + glyphGap
+		} else {
+			total += glyphWidth + glyphGap
+		}
 	}
 	left := centerX - (total-glyphGap)/2
 	for _, character := range text {
-		if character == ' ' { left += spaceWidth + glyphGap; continue }
+		if character == ' ' {
+			left += spaceWidth + glyphGap
+			continue
+		}
 		textColor := color.RGBA{R: 190, G: 235, B: 255, A: 255}
 		if character >= '0' && character <= '9' {
 			textColor = color.RGBA{R: 64, G: 255, B: 128, A: 255}
@@ -2724,6 +2956,7 @@ func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
 		if err != nil {
 			continue
 		}
+		frameWorld := framePose.Matrix()
 		// Preload a compact patch around the declared entry corridor. It is
 		// rendered in host/world coordinates during the exterior transition;
 		// normal surface streaming takes over after the frame transfer.
@@ -2735,19 +2968,15 @@ func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
 					tile = runtime.bound.Definition.Tile(coordinate)
 				}
 				for _, part := range tile.Parts {
-					for _, line := range g.pipeline.Render(part.Mesh, framePose.Matrix()) {
-						drawLine(screen, line, part.Color, part.LineWidth)
-					}
+					g.queueWorldLines(g.pipeline.Render(part.Mesh, frameWorld), part.Color, part.LineWidth)
 				}
 				for _, feature := range tile.Features {
 					if runtime.destroyed[feature.ID] {
 						continue
 					}
 					for _, part := range feature.Parts {
-						worldMatrix := framePose.Matrix().Mul(feature.Pose.Matrix())
-						for _, line := range g.pipeline.Render(part.Mesh, worldMatrix) {
-							drawLine(screen, line, part.Color, part.LineWidth)
-						}
+						worldMatrix := frameWorld.Mul(feature.Pose.Matrix())
+						g.queueWorldLines(g.pipeline.Render(part.Mesh, worldMatrix), part.Color, part.LineWidth)
 					}
 				}
 			}
@@ -2759,13 +2988,21 @@ func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
 // The conservative projected sphere intentionally keeps intersecting objects
 // alive when their center lies just outside the viewport.
 func (g *Game) objectInView(object scene.Object) bool {
-	if object.VisualRadius <= 0 { return true }
+	if object.VisualRadius <= 0 {
+		return true
+	}
 	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
 	depth := -cameraPoint.Z
 	radius := object.VisualRadius
-	if depth+radius < g.pipeline.Near { return false }
-	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far { return false }
-	if depth <= 0 { return true }
+	if depth+radius < g.pipeline.Near {
+		return false
+	}
+	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far {
+		return false
+	}
+	if depth <= 0 {
+		return true
+	}
 	projectedRadius := radius / depth * g.pipeline.Projection[1][1]
 	return cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
 		cameraPoint.X/depth*g.pipeline.Projection[0][0] <= 1+projectedRadius &&
@@ -2785,15 +3022,25 @@ func renderOwner(objectID scene.ObjectID, partIndex int) uint64 {
 // level between a whole surface frame and individual faces.
 func (g *Game) meshInView(mesh modelpkg.Model, world math3d.Mat4) bool {
 	prepared := modelpkg.Prepare(mesh)
-	if prepared.Topology == nil || prepared.Topology.BoundsRadius <= 0 { return true }
+	if prepared.Topology == nil || prepared.Topology.BoundsRadius <= 0 {
+		return true
+	}
 	center := world.TransformPoint(prepared.Topology.BoundsCenter)
 	radius := world.TransformDirection(math3d.Vec3{X: prepared.Topology.BoundsRadius}).Length()
-	if radius <= 0 { radius = prepared.Topology.BoundsRadius }
+	if radius <= 0 {
+		radius = prepared.Topology.BoundsRadius
+	}
 	cameraPoint := g.pipeline.View.TransformPoint(center)
 	depth := -cameraPoint.Z
-	if depth+radius < g.pipeline.Near { return false }
-	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far { return false }
-	if depth <= 0 { return true }
+	if depth+radius < g.pipeline.Near {
+		return false
+	}
+	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far {
+		return false
+	}
+	if depth <= 0 {
+		return true
+	}
 	projectedRadius := radius / depth * g.pipeline.Projection[1][1]
 	return cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
 		cameraPoint.X/depth*g.pipeline.Projection[0][0] <= 1+projectedRadius &&
@@ -2802,7 +3049,10 @@ func (g *Game) meshInView(mesh modelpkg.Model, world math3d.Mat4) bool {
 }
 
 func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboard appearance.Billboard) bool {
-	center, visible := g.pipeline.ProjectPoint(object.Pose.Position)
+	// The object's centre may leave the viewport while its projected silhouette
+	// is still visible at an edge. Keep the unclipped centre here; individual
+	// artwork lines are clipped by drawBillboardLines below.
+	center, visible := g.pipeline.ProjectPointUnclipped(object.Pose.Position)
 	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
 		return false
 	}
@@ -2813,26 +3063,205 @@ func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboar
 	// The same normalized artwork is used at every distance. Detail reveal is
 	// monotonic with projected size and therefore stable while approaching.
 	reveal := (projectedRadius - 55) / 260
-	for _, line := range billboard.Lines(reveal) {
-		vector.StrokeLine(
-			screen,
-			float32(center.X+line.A.X*projectedRadius), float32(center.Y-line.A.Y*projectedRadius),
-			float32(center.X+line.B.X*projectedRadius), float32(center.Y-line.B.Y*projectedRadius),
-			line.Width, line.Color, true,
-		)
+	lines := g.billboardLines(billboard, reveal, object.Definition)
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.BillboardObjects++
+		g.pipeline.Stats.BillboardLines += len(lines)
+	}
+	batchCount := g.drawBillboardLines(screen, lines, center.X, center.Y, projectedRadius)
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.BillboardBatches += batchCount
 	}
 	return true
 }
 
-func (g *Game) drawBillboardOcclusion(screen *ebiten.Image, object scene.Object) {
-	center, visible := g.pipeline.ProjectPoint(object.Pose.Position)
-	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
-		return
+// billboardLines returns a cached immutable line set for the current detail
+// tier. Projected size changes continuously, but the revealed artwork changes
+// only when a detail threshold is crossed.
+func (g *Game) billboardLines(billboard appearance.Billboard, reveal float64, fallbackKey string) []appearance.Line {
+	level := 0
+	for _, detail := range billboard.Details {
+		if detail.Threshold <= reveal {
+			level++
+		}
 	}
-	radius := object.VisualRadius / center.Depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
-	if radius > 0 {
-		vector.DrawFilledCircle(screen, float32(center.X), float32(center.Y), float32(radius), background, true)
+	key := billboard.Name
+	if key == "" {
+		key = fallbackKey
 	}
+	levels := g.billboardLineCache[key]
+	if levels == nil {
+		levels = make(map[int][]appearance.Line)
+		g.billboardLineCache[key] = levels
+	}
+	if lines, ok := levels[level]; ok {
+		return lines
+	}
+	lines := make([]appearance.Line, 0, len(billboard.Base)+level)
+	lines = append(lines, billboard.Base...)
+	for _, detail := range billboard.Details {
+		if detail.Threshold <= reveal {
+			lines = append(lines, detail.Line)
+		}
+	}
+	levels[level] = lines
+	return lines
+}
+
+type vectorLineBatch struct {
+	color color.RGBA
+	width float32
+	path  vector.Path
+}
+
+// drawBillboardLines batches independent lines by colour and width, reducing
+// the number of vector draw submissions without joining unrelated strokes.
+func (g *Game) drawBillboardLines(screen *ebiten.Image, lines []appearance.Line, centerX, centerY, radius float64) int {
+	for index := range g.billboardBatches {
+		g.billboardBatches[index].path.Reset()
+	}
+	batches := g.billboardBatches[:0]
+	for _, line := range lines {
+		candidate := render.Line{
+			X1: centerX + line.A.X*radius, Y1: centerY - line.A.Y*radius,
+			X2: centerX + line.B.X*radius, Y2: centerY - line.B.Y*radius,
+		}
+		clipped, visible := render.ClipLineToViewport(candidate, float64(screen.Bounds().Dx()), float64(screen.Bounds().Dy()))
+		if !visible {
+			continue
+		}
+		style := vectorLineBatch{color: line.Color, width: line.Width}
+		batchIndex := -1
+		for index := range batches {
+			if batches[index].color == style.color && batches[index].width == style.width {
+				batchIndex = index
+				break
+			}
+		}
+		if batchIndex < 0 {
+			batches = append(batches, style)
+			batchIndex = len(batches) - 1
+		}
+		batch := &batches[batchIndex]
+		batch.path.MoveTo(float32(clipped.X1), float32(clipped.Y1))
+		batch.path.LineTo(float32(clipped.X2), float32(clipped.Y2))
+	}
+	g.billboardBatches = batches
+	return drawVectorLineBatches(screen, batches)
+}
+
+func drawVectorLineBatches(screen *ebiten.Image, batches []vectorLineBatch) int {
+	for index := range batches {
+		batch := &batches[index]
+		stroke := &vector.StrokeOptions{Width: batch.width}
+		draw := &vector.DrawPathOptions{AntiAlias: true}
+		draw.ColorScale.ScaleWithColor(batch.color)
+		vector.StrokePath(screen, &batch.path, stroke, draw)
+	}
+	return len(batches)
+}
+
+func (g *Game) beginWorldBatch() {
+	for index := range g.worldBatches {
+		g.worldBatches[index].path.Reset()
+	}
+	g.worldBatches = g.worldBatches[:0]
+}
+
+func appendVectorBatchLine(batches *[]vectorLineBatch, line render.Line, lineColor color.Color, lineWidth float32) {
+	rgba, ok := lineColor.(color.RGBA)
+	if !ok {
+		red, green, blue, alpha := lineColor.RGBA()
+		rgba = color.RGBA{R: uint8(red >> 8), G: uint8(green >> 8), B: uint8(blue >> 8), A: uint8(alpha >> 8)}
+	}
+	batchIndex := -1
+	for index := range *batches {
+		batch := &(*batches)[index]
+		if batch.color == rgba && batch.width == lineWidth {
+			batchIndex = index
+			break
+		}
+	}
+	if batchIndex < 0 {
+		*batches = append(*batches, vectorLineBatch{color: rgba, width: lineWidth})
+		batchIndex = len(*batches) - 1
+	}
+	batch := &(*batches)[batchIndex]
+	batch.path.MoveTo(float32(line.X1), float32(line.Y1))
+	batch.path.LineTo(float32(line.X2), float32(line.Y2))
+}
+
+func (g *Game) queueWorldLines(lines []render.Line, lineColor color.Color, lineWidth float32) {
+	for _, line := range lines {
+		appendVectorBatchLine(&g.worldBatches, line, lineColor, lineWidth)
+	}
+}
+
+func (g *Game) flushWorldBatch(screen *ebiten.Image) int {
+	return drawVectorLineBatches(screen, g.worldBatches)
+}
+
+// renderWorldJobs parallelizes pure CPU line generation after depth has been
+// rasterized. Workers only read the shared depth buffer; all Ebiten submission
+// remains ordered on the calling/render thread.
+func (g *Game) renderWorldJobs(jobs []worldRenderJob) []worldRenderResult {
+	results := make([]worldRenderResult, len(jobs))
+	renderOne := func(index int) {
+		job := jobs[index]
+		pipeline := g.pipeline
+		pipeline.Stats = &results[index].stats
+		if job.depth != nil {
+			owner := job.owner
+			if job.selfOccluding {
+				// Destruction fragments are intentionally allowed to test against
+				// their own depth samples so front caps/body hide rear lines.
+				owner = 0
+			}
+			results[index].lines = pipeline.RenderWithDepthOwned(job.mesh, job.world, job.depth, owner)
+		} else {
+			results[index].lines = pipeline.Render(job.mesh, job.world)
+		}
+		results[index].objectID = job.objectID
+		results[index].color = job.color
+		results[index].lineWidth = job.lineWidth
+	}
+	if len(jobs) < 8 || runtime.GOMAXPROCS(0) < 2 {
+		for index := range jobs {
+			renderOne(index)
+		}
+		return results
+	}
+	workers := min(runtime.GOMAXPROCS(0), len(jobs))
+	var next int64
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for range workers {
+		go func() {
+			defer wait.Done()
+			for {
+				index := int(atomic.AddInt64(&next, 1) - 1)
+				if index >= len(jobs) {
+					return
+				}
+				renderOne(index)
+			}
+		}()
+	}
+	wait.Wait()
+	return results
+}
+
+func addRenderStats(total *render.Stats, part render.Stats) {
+	total.InputVertices += part.InputVertices
+	total.TransformedVertices += part.TransformedVertices
+	total.InputEdges += part.InputEdges
+	total.OutputEdges += part.OutputEdges
+	total.TinyEdges += part.TinyEdges
+	total.InputFaces += part.InputFaces
+	total.BackfaceRejected += part.BackfaceRejected
+	total.PolicyRejected += part.PolicyRejected
+	total.DepthRejected += part.DepthRejected
+	total.ClippedEdges += part.ClippedEdges
 }
 
 func (g *Game) activeViewFrame() scene.FrameID {
@@ -2978,11 +3407,151 @@ func (g *Game) toggleControls() {
 	g.controlsPinned = true
 }
 
-func (g *Game) drawStarfield(screen *ebiten.Image) {
-	for _, star := range g.starField.Project(g.pipeline) {
-		starColor := color.RGBA{R: star.Brightness, G: star.Brightness, B: star.Brightness, A: 255}
-		vector.DrawFilledCircle(screen, float32(star.X), float32(star.Y), star.Size, starColor, false)
+func (g *Game) drawStarfield(screen *ebiten.Image, viewFrame scene.FrameID) {
+	g.buildStarOccluders(viewFrame)
+	g.starPoints = g.starField.ProjectInto(g.pipeline, g.starPoints, &g.starOccluders)
+	g.drawStarPoints(screen, g.starPoints)
+}
+
+// buildStarOccluders prepares only sparse screen-space tests. Analytic
+// occluders describe large line-art bodies such as the Death Star; ordinary
+// surface models contribute their already-authored, camera-facing triangles.
+// Neither path paints or clears the framebuffer.
+func (g *Game) buildStarOccluders(viewFrame scene.FrameID) {
+	g.starOccluders.Reset()
+	g.starOccluders.Stats = g.pipeline.Stats
+	for _, object := range g.objects {
+		if !g.swarmLaunched {
+			if _, autonomous := g.controllers[object.ID]; autonomous {
+				continue
+			}
+		}
+		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+			continue
+		}
+		definition, hasAppearance := g.appearanceRegistry.ForObject(object.Definition, object.Appearance)
+		if hasAppearance && definition.PointOccluder == "sphere" {
+			g.addSphereStarOccluder(object)
+			continue
+		}
+		if hasAppearance && definition.Kind == "vector-billboard" {
+			continue
+		}
+		insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
+		for _, part := range object.Parts {
+			if part.Mesh.SkipDepth || len(part.Mesh.Faces) == 0 {
+				continue
+			}
+			if insideTargetCockpit && !part.VisibleInCockpit {
+				continue
+			}
+			if !insideTargetCockpit && part.CockpitOnly {
+				continue
+			}
+			for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, object.WorldMatrix()) {
+				g.starOccluders.Add(triangle)
+			}
+		}
 	}
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID != viewFrame {
+			continue
+		}
+		for _, tile := range runtime.tiles {
+			for _, part := range tile.Parts {
+				if part.Mesh.SkipDepth || !g.meshInView(part.Mesh, math3d.Identity()) {
+					continue
+				}
+				for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, math3d.Identity()) {
+					g.starOccluders.Add(triangle)
+				}
+			}
+			for _, feature := range tile.Features {
+				if runtime.destroyed[feature.ID] {
+					continue
+				}
+				for _, part := range feature.Parts {
+					if part.Mesh.SkipDepth || !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+						continue
+					}
+					for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, feature.Pose.Matrix()) {
+						g.starOccluders.Add(triangle)
+					}
+				}
+			}
+		}
+	}
+	if g.pipeline.Stats != nil {
+		for _, occluder := range g.starOccluders.Items {
+			switch occluder.OccluderKind() {
+			case render.OccluderAnalytic:
+				g.pipeline.Stats.ActiveAnalyticOccluders++
+			case render.OccluderGeometry:
+				g.pipeline.Stats.ActiveGeometryOccluders++
+			}
+		}
+	}
+}
+
+func (g *Game) addSphereStarOccluder(object scene.Object) {
+	if object.VisualRadius <= 0 {
+		return
+	}
+	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
+	depth := -cameraPoint.Z
+	radius := object.VisualRadius
+	if depth+radius <= g.pipeline.Near || (g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far) {
+		return
+	}
+	center, visible := g.pipeline.ProjectPointUnclipped(object.Pose.Position)
+	if !visible {
+		// If the camera is inside the sphere, use a conservative screen-wide
+		// circle rather than attempting a perspective projection behind the
+		// near plane.
+		if depth+radius <= g.pipeline.Near || depth > g.pipeline.Near {
+			return
+		}
+		center = render.Point{X: float64(g.pipeline.Width) / 2, Y: float64(g.pipeline.Height) / 2, Depth: g.pipeline.Near}
+		depth = g.pipeline.Near
+	}
+	projectedRadius := radius / math.Max(depth, g.pipeline.Near) * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	if depth <= g.pipeline.Near {
+		projectedRadius = math.Hypot(float64(g.pipeline.Width), float64(g.pipeline.Height)) * 2
+	}
+	g.starOccluders.Add(render.CircleOccluder{CenterX: center.X, CenterY: center.Y, Radius: projectedRadius, Depth: depth, SphereRadius: radius})
+}
+
+func (g *Game) drawStarPoints(screen *ebiten.Image, points []starfield.Point) {
+	if len(points) == 0 {
+		return
+	}
+	if g.starPixel == nil {
+		g.starPixel = ebiten.NewImage(1, 1)
+		g.starPixel.WritePixels([]byte{255, 255, 255, 255})
+	}
+	g.starVertices = g.starVertices[:0]
+	g.starIndices = g.starIndices[:0]
+	if cap(g.starVertices) < len(points)*4 {
+		g.starVertices = make([]ebiten.Vertex, 0, len(points)*4)
+	}
+	if cap(g.starIndices) < len(points)*6 {
+		g.starIndices = make([]uint16, 0, len(points)*6)
+	}
+	for _, point := range points {
+		half := point.Size
+		x, y := float32(point.X), float32(point.Y)
+		brightness := float32(point.Brightness) / 255
+		base := uint16(len(g.starVertices))
+		g.starVertices = append(g.starVertices,
+			ebiten.Vertex{DstX: x - half, DstY: y - half, SrcX: 0.5, SrcY: 0.5, ColorR: brightness, ColorG: brightness, ColorB: brightness, ColorA: 1},
+			ebiten.Vertex{DstX: x + half, DstY: y - half, SrcX: 0.5, SrcY: 0.5, ColorR: brightness, ColorG: brightness, ColorB: brightness, ColorA: 1},
+			ebiten.Vertex{DstX: x + half, DstY: y + half, SrcX: 0.5, SrcY: 0.5, ColorR: brightness, ColorG: brightness, ColorB: brightness, ColorA: 1},
+			ebiten.Vertex{DstX: x - half, DstY: y + half, SrcX: 0.5, SrcY: 0.5, ColorR: brightness, ColorG: brightness, ColorB: brightness, ColorA: 1},
+		)
+		g.starIndices = append(g.starIndices, base, base+1, base+2, base, base+2, base+3)
+	}
+	op := &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest}
+	screen.DrawTriangles(g.starVertices, g.starIndices, g.starPixel, op)
 }
 
 func (g *Game) drawMouseReticle(screen *ebiten.Image) {
@@ -3016,8 +3585,13 @@ func (g *Game) hudText() string {
 	}
 	return fmt.Sprintf(
 		"Profile: %s | Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Tempo: %.1fx | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
-		"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
-			"Render: %d/%d objects, %d vertices, %d edges in, %d backface, %d depth, %d tiny, %d lines out\n"+
+			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
+			"Render objects: %d in, %d visible, %d culled | Vertices: %d input, %d transformed\n"+
+			"Faces: %d input | Edges: %d input, %d output | Rejected: backface %d, policy %d, depth %d, tiny %d\n"+
+			"Clipped edges: %d | Vectors: %d world batches\n"+
+			"Billboards: %d objects, %d lines, %d batches | Star occlusion: %d analytic, %d geometry | Stars: %d considered, %d rejected, %d submitted\n"+
+			"Timing ms: depth %.2f | geometry %.2f | vector submit %.2f\n"+
+			"Profile: %s\n"+
 			"W/S throttle  Mouse/arrows yaw/pitch  Q/E roll  Space stop\nF/left-click fire  G mouse  M mode  V view  P pause  R reset  +/- or wheel zoom",
 		g.profile.Name,
 		g.mode,
@@ -3039,14 +3613,32 @@ func (g *Game) hudText() string {
 		g.profile.Player.Shield.Maximum,
 		g.kills,
 		g.collisions,
+		g.renderStats.ObjectsInput,
 		g.renderStats.ObjectsVisible,
 		g.renderStats.ObjectsCulled,
+		g.renderStats.InputVertices,
 		g.renderStats.TransformedVertices,
+		g.renderStats.InputFaces,
 		g.renderStats.InputEdges,
+		g.renderStats.OutputEdges,
 		g.renderStats.BackfaceRejected,
+		g.renderStats.PolicyRejected,
 		g.renderStats.DepthRejected,
 		g.renderStats.TinyEdges,
-		g.renderStats.OutputEdges,
+		g.renderStats.ClippedEdges,
+		g.renderStats.WorldBatches,
+		g.renderStats.BillboardObjects,
+		g.renderStats.BillboardLines,
+		g.renderStats.BillboardBatches,
+		g.renderStats.ActiveAnalyticOccluders,
+		g.renderStats.ActiveGeometryOccluders,
+		g.renderStats.StarsConsidered,
+		g.renderStats.StarsAnalyticRejected+g.renderStats.StarsGeometryRejected,
+		g.renderStats.StarsSubmitted,
+		g.renderStats.DepthRasterMS,
+		g.renderStats.GeometryMS,
+		g.renderStats.VectorSubmitMS,
+		g.profile.Name,
 	)
 }
 

@@ -28,9 +28,6 @@ type Billboard struct {
 	Name    string
 	Base    []Line
 	Details []Detail
-	// Occludes requests a filled silhouette behind the vector lines so distant
-	// background objects do not show through a large solid world object.
-	Occludes bool
 }
 
 func (billboard Billboard) Lines(reveal float64) []Line {
@@ -54,6 +51,10 @@ type Definition struct {
 	ObjectDefinition string
 	Kind             string
 	Billboard        Billboard
+	// PointOccluder selects an additive screen-space occluder independently of
+	// the visual presentation. "sphere" is suitable for large spherical bodies
+	// rendered as sparse line art; an empty value means no analytic occluder.
+	PointOccluder string
 }
 
 type Registry struct{ definitions map[string]Definition }

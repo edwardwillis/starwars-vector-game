@@ -4,7 +4,7 @@ package cockpit
 import "image/color"
 
 type Cannon struct {
-	X, Y float32
+	X, Y            float32
 	Housing, Barrel color.RGBA
 }
 
@@ -17,10 +17,16 @@ type Registry struct{ layouts map[string]Layout }
 
 func NewRegistry() *Registry { return &Registry{layouts: make(map[string]Layout)} }
 
-func (r *Registry) Register(layout Layout) { if r != nil && layout.Definition != "" { r.layouts[layout.Definition] = layout } }
+func (r *Registry) Register(layout Layout) {
+	if r != nil && layout.Definition != "" {
+		r.layouts[layout.Definition] = layout
+	}
+}
 
 func (r *Registry) ForDefinition(definition string) (Layout, bool) {
-	if r == nil { return Layout{}, false }
+	if r == nil {
+		return Layout{}, false
+	}
 	layout, ok := r.layouts[definition]
 	return layout, ok
 }
@@ -31,6 +37,8 @@ func DefaultRegistry() *Registry {
 	fallback.Definition = "builtin/tie-fighter"
 	r.Register(fallback)
 	fallback.Definition = "builtin/x-wing"
+	r.Register(fallback)
+	fallback.Definition = "builtin/tie-interceptor"
 	r.Register(fallback)
 	return r
 }

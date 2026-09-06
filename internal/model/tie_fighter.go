@@ -6,6 +6,38 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 )
 
+const (
+	tiePanelX      = 1.61
+	tiePylonInnerX = 0.65
+	tiePylonHeight = 0.32
+	tiePylonDepth  = 0.32
+)
+
+// TIEFighterGeometry contains the immutable variants used by the catalog:
+// complete hull, independently drawable parts, window, and debris fragments.
+type TIEFighterGeometry struct {
+	Full      Model
+	Core      Model
+	LeftFoil  Model
+	RightFoil Model
+	Window    Model
+	Fragments [3]Model
+}
+
+// TIEFighterGeometryData centralizes fighter geometry construction so live
+// objects and destruction representations use the same authored source.
+func TIEFighterGeometryData() TIEFighterGeometry {
+	full := TIEFighter()
+	return TIEFighterGeometry{
+		Full:      full,
+		Core:      TIEFighterCore(),
+		LeftFoil:  TIEFighterFoil(-1),
+		RightFoil: TIEFighterFoil(1),
+		Window:    TIEFighterWindow(),
+		Fragments: splitTIEFighterFragments(full),
+	}
+}
+
 // TIEFighter returns a deliberately simple, original wireframe fighter:
 // a faceted cockpit, two box pylons, and two tall framed panels. It is inspired
 // by the broad geometry of classic twin-panel space fighters without copying a
@@ -13,9 +45,8 @@ import (
 func TIEFighter() Model {
 	mesh := Model{}
 	leftPylon, rightPylon := appendTIEFighterCore(&mesh)
-	const panelX = 1.61
-	appendPanel(&mesh, -panelX, []int{leftPylon, leftPylon + 3, leftPylon + 4, leftPylon + 7})
-	appendPanel(&mesh, panelX, []int{rightPylon + 1, rightPylon + 2, rightPylon + 5, rightPylon + 6})
+	appendPanel(&mesh, -tiePanelX, []int{leftPylon, leftPylon + 3, leftPylon + 4, leftPylon + 7})
+	appendPanel(&mesh, tiePanelX, []int{rightPylon + 1, rightPylon + 2, rightPylon + 5, rightPylon + 6})
 	return OrientOutward(mesh)
 }
 
@@ -29,16 +60,21 @@ func TIEFighterCore() Model {
 	return OrientOutward(mesh)
 }
 
+// TIEFighterCockpit returns the shared central command-pod geometry without
+// solar-panel pylons. Other TIE-family craft reuse this authored cockpit and
+// orient it to their own flight axis instead of duplicating the hull.
+func TIEFighterCockpit() Model {
+	mesh := Model{}
+	appendCockpit(&mesh)
+	return OrientOutward(mesh)
+}
+
 func appendTIEFighterCore(mesh *Model) (int, int) {
 	appendCockpit(mesh)
-	const (
-		panelX      = 1.61
-		pylonInnerX = 0.65
-		pylonWidth  = panelX - pylonInnerX
-		pylonCenter = (panelX + pylonInnerX) / 2
-	)
-	leftPylon := appendBox(mesh, -pylonCenter, 0, 0, pylonWidth, 0.32, 0.32)
-	rightPylon := appendBox(mesh, pylonCenter, 0, 0, pylonWidth, 0.32, 0.32)
+	pylonWidth := tiePanelX - tiePylonInnerX
+	pylonCenter := (tiePanelX + tiePylonInnerX) / 2
+	leftPylon := appendBox(mesh, -pylonCenter, 0, 0, pylonWidth, tiePylonHeight, tiePylonDepth)
+	rightPylon := appendBox(mesh, pylonCenter, 0, 0, pylonWidth, tiePylonHeight, tiePylonDepth)
 	return leftPylon, rightPylon
 }
 
@@ -56,7 +92,7 @@ func TIEFighterFoil(side int) Model {
 		panic("model: TIE foil side must be -1 or +1")
 	}
 	mesh := Model{}
-	appendPanel(&mesh, 1.61*float64(side), nil)
+	appendPanel(&mesh, tiePanelX*float64(side), nil)
 	return OrientOutward(mesh)
 }
 
@@ -153,7 +189,10 @@ func TIEFighterWindow() Model {
 // TIEFighterFragments partitions the fighter's edges into left, center,
 // and right debris meshes. Together the three fragments reconstruct the hull.
 func TIEFighterFragments() [3]Model {
-	hull := TIEFighter()
+	return splitTIEFighterFragments(TIEFighter())
+}
+
+func splitTIEFighterFragments(hull Model) [3]Model {
 	fragments := [3]Model{
 		{Verts: hull.Verts},
 		{Verts: hull.Verts},
@@ -183,6 +222,7 @@ func TIEFighterFragments() [3]Model {
 		}
 		fragments[index].Faces = append(fragments[index].Faces, face)
 	}
+	addFractureCaps(hull, &fragments, []float64{-0.48, 0.48})
 	for index := range fragments {
 		fragments[index] = Prepare(fragments[index])
 	}
@@ -242,7 +282,10 @@ func appendPanel(mesh *Model, x float64, pylonFace []int) {
 	// shallow body inward toward the cockpit/pylon.
 	backX := x - math.Copysign(thickness, x)
 	backBase := len(mesh.Verts)
-	for _, vertex := range front { vertex.X = backX; mesh.Verts = append(mesh.Verts, vertex) }
+	for _, vertex := range front {
+		vertex.X = backX
+		mesh.Verts = append(mesh.Verts, vertex)
+	}
 	const corners = 6
 	hub := base + corners
 	backHub := backBase + corners
@@ -258,13 +301,21 @@ func appendPanel(mesh *Model, x float64, pylonFace []int) {
 	}
 	frontFace := make([]int, corners)
 	backFace := make([]int, corners)
-	for corner := range corners { frontFace[corner], backFace[corner] = base+corner, backBase+corner }
-	if x < 0 { reverseIndices(frontFace) } else { reverseIndices(backFace) }
+	for corner := range corners {
+		frontFace[corner], backFace[corner] = base+corner, backBase+corner
+	}
+	if x < 0 {
+		reverseIndices(frontFace)
+	} else {
+		reverseIndices(backFace)
+	}
 	mesh.Faces = append(mesh.Faces, Face{Vertices: frontFace}, Face{Vertices: backFace})
 	for corner := range corners {
 		next := (corner + 1) % corners
 		side := []int{base + corner, base + next, backBase + next, backBase + corner}
-		if x < 0 { reverseIndices(side) }
+		if x < 0 {
+			reverseIndices(side)
+		}
 		mesh.Faces = append(mesh.Faces, Face{Vertices: side})
 	}
 	for _, vertex := range pylonFace {

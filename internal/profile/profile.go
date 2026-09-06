@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	CadetName     = "builtin/cadet"
-	PilotName     = "builtin/pilot"
-	AceName       = "builtin/ace"
-	NightmareName = "builtin/nightmare"
+	CadetName             = "builtin/cadet"
+	PilotName             = "builtin/pilot"
+	AceName               = "builtin/ace"
+	NightmareName         = "builtin/nightmare"
+	StarfieldModeWorld    = "world"
+	StarfieldModeSkyfield = "skyfield"
 )
 
 type SimulationConfig struct {
@@ -25,6 +27,9 @@ type SimulationConfig struct {
 	MotionScale               float64
 	DisintegrationTime        float64
 	PlayerDestructionViewTime float64
+	// HyperspaceArrivalTime controls the short orbital-space presentation
+	// played when the player starts or restarts. Surface-frame starts skip it.
+	HyperspaceArrivalTime float64
 }
 
 type DisplayConfig struct {
@@ -45,6 +50,9 @@ type StarfieldConfig struct {
 	Count  int
 	Radius float64
 	Seed   int64
+	// Mode controls whether stars retain world-space parallax or form a
+	// distant directional skyfield. Empty values resolve to skyfield.
+	Mode string
 }
 
 type TargetingConfig struct {
@@ -132,6 +140,7 @@ func Pilot() GameProfile {
 	pursuit.MinSpeed = 2.80
 	pursuit.MaxSpeed = manual.MaxForward * (1200.0 / 1050.0)
 	pursuit.Acceleration = 2.20
+	pursuit.TurnAcceleration = 2.40
 	pursuit.ApproachGain = 0.28
 	pursuit.MaxYawRate = 1.15
 	pursuit.MaxPitchRate = 0.90
@@ -173,20 +182,23 @@ func Pilot() GameProfile {
 			MotionScale:               2.0,
 			DisintegrationTime:        2.0,
 			PlayerDestructionViewTime: 3.0,
+			HyperspaceArrivalTime:     1.8,
 		},
 		Display: DisplayConfig{
 			ZoomSpeed:               1.5,
 			ControlsDisplayDuration: 10.0,
-			RenderingProfile:        "builtin/arcade",
-			VerticalFOV:             math.Pi / 3,
-			NearPlane:               0.1,
-			FarPlane:                1000,
+			// Start gameplay at the highest available detail level. The HUD
+			// realism slider still allows the player to select a cheaper mode.
+			RenderingProfile: "builtin/maximum",
+			VerticalFOV:      math.Pi / 3,
+			NearPlane:        0.1,
+			FarPlane:         1000,
 		},
 		Input: InputConfig{
 			MouseDeadzone:    0.08,
 			MouseSensitivity: 1.25,
 		},
-		Starfield: StarfieldConfig{Count: 500, Radius: 40, Seed: 42},
+		Starfield: StarfieldConfig{Count: 500, Radius: 40, Seed: 42, Mode: StarfieldModeSkyfield},
 		Targeting: TargetingConfig{AimRadius: 190, AimConvergence: 30},
 		Combat: CombatConfig{
 			Laser:         combat.DefaultLaserConfig(),
@@ -198,7 +210,10 @@ func Pilot() GameProfile {
 		Player: PlayerConfig{
 			Object: "builtin/x-wing",
 			InitialPose: kinematics.Pose{
-				Position:    math3d.Vec3{Z: -450},
+				// Start close enough for the Death Star to read as the immediate
+				// play-space landmark while remaining safely outside its forward
+				// surface and hangar launch formation.
+				Position:    math3d.Vec3{Z: -150},
 				Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, 0),
 			},
 			AutopilotMotion: kinematics.Motion{
@@ -219,12 +234,13 @@ func Pilot() GameProfile {
 			Count:      5,
 			Controller: control.PursuitName,
 			Flight: control.Limits{
-				Acceleration: pursuit.Acceleration,
-				MaxForward:   pursuit.MaxSpeed,
-				MaxReverse:   pursuit.MaxSpeed,
-				MaxYawRate:   pursuit.MaxYawRate,
-				MaxPitchRate: pursuit.MaxPitchRate,
-				MaxRollRate:  pursuit.MaxRollRate,
+				Acceleration:        pursuit.Acceleration,
+				AngularAcceleration: pursuit.TurnAcceleration,
+				MaxForward:          pursuit.MaxSpeed,
+				MaxReverse:          pursuit.MaxSpeed,
+				MaxYawRate:          pursuit.MaxYawRate,
+				MaxPitchRate:        pursuit.MaxPitchRate,
+				MaxRollRate:         pursuit.MaxRollRate,
 			},
 			// Launch formation just outside the Death Star's forward hangar.
 			InitialPositions: []math3d.Vec3{{X: -14, Y: -10, Z: 88}, {X: 0, Y: -10, Z: 88}, {X: 14, Y: -10, Z: 88}, {X: -7, Y: 8, Z: 88}, {X: 7, Y: 8, Z: 88}},
@@ -312,12 +328,13 @@ func Nightmare() GameProfile {
 func syncSwarmFlight(profile *GameProfile) {
 	config := profile.Swarm.Pursuit
 	profile.Swarm.Flight = control.Limits{
-		Acceleration: config.Acceleration,
-		MaxForward:   config.MaxSpeed,
-		MaxReverse:   config.MaxSpeed,
-		MaxYawRate:   config.MaxYawRate,
-		MaxPitchRate: config.MaxPitchRate,
-		MaxRollRate:  config.MaxRollRate,
+		Acceleration:        config.Acceleration,
+		AngularAcceleration: config.TurnAcceleration,
+		MaxForward:          config.MaxSpeed,
+		MaxReverse:          config.MaxSpeed,
+		MaxYawRate:          config.MaxYawRate,
+		MaxPitchRate:        config.MaxPitchRate,
+		MaxRollRate:         config.MaxRollRate,
 	}
 }
 
@@ -383,6 +400,9 @@ func (profile GameProfile) Validate() error {
 	if err := validatePositive("player destruction view time", profile.Simulation.PlayerDestructionViewTime); err != nil {
 		return err
 	}
+	if err := validatePositive("hyperspace arrival time", profile.Simulation.HyperspaceArrivalTime); err != nil {
+		return err
+	}
 	if profile.Display.RenderingProfile == "" {
 		return fmt.Errorf("rendering profile is required")
 	}
@@ -409,6 +429,9 @@ func (profile GameProfile) Validate() error {
 	}
 	if err := validatePositive("starfield radius", profile.Starfield.Radius); err != nil {
 		return err
+	}
+	if profile.Starfield.Mode != "" && profile.Starfield.Mode != StarfieldModeWorld && profile.Starfield.Mode != StarfieldModeSkyfield {
+		return fmt.Errorf("unknown starfield mode %q", profile.Starfield.Mode)
 	}
 	if err := validatePositive("aim radius", profile.Targeting.AimRadius); err != nil {
 		return err
@@ -524,6 +547,7 @@ func validatePursuit(config control.PursuitConfig) error {
 		value float64
 	}{
 		{"acceleration", config.Acceleration},
+		{"turn acceleration", config.TurnAcceleration},
 		{"turn gain", config.TurnGain},
 		{"maximum yaw rate", config.MaxYawRate},
 		{"maximum pitch rate", config.MaxPitchRate},

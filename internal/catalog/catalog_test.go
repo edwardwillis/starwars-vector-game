@@ -48,6 +48,63 @@ func TestTIEFighterReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
+func TestTIEInterceptorReturnsValidMultipartObject(t *testing.T) {
+	fighter := TIEInterceptor(1, kinematics.Pose{})
+	if err := fighter.Validate(); err != nil {
+		t.Fatalf("TIE Interceptor returned an invalid object: %v", err)
+	}
+	if fighter.Definition != TIEInterceptorName || fighter.Appearance != TIEInterceptorAppearance {
+		t.Fatalf("definition=%q appearance=%q", fighter.Definition, fighter.Appearance)
+	}
+	if len(fighter.Parts) != 13 {
+		t.Fatalf("TIE Interceptor returned %d parts, want 13", len(fighter.Parts))
+	}
+	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
+		!fighter.Physical || !fighter.Hittable || !fighter.Targetable || !fighter.Destructible {
+		t.Fatalf("interceptor has incorrect collision metadata")
+	}
+	for _, name := range []string{
+		"center", "cockpit", "chase",
+		"muzzle-upper-left", "muzzle-upper-right",
+		"muzzle-lower-left", "muzzle-lower-right",
+	} {
+		if _, ok := fighter.Anchor(name); !ok {
+			t.Fatalf("interceptor is missing %q anchor", name)
+		}
+	}
+}
+
+func TestTIEInterceptorInstancesShareImmutableGeometry(t *testing.T) {
+	first := TIEInterceptor(1, kinematics.Pose{})
+	second := TIEInterceptor(2, kinematics.Pose{})
+	if &first.Parts[0].Mesh.Verts[0] != &second.Parts[0].Mesh.Verts[0] {
+		t.Fatal("interceptor instances do not share core geometry")
+	}
+	if &first.Parts[1].Mesh.Verts[0] != &second.Parts[1].Mesh.Verts[0] {
+		t.Fatal("interceptor instances do not share panel geometry")
+	}
+}
+
+func TestXWingMuzzleAnchorsFollowAssemblyGeometry(t *testing.T) {
+	object := XWing(1, kinematics.Pose{})
+	names := map[string]string{
+		"upper-right S-foil": "muzzle-upper-right",
+		"upper-left S-foil":  "muzzle-upper-left",
+		"lower-left S-foil":  "muzzle-lower-left",
+		"lower-right S-foil": "muzzle-lower-right",
+	}
+	for _, assembly := range xWingFoilAssemblies {
+		anchorName := names[assembly.Name]
+		anchor, ok := object.Anchor(anchorName)
+		if !ok {
+			t.Fatalf("missing anchor %q", anchorName)
+		}
+		if anchor.Position != assembly.Muzzle {
+			t.Fatalf("anchor %q=%+v, want assembly muzzle %+v", anchorName, anchor.Position, assembly.Muzzle)
+		}
+	}
+}
+
 func TestTIEFighterFragmentIsNonCollidingDebris(t *testing.T) {
 	for index := range 3 {
 		fragment := TIEFighterFragment(scene.ObjectID(index+1), index, kinematics.Pose{})
@@ -76,6 +133,22 @@ func TestTIEFighterPolygonsAreFinalVisualDebris(t *testing.T) {
 			polygon.Hittable || polygon.Destructible ||
 			polygon.DestructionStage != scene.DestructionPolygon {
 			t.Fatalf("component %d polygon has incorrect collision metadata", component)
+		}
+	}
+}
+
+func TestTIEInterceptorPolygonsAreFinalVisualDebris(t *testing.T) {
+	for component := range 3 {
+		count := TIEInterceptorPolygonCount(component)
+		if count == 0 {
+			t.Fatalf("component %d has no constituent polygons", component)
+		}
+		polygon := TIEInterceptorPolygon(1, component, 0, kinematics.Pose{})
+		if err := polygon.Validate(); err != nil {
+			t.Fatalf("component %d polygon is invalid: %v", component, err)
+		}
+		if polygon.CollisionRole != scene.CollisionDebris || polygon.Physical || polygon.Hittable || polygon.Destructible || polygon.DestructionStage != scene.DestructionPolygon {
+			t.Fatalf("component %d polygon has incorrect metadata", component)
 		}
 	}
 }
@@ -110,6 +183,23 @@ func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
 	}
 	if bolt.CollisionRole != scene.CollisionProjectile || bolt.CollisionRadius <= 0 {
 		t.Fatal("laser bolt has incorrect collision metadata")
+	}
+}
+
+func TestLaserBoltStylesDistinguishRebelAndImperialFire(t *testing.T) {
+	rebel := LaserBoltForShooter(2, kinematics.Pose{}, XWingName)
+	imperial := LaserBoltForShooter(3, kinematics.Pose{}, TIEFighterName)
+	if rebel.Appearance != RebelLaserBoltAppearance || imperial.Appearance != ImperialLaserBoltAppearance {
+		t.Fatalf("appearances rebel=%q imperial=%q", rebel.Appearance, imperial.Appearance)
+	}
+	if rebel.Parts[0].Color == imperial.Parts[0].Color || rebel.Parts[1].Color == imperial.Parts[1].Color {
+		t.Fatal("faction laser styles share colors")
+	}
+}
+
+func TestTIEInterceptorUsesImperialLaserStyle(t *testing.T) {
+	if style := LaserBoltStyleForShooter(TIEInterceptorName); style.Appearance != ImperialLaserBoltAppearance {
+		t.Fatalf("interceptor style=%q, want imperial", style.Appearance)
 	}
 }
 

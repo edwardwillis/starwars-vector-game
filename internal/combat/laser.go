@@ -14,7 +14,9 @@ import (
 const (
 	LaserSpeed    = 18.0
 	LaserSpinRate = 8.0
-	LaserLifetime = 2.0
+	// Bolts remain visible for a shorter travel window so a slightly
+	// converging salvo does not cross far ahead of the target.
+	LaserLifetime = 1.0
 )
 
 // LaserConfig contains the tunable behavior of a laser projectile. Geometry
@@ -75,7 +77,7 @@ func FireLaserTowardWithConfig(shooter scene.Object, id scene.ObjectID, muzzle s
 	yaw := math.Atan2(direction.X, direction.Z)
 	pitch := -math.Asin(max(-1, min(1, direction.Y)))
 	pose.Orientation = math3d.QuaternionFromYawPitchRoll(yaw, pitch, 0)
-	bolt := catalog.LaserBolt(id, pose)
+	bolt := catalog.LaserBoltForShooter(id, pose, shooter.Definition)
 	bolt.Frame = shooter.Frame
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,
@@ -100,7 +102,7 @@ func FireLaserWithConfig(shooter scene.Object, id scene.ObjectID, muzzle string,
 	if !ok {
 		return Spawn{}, fmt.Errorf("object %d has no %q anchor", shooter.ID, muzzle)
 	}
-	bolt := catalog.LaserBolt(id, pose)
+	bolt := catalog.LaserBoltForShooter(id, pose, shooter.Definition)
 	bolt.Frame = shooter.Frame
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,

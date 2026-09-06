@@ -15,7 +15,7 @@ Scene (independent objects)
   -> Model (verts + edges + optional faces)
   -> Transform (object world matrix)
   -> Camera (view matrix)
-  -> Backface Cull (optional, camera space)
+  -> Backface Cull (mandatory for surface geometry, camera space)
   -> Project (perspective -> screen)
   -> Clip (near plane, screen bounds)
   -> Hidden-Line Resolve (optional, projected depth)
@@ -23,8 +23,10 @@ Scene (independent objects)
 ```
 
 The renderer holds pipeline configuration and runs these operations in order.
-Visibility processing is selected by a feature setting and defaults to drawing
-all edges for the original arcade look.
+Visibility presentation is selected by a feature setting, but physical surface
+geometry always receives baseline back-face classification. The retro arcade
+look comes from sparse geometry and edge policy, not from drawing known
+back-facing surfaces of closed solids.
 
 Core types:
 
@@ -90,8 +92,10 @@ the architecture to support the feature cleanly.
 
 The three modes provide different results:
 
-- `VisibilityAll` ignores `Faces` and draws every edge. This is the default and
-  preserves the transparent original-arcade wireframe style.
+- The historical `VisibilityAll` mode ignored `Faces`; it is retained only as
+  an API-history note. Current arcade presentation still applies mandatory
+  back-face culling to physical surfaces and preserves the retro look through
+  sparse geometry and edge policy.
 - `VisibilityBackfaces` uses camera-space face normals to omit surfaces facing
   away from the camera. It is inexpensive but cannot hide an edge behind a
   different front-facing surface.
@@ -100,10 +104,11 @@ The three modes provide different results:
   visible line segments. This is full hidden-line removal.
 
 The existing edge-only `Culler` hook is sufficient only for basic whole-edge
-filtering and will be replaced by these visibility modes. Models can continue to
-omit faces while using `VisibilityAll`; catalog entries must provide valid faces
-before selecting either surface-aware mode. Face indices and winding are
-validated with the rest of each model.
+filtering and will be replaced by these visibility modes. The historical
+edge-only models may omit faces only as a compatibility note; all new and
+migrated surface-based catalog entries must provide valid faces and participate
+in mandatory back-face classification. Face indices and winding are validated
+with the rest of each model.
 
 Hidden-line removal operates after projection and clipping because it compares
 screen-space coverage, while retaining interpolated depth for every projected
@@ -159,7 +164,14 @@ The renderer displays the active level name beside the slider and permits
 switching while objects are moving. This makes the visual contribution and
 performance cost of each stage directly observable. Advanced settings may
 eventually expose individual stage toggles, but the ordered slider remains the
-primary user-facing control.
+primary user-facing control. The current gameplay default is the highest
+(`maximum`) profile; the slider still permits selecting cheaper modes.
+
+Current implementation clarification: the historical `VisibilityAll`/level-0
+description above refers to legacy line-art behavior and does not disable
+back-face classification for physical faces. The current five profiles all
+apply mandatory surface back-face culling; they differ in edge policy, LOD,
+depth/hidden-line processing, and detail density.
 
 ## Scene and Object Scope
 
@@ -446,10 +458,11 @@ The arcade drawing uses normalized 2D vector coordinates and a generic
 world-anchored billboard renderer: project the Death Star centre, derive its
 screen radius from world radius and depth, then scale the same drawing about
 that point facing each client's active camera. Base silhouette lines are always
-visible. Solid billboard presentations may request a filled occlusion silhouette
-behind their vector lines so background stars do not show through the object;
-the mask is rendered as a presentation pass before nearby world geometry. Each
-optional detail primitive receives a deterministic seed-derived
+visible. Billboard presentations must not paint a large opaque screen-space
+mask. A presentation may instead declare a cheap analytic point occluder (for
+example, a projected sphere) so sparse background points are rejected before
+draw submission. Ordinary solid model faces use projected geometry occluders,
+which preserve genuine gaps between surfaces. Each optional detail primitive receives a deterministic
 reveal threshold; projected size/proximity progressively reveals more lines and
 dots. Apply hysteresis or stable thresholding so details do not shimmer at a
 boundary. Detail selection affects presentation only, not collision, targeting,
@@ -929,9 +942,9 @@ controllers remain the baseline for tests and offline play.
 ## Notes
 - Step 5 is first visually demonstrable milestone (target early win).
 - Keep each step in its own commit/branch for incremental review.
-- Visibility defaults to drawing every edge; backface and hidden-line modes
-  arrive through the rendering-profile work in step 18 and remain
-  runtime-switchable features.
+- Physical surface back-face culling is mandatory in every profile. Hidden-line,
+  depth, LOD, and edge-policy sophistication remain runtime-switchable through
+  the five-level realism slider.
 - Later geometry refinement: consider extruding thin fighter wing panels to a
   small finite depth, with front/back/side faces and consistent winding. This
   would make back-face and hidden-line culling reliable from every orientation,
@@ -972,10 +985,11 @@ and laser-bolt definitions remain available as defaults while custom aliases
 and future object classes can be registered by contributors.
 
 Step 18 implementation is complete. The renderer now exposes composable stages
-and built-in progressive profiles (`arcade`, `culled`, `hidden-line`, and
-`depth-cue`). Profiles are selected from `Display.RenderingProfile`; legacy
-culler support remains compatible while back-face culling and later visibility
-stages can evolve independently.
+and five built-in progressive profiles (`arcade`, `culled`, `hidden-line`,
+`depth-cue`, and `maximum`). Mandatory back-face culling applies to physical
+surface geometry in every profile. Profiles are selected from
+`Display.RenderingProfile`; legacy culler support remains compatible while
+depth, LOD, clipping, and visibility stages evolve independently.
 
 Step 19 implementation is complete. `internal/sim` provides a validated,
 deterministically ordered world, fixed-tick kinematic stepping, immutable-style
@@ -1115,8 +1129,8 @@ Physical surface geometry must support mandatory back-face classification and
 culling at EVERY level, including retro. Do not retain model-specific culling
 exceptions, normal-axis heuristics, automatic reversed-visibility fallbacks, or
 missing-face workarounds. Explicit line art (lasers, HUD, reticles, billboard
-artwork) is the legitimate exception. Do not implement a TIE Interceptor yet:
-it does not exist in the catalog and is the first intended post-migration model.
+artwork) is the legitimate exception. The TIE Interceptor is now the first
+post-migration model and must remain a normal catalog consumer of these rules.
 
 Keep topology truth, visual policy, and visibility mechanisms separate. Avoid
 unrelated controller, gameplay, physics, camera-control, or multiplayer rewrites.
@@ -1153,8 +1167,10 @@ unrelated controller, gameplay, physics, camera-control, or multiplayer rewrites
   useful hierarchy but no render bounds. Surface/trench have collision planes
   yet line-only render geometry; tower/cannon cube faces are explicitly erased.
 - `internal/appearance`: default Death Star is an intentional vector billboard
-  with deterministic detail reveal and a black circular starfield mask. This
-  is not a shared depth buffer or inter-object hidden-line implementation.
+  with deterministic detail reveal and a declared analytic spherical point
+  occluder. It no longer paints a black circular starfield mask; sparse stars
+  are rejected before submission. This remains separate from shared geometry
+  depth and inter-object hidden-line processing.
 - Camera uses -Z forward in view space; model flight forward is +Z. Existing
   pose/world/view/projection math can be retained. The installed Ebitengine
   v2.9.9 image/triangle API is a 2D draw interface, not a conventional exposed
@@ -1387,12 +1403,212 @@ The canopy front profile is centered across the fuselage cross-section rather
 than being entirely above the centerline, keeping the cockpit visually aligned
 with the symmetric front-view wing attachment.
 
+#### Cockpit occlusion follow-up
+
+Intact TIE-family cockpits are already closed finite surface bodies. The ideal
+refinement is therefore to make the existing depth pass handle self-occlusion
+reliably for that topology. They currently use the stable per-part ownership
+path without self-depth testing; this avoids rotation-dependent shimmering but
+can allow sparse rear cockpit or pylon edges to appear through the cockpit
+shell. Do not fix this by widening back-face tolerances or aggressively
+increasing self-edge sampling. If closed-body self-occlusion cannot be made
+stable with the existing surface depth, a reusable depth-only cockpit occluder
+(or equivalent prepared shell) is the fallback—not a replacement for the
+cockpit's physical topology. It should:
+
+- be usable by both the TIE fighter and TIE Interceptor;
+- remain separate from visible cockpit line art and rendering-profile policy;
+- hide rear/internal pylon and cockpit geometry without self-occlusion sparkle;
+- preserve the existing non-shimmering baseline when disabled or unavailable;
+- participate in the same clipping, bounds, and depth-owner pipeline as other
+  solid surfaces; and
+- be covered by deterministic tests for front/rear cockpit views and rotating
+  pylon intersections before enabling it in gameplay.
+
 Focused model, topology, winding, adjacency, culling, clipping, depth, profile,
 catalog, environment, and registry tests pass; `go vet ./...` passes; the game
 package compiles with `go test -c`. Full Ebitengine runtime tests and interactive
 visual checks still require an X11 display in this environment. Remaining work
 is robust side-frustum polygon clipping, tile/module bounds and hierarchy,
 allocation/workload benchmarks, richer stage counters, visual regression checks,
-and any model-specific topology corrections found during those checks. The TIE
-Interceptor remains intentionally unimplemented and is the first consumer after
-these foundations are stable.
+and any model-specific topology corrections found during those checks. The
+TIE Interceptor now exercises the post-migration catalog, appearance, topology,
+occlusion, weapon-style, showcase, and destruction contracts.
+
+Current post-migration rules now also include the following implementation
+details. `model.Prepare` is the required compilation boundary for cached
+normals, plane constants, adjacency, edge classifications, and bounds;
+runtime instances must reuse its immutable topology. The five realism profiles
+all retain mandatory back-face culling, while only higher profiles add stronger
+edge policy, shared CPU depth, hidden-line splitting, and finer LOD/detail.
+
+Starfield visibility is additive. The default `skyfield` mode places stars on
+a distant camera-relative directional shell; the renderer rejects hidden stars
+before Ebitengine submission. Large line-art bodies may register analytic
+projected-volume occluders, while ordinary surface models contribute
+camera-facing projected triangle occluders. No large billboard/background fill,
+texture mask, or bounding-volume-as-opaque shortcut may be added. Solid model
+faces must leave `SkipDepth` disabled so panels and hulls occlude stars without
+hiding stars through genuine gaps.
+
+The Death Star retains its scalable arcade billboard as visual line art, but
+its former opaque background mask has been removed. Its analytic spherical
+occluder and the generic projected geometry occluders share the same screen
+point/depth abstraction. This distinction—visual presentation versus physical
+opacity—applies to every future large object.
+
+Destruction fragments now receive explicit fracture-cap faces and structural
+cap edges. They are ordinary prepared models and opt into self-depth testing so
+front caps/body surfaces can hide rear wireframe lines; intact multipart
+objects retain per-part depth ownership for stable self-edge rendering.
+
+Laser-bolt geometry is shared across factions and receives a shooter-selected
+style: Rebel X-Wing fire is red-orange with blue-white cores; Imperial
+TIE-family fire is green with yellow-green cores. New Imperial craft must join
+the style mapping through catalog data rather than renderer conditionals.
+
+## New-model authoring contract — TIE Interceptor handoff
+
+This is the authoritative handoff for adding a model. It supersedes older
+fighter-specific notes elsewhere in this document; historical sections remain
+for milestone traceability only.
+
+The Imperial TIE Interceptor is the first post-migration catalog object. It is
+registered as an ordinary model, not through a renderer, camera, HUD,
+controller, or collision special case. Its canonical identifiers are:
+
+```text
+model:      TIE Interceptor
+definition: builtin/tie-interceptor
+appearance: builtin/tie-interceptor-model (or another explicit model-3d style)
+```
+
+Do not add a legacy alias. Do not rename or mutate `builtin/tie-fighter`; the
+existing TIE Fighter and the Interceptor are separate logical definitions.
+
+### Geometry and topology requirements
+
+Use the shared local convention: `+Z` is the nose/forward direction, `+Y` is
+up, and `+X` is right. The model should be a composed assembly of prepared
+components rather than one fragile monolithic wireframe. At minimum, consider
+separate parts for the command pod/cockpit and window, pylons and central
+braces, left and right solar-panel assemblies, panel perimeter/braces, and
+laser-cannon or muzzle geometry if the craft is fire-capable.
+
+Every surface-based component must provide explicit polygon faces in addition
+to vertices and edges. Thin solar panels are extruded solids with front, back,
+and side faces; a zero-thickness sketch is not sufficient for reliable
+back-face, hidden-line, or point-occluder behavior. Use counter-clockwise
+winding when viewed from outside so right-hand normals point outward. Do not
+use an axis heuristic, centroid reversal, or an empty-front fallback to hide
+bad authoring. Concave or disconnected components must be authored or repaired
+component-by-component.
+
+Before registration, `model.Prepare` must compile and cache face normals and
+plane constants, triangulation used for depth/point occlusion, edge-to-face
+adjacency, edge intent (`structural`, `decorative`, or `internal`), importance,
+and conservative local bounds. Depth triangulation must not expose construction
+diagonals as visible lines. Faces require at least three distinct, finite,
+non-degenerate vertices, and shared edges require compatible winding.
+
+Standalone decorative lines bypass face classification; surface-associated
+markings follow their owner's visibility and depth rules. Solid panels and
+hulls must leave `SkipDepth` disabled. Intentional double-sided surfaces must
+be explicit and rare. The whole fighter need not be one manifold solid:
+individually valid closed components may intersect as an assembly, while open
+surfaces must declare their intended side(s).
+
+### Catalog, registry, and object assembly
+
+Add immutable shared geometry templates to `internal/model`, then assemble the
+object in `internal/catalog` through the existing object-definition registry.
+The constructor must supply a stable `builtin/tie-interceptor` definition,
+multipart styled `scene.Part` values with explicit detail tiers, named anchors
+at least for `center`, `cockpit`, `chase`, and every muzzle used by combat,
+independent visual and collision bounds, and validated physical/hittable/
+targetable/destructible capabilities as appropriate. If destructible, provide
+fragment and polygon-shard factories through the same lifecycle registry.
+
+The catalog must share prepared templates between instances. Per-instance pose,
+motion, ownership, controller state, shields, and destruction state remain in
+scene/simulation objects; mutable runtime state must not live in model or
+catalog globals. Register any model-3d appearance separately from the logical
+object. Appearance controls presentation/detail policy and styling, not
+collision, identity, ownership, or behavior. Add showcase technical
+specification data through the catalog specification path rather than a
+renderer type switch.
+
+### Rendering and point occlusion
+
+The Interceptor must work at all five realism levels. Mandatory surface
+back-face classification applies even to the retro profile. Higher profiles
+may remove coplanar/internal edges, apply projected-size LOD, and resolve
+hidden lines using the shared CPU depth surface. Do not disable culling to make
+one viewpoint look correct.
+
+Camera-facing solid faces may become projected geometry point occluders for the
+sparse skyfield. This must hide stars behind actual panel/hull triangles while
+leaving stars visible through empty spaces between panels. Do not use the
+object's bounding sphere, convex hull, billboard fill, or a full-screen mask
+for an open fighter silhouette. Reuse prepared faces, winding, back-face
+classification, clipping, and perspective-correct depth conventions from the
+line renderer.
+
+The default starfield mode is `skyfield`: stars are placed on a distant
+camera-relative directional shell and rejected before Ebitengine submission
+when an analytic or projected-geometry occluder hides them. The legacy `world`
+mode remains configurable for tests or scenes that intentionally need parallax.
+
+### Weapons and faction style
+
+Shared laser-bolt geometry is styled from the shooter definition. Rebel X-Wing
+fire uses red-orange rays with blue-white cores. Imperial TIE-family fire uses
+green rays with yellow-green cores. Add `builtin/tie-interceptor` to the
+Imperial style mapping; do not add renderer branches for the new fighter. If a
+new weapon is genuinely different, add a catalog style or appearance entry and
+keep speed, lifetime, convergence, ownership, and collision rules in combat
+configuration.
+
+### Destruction geometry
+
+If destructible, define two or three coherent component fragments that retain
+the recognizable silhouette and inherit the parent trajectory with deterministic
+blast variation. Add explicit fracture-cap faces at component break planes,
+with correct winding and structural cap edges. Polygon shards are generated
+from prepared component faces and must not recurse indefinitely.
+
+Destruction components opt into self-depth testing so front caps/body can hide
+rear wireframe lines. Intact multipart objects retain per-part depth ownership
+to avoid shimmer while allowing one physical part to occlude another. Fragments
+and shards remain ordinary catalog objects and use the same renderer; no
+destruction-specific drawing branch is permitted.
+
+### Required tests before gameplay integration
+
+Add deterministic tests for the Interceptor before adding it to a live profile:
+
+1. model validation, finite bounds, expected component/face/edge counts, and
+   non-degenerate fracture caps;
+2. outward normals and winding from fixed, oblique, and panel edge-on views;
+3. edge adjacency, boundary/crease/internal classification, and suppression of
+   triangulation diagonals;
+4. back-face classification and hidden-line/depth behavior for command pod,
+   panels, braces, and gaps between panels;
+5. projected point occlusion: a star behind a panel is rejected, a star in
+   front is retained, and a star through an opening remains visible;
+6. near-plane, viewport, projected-size LOD, and off-centre bound behavior;
+7. registry construction, anchors, capabilities, appearance selection,
+   showcase specification, and shared immutable templates;
+8. laser style selection, muzzle orientation, convergence lifetime, and
+   projectile ownership; and
+9. fragment/shard topology and self-occlusion without regressions in existing
+   TIE Fighter/X-Wing tests.
+
+The acceptance test is that adding the Interceptor consists of model data,
+catalog/appearance registration, specification/style data, and focused tests—
+not changes to renderer branches, camera logic, HUD type switches, or the
+simulation loop. Run renderer/model/catalog tests and `go vet ./...`; compile
+the game package separately when no X11 display is available. Interactive
+validation should cover all five realism levels, cockpit/chase/follow views,
+rapid panel rotations, skyfield occlusion, laser fire, collisions, and the
+full two-stage disintegration sequence.

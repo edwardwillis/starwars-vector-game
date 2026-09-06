@@ -43,6 +43,24 @@ func TestTIEFighterWindowIsValid(t *testing.T) {
 	}
 }
 
+func TestTIEFighterGeometryDataIncludesSharedVariants(t *testing.T) {
+	geometry := TIEFighterGeometryData()
+	for name, mesh := range map[string]Model{
+		"full":       geometry.Full,
+		"core":       geometry.Core,
+		"left foil":  geometry.LeftFoil,
+		"right foil": geometry.RightFoil,
+		"window":     geometry.Window,
+	} {
+		if err := mesh.Validate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if len(geometry.Fragments) != 3 {
+		t.Fatalf("fragments=%d, want 3", len(geometry.Fragments))
+	}
+}
+
 func TestTIEFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
 	hull := TIEFighter()
 	fragments := TIEFighterFragments()
@@ -61,8 +79,9 @@ func TestTIEFighterFragmentsReconstructEveryHullEdge(t *testing.T) {
 	if edgeCount < len(hull.Edges) {
 		t.Fatalf("fragments contain %d edges, fewer than hull's %d", edgeCount, len(hull.Edges))
 	}
-	if faceCount != len(hull.Faces) {
-		t.Fatalf("fragments contain %d faces, want hull's %d", faceCount, len(hull.Faces))
+	wantFaces := len(hull.Faces) + 4 // two split planes, with a cap on each side
+	if faceCount != wantFaces {
+		t.Fatalf("fragments contain %d faces, want hull faces plus fracture caps (%d)", faceCount, wantFaces)
 	}
 }
 

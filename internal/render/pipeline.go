@@ -22,17 +22,26 @@ type Point struct {
 	Depth float64
 }
 
-// Stats records work performed by one or more Render calls. A pointer can be
-// attached to Pipeline during development; nil keeps the hot path lightweight.
+// Stats records work performed by one or more Render calls and frame-level
+// submission timings. A pointer can be attached to Pipeline during
+// development; nil keeps the hot path lightweight.
 type Stats struct {
-	InputVertices, TransformedVertices int
-	InputEdges, OutputEdges            int
-	TinyEdges                          int
-	InputFaces                         int
-	BackfaceRejected, PolicyRejected  int
-	DepthRejected, ClippedEdges        int
-	ObjectsInput, ObjectsCulled        int
-	ObjectsVisible                     int
+	InputVertices, TransformedVertices               int
+	InputEdges, OutputEdges                          int
+	TinyEdges                                        int
+	InputFaces                                       int
+	BackfaceRejected, PolicyRejected                 int
+	DepthRejected, ClippedEdges                      int
+	ObjectsInput, ObjectsCulled                      int
+	ObjectsVisible                                   int
+	BillboardObjects, BillboardLines                 int
+	BillboardBatches                                 int
+	StarsConsidered, StarsAnalyticRejected           int
+	StarsGeometryRejected, StarsSubmitted            int
+	ActiveAnalyticOccluders, ActiveGeometryOccluders int
+	WorldBatches                                     int
+	DepthRasterMS, GeometryMS                        float64
+	VectorSubmitMS                                   float64
 }
 
 // Ray describes a world-space half-line produced by a screen-space aim point.
@@ -107,7 +116,9 @@ func DepthCueStage() Stage {
 func removeInternalEdges(v []math3d.Vec3, mesh model.Model, edges []model.Edge) []model.Edge {
 	out := make([]model.Edge, 0, len(edges))
 	for _, edge := range edges {
-		if edge.Kind == model.EdgeInternal { continue }
+		if edge.Kind == model.EdgeInternal {
+			continue
+		}
 		out = append(out, edge)
 	}
 	return out
@@ -129,7 +140,9 @@ func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []m
 			n = b.Sub(a).Cross(c.Sub(a)).Normalize()
 		}
 		center := math3d.Vec3{}
-		for _, vertex := range face.Vertices { center = center.Add(verts[vertex]) }
+		for _, vertex := range face.Vertices {
+			center = center.Add(verts[vertex])
+		}
 		center = center.Scale(1 / float64(len(face.Vertices)))
 		front[faceIndex] = n.Dot(center.Scale(-1)) > 1e-9 || face.DoubleSided
 	}
@@ -165,17 +178,17 @@ func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []m
 
 // Pipeline contains the configurable stages of the wireframe renderer.
 type Pipeline struct {
-	Width      int
-	Height     int
-	Near       float64
-	Far        float64
-	View       math3d.Mat4
-	Projection math3d.Mat4
-	Culler     Culler
-	Stages     []Stage
+	Width         int
+	Height        int
+	Near          float64
+	Far           float64
+	View          math3d.Mat4
+	Projection    math3d.Mat4
+	Culler        Culler
+	Stages        []Stage
 	MinLinePixels float64
-	DepthBias  float64
-	Stats      *Stats
+	DepthBias     float64
+	Stats         *Stats
 }
 
 func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
@@ -217,6 +230,11 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 
 	viewWorld := p.View.Mul(world)
 	prepared := model.Prepare(mesh)
+	// Decorative line-art models (laser bolts, reticles, and similar effects)
+	// have no surface topology to occlude against. Avoid sending their long
+	// rays through the expensive depth sampler even when a depth buffer is
+	// active for the surrounding scene.
+	useDepth := depth != nil && !prepared.SkipDepth
 	stageMesh := prepared
 	if len(prepared.Faces) > 0 {
 		stageMesh.Faces = append([]model.Face(nil), prepared.Faces...)
@@ -225,14 +243,21 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 		}
 	}
 	verts := make([]math3d.Vec3, len(prepared.Verts))
-	if p.Stats != nil { p.Stats.InputVertices += len(mesh.Verts); p.Stats.TransformedVertices += len(mesh.Verts) }
-	if p.Stats != nil { p.Stats.InputFaces += len(mesh.Faces) }
+	if p.Stats != nil {
+		p.Stats.InputVertices += len(mesh.Verts)
+		p.Stats.TransformedVertices += len(mesh.Verts)
+	}
+	if p.Stats != nil {
+		p.Stats.InputFaces += len(mesh.Faces)
+	}
 	for index, vertex := range prepared.Verts {
 		verts[index] = viewWorld.TransformPoint(vertex)
 	}
 
 	edges := mesh.Edges
-	if p.Stats != nil { p.Stats.InputEdges += len(edges) }
+	if p.Stats != nil {
+		p.Stats.InputEdges += len(edges)
+	}
 	if p.Culler != nil {
 		edges = p.Culler.Cull(verts, edges)
 	}
@@ -281,20 +306,26 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 		}
 		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
 			segments := []Line{clipped}
-			if depth != nil {
+			if useDepth {
 				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias)
-				if len(segments) == 0 && p.Stats != nil { p.Stats.DepthRejected++ }
+				if len(segments) == 0 && p.Stats != nil {
+					p.Stats.DepthRejected++
+				}
 			}
 			for _, segment := range segments {
 				if p.MinLinePixels > 0 && math.Hypot(segment.X2-segment.X1, segment.Y2-segment.Y1) < p.MinLinePixels {
-					if p.Stats != nil { p.Stats.TinyEdges++ }
+					if p.Stats != nil {
+						p.Stats.TinyEdges++
+					}
 					continue
 				}
 				lines = append(lines, segment)
 			}
 		}
 	}
-	if p.Stats != nil { p.Stats.OutputEdges += len(lines) }
+	if p.Stats != nil {
+		p.Stats.OutputEdges += len(lines)
+	}
 	return lines
 }
 
@@ -304,8 +335,12 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64) []Line {
 	length := math.Hypot(line.X2-line.X1, line.Y2-line.Y1)
 	samples := int(math.Ceil(length / 6))
-	if samples < 4 { samples = 4 }
-	if samples > 64 { samples = 64 }
+	if samples < 4 {
+		samples = 4
+	}
+	if samples > 64 {
+		samples = 64
+	}
 	visibleAt := func(t float64) bool {
 		x := int(math.Round(line.X1 + (line.X2-line.X1)*t))
 		y := int(math.Round(line.Y1 + (line.Y2-line.Y1)*t))
@@ -333,7 +368,9 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 			running = false
 		}
 	}
-	if running { segments = append(segments, interpolateLine(line, runStart, 1)) }
+	if running {
+		segments = append(segments, interpolateLine(line, runStart, 1))
+	}
 	return segments
 }
 
@@ -350,6 +387,17 @@ func interpolateLine(line Line, start, end float64) Line {
 // perspective matrices. It reports false for points behind the near plane or
 // outside the screen.
 func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
+	point, visible := p.ProjectPointUnclipped(world)
+	if !visible || point.X < 0 || point.X > float64(p.Width) || point.Y < 0 || point.Y > float64(p.Height) {
+		return Point{}, false
+	}
+	return point, true
+}
+
+// ProjectPointUnclipped applies the camera and perspective transforms while
+// retaining points outside the viewport. Large analytic occluders can still
+// intersect the screen when their centre is off-screen.
+func (p Pipeline) ProjectPointUnclipped(world math3d.Vec3) (Point, bool) {
 	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 {
 		return Point{}, false
 	}
@@ -358,14 +406,22 @@ func (p Pipeline) ProjectPoint(world math3d.Vec3) (Point, bool) {
 		return Point{}, false
 	}
 	projected := p.Projection.TransformPoint(cameraPoint)
-	if projected.X < -1 || projected.X > 1 || projected.Y < -1 || projected.Y > 1 {
-		return Point{}, false
-	}
 	return Point{
 		X:     (projected.X + 1) * 0.5 * float64(p.Width),
 		Y:     (1 - projected.Y) * 0.5 * float64(p.Height),
 		Depth: -cameraPoint.Z,
 	}, true
+}
+
+// CameraPosition returns the world-space origin of the rigid view transform.
+// It is useful for directional skyfields and other camera-relative effects.
+func (p Pipeline) CameraPosition() math3d.Vec3 {
+	translation := math3d.Vec3{X: p.View[0][3], Y: p.View[1][3], Z: p.View[2][3]}
+	return math3d.Vec3{
+		X: -(p.View[0][0]*translation.X + p.View[1][0]*translation.Y + p.View[2][0]*translation.Z),
+		Y: -(p.View[0][1]*translation.X + p.View[1][1]*translation.Y + p.View[2][1]*translation.Z),
+		Z: -(p.View[0][2]*translation.X + p.View[1][2]*translation.Y + p.View[2][2]*translation.Z),
+	}
 }
 
 func clipFar(a, b math3d.Vec3, far float64) (math3d.Vec3, math3d.Vec3, bool) {
@@ -484,6 +540,12 @@ func clipScreen(line Line, width, height float64) (Line, bool) {
 			line.X2, line.Y2 = x, y
 		}
 	}
+}
+
+// ClipLineToViewport exposes the renderer's viewport clipping for camera-facing
+// vector artwork that is projected outside the normal mesh pipeline.
+func ClipLineToViewport(line Line, width, height float64) (Line, bool) {
+	return clipScreen(line, width, height)
 }
 
 func clipCode(x, y, width, height float64) int {

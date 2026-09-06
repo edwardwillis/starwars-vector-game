@@ -62,3 +62,37 @@ func TestProjectReturnsOnlyVisibleStars(t *testing.T) {
 		t.Fatalf("unexpected projected star: %+v", points[0])
 	}
 }
+
+func TestProjectFiltersStarsThroughPointOccluder(t *testing.T) {
+	field := &Field{
+		Radius: 20,
+		Stars: []Star{
+			{Position: math3d.Vec3{X: 0, Z: -5}, Brightness: 255, Size: 1},
+			{Position: math3d.Vec3{X: 2, Z: -5}, Brightness: 255, Size: 1},
+		},
+	}
+	pipeline := render.NewPipeline(100, 100, math.Pi/2, 0.1, 100)
+	occluder := render.CircleOccluder{CenterX: 50, CenterY: 50, Radius: 4, Depth: 2}
+	points := field.ProjectInto(pipeline, nil, occluder)
+	if len(points) != 1 {
+		t.Fatalf("Project returned %d stars, want one visible through the occluder", len(points))
+	}
+}
+
+func TestSkyfieldProjectsStarsAtConfiguredDistance(t *testing.T) {
+	field := &Field{
+		Radius: 10,
+		Center: math3d.Vec3{},
+		Mode: ModeSkyfield,
+		SkyDistance: 50,
+		Stars: []Star{{Position: math3d.Vec3{Z: -1}, Direction: math3d.Vec3{Z: -1}, Brightness: 255, Size: 1}},
+	}
+	pipeline := render.NewPipeline(100, 100, math.Pi/2, .1, 100)
+	points := field.Project(pipeline)
+	if len(points) != 1 {
+		t.Fatalf("skyfield projected %d stars, want one", len(points))
+	}
+	if math.Abs(points[0].Depth-50) > 1e-9 {
+		t.Fatalf("skyfield depth=%v, want 50", points[0].Depth)
+	}
+}

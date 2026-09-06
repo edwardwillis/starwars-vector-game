@@ -46,6 +46,7 @@ type PursuitConfig struct {
 	MinSpeed            float64
 	MaxSpeed            float64
 	Acceleration        float64
+	TurnAcceleration    float64
 	ApproachGain        float64
 	TurnGain            float64
 	MaxYawRate          float64
@@ -85,6 +86,7 @@ func DefaultPursuitConfig() PursuitConfig {
 		MinSpeed:            0.15,
 		MaxSpeed:            1.15,
 		Acceleration:        0.55,
+		TurnAcceleration:    2.4,
 		ApproachGain:        0.12,
 		TurnGain:            1.35,
 		MaxYawRate:          0.7,

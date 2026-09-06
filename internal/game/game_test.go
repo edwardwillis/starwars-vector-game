@@ -87,6 +87,54 @@ func TestGameStartsInCockpitAtMaximumForwardSpeed(t *testing.T) {
 	}
 }
 
+func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
+	g := New()
+	target := g.initialPose
+	if !g.beginHyperspaceArrival(target) {
+		t.Fatal("orbital fighter did not start hyperspace arrival")
+	}
+	if g.hyperspaceArrival == nil || g.viewCamera.Mode != camera.Chase {
+		t.Fatalf("arrival state=%+v view=%v, want chase presentation", g.hyperspaceArrival, g.viewCamera.Mode)
+	}
+	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Pose.Position == target.Position || fighter.Motion.Speed != 0 {
+		t.Fatalf("arrival did not place fighter at a stationary entry pose: %+v", fighter)
+	}
+	g.advanceHyperspaceArrival(g.profile.Simulation.HyperspaceArrivalTime)
+	if g.hyperspaceArrival != nil {
+		t.Fatal("arrival remained active after its configured duration")
+	}
+	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Pose.Position != target.Position || fighter.Motion.Speed != g.autoMotion.Speed {
+		t.Fatalf("arrival did not restore target pose/motion: %+v", fighter)
+	}
+	if g.viewCamera.Mode != camera.Cockpit {
+		t.Fatalf("arrival restored view %v, want original cockpit view", g.viewCamera.Mode)
+	}
+
+	fighter := g.objectByID(fighterID)
+	fighter.Frame = scene.FrameID("death-star/surface")
+	if g.beginHyperspaceArrival(target) {
+		t.Fatal("surface-frame fighter incorrectly started orbital arrival")
+	}
+}
+
+func TestStartedResetBeginsOrbitalArrival(t *testing.T) {
+	g := New()
+	g.started = true
+	g.resetFighter()
+	if g.hyperspaceArrival == nil {
+		t.Fatal("started orbital reset did not begin hyperspace arrival")
+	}
+	fighter := g.objectByID(fighterID)
+	if fighter == nil || normalizedObjectFrame(*fighter) != scene.ExteriorFrame {
+		t.Fatalf("reset fighter frame=%v, want exterior", func() scene.FrameID {
+			if fighter == nil {
+				return "<missing>"
+			}
+			return fighter.Frame
+		}())
+	}
+}
+
 func TestShieldDamageAndRechargeRules(t *testing.T) {
 	g := New()
 	if g.shieldStrength != g.profile.Player.Shield.Maximum {

@@ -103,6 +103,24 @@ func TestXWingSelfDepthDoesNotEraseItsWingEdges(t *testing.T) {
 	}
 }
 
+func TestDepthPassSkipsDecorativeLineArt(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	mesh := model.Model{
+		Verts:     []math3d.Vec3{{X: -1, Z: -5}, {X: 1, Z: -5}},
+		Edges:     []model.Edge{{A: 0, B: 1, Kind: model.EdgeDecorative}},
+		SkipDepth: true,
+	}
+	depth := NewDepthBuffer(800, 600)
+	for index := range depth.Values {
+		depth.Values[index] = 1
+	}
+	withoutDepth := pipeline.Render(mesh, math3d.Identity())
+	withDepth := pipeline.RenderWithDepth(mesh, math3d.Identity(), depth)
+	if len(withDepth) != len(withoutDepth) {
+		t.Fatalf("decorative depth render returned %d lines, want %d", len(withDepth), len(withoutDepth))
+	}
+}
+
 func TestRenderRejectsEdgeBehindNearPlane(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 1, 100)
 	mesh := model.Model{
