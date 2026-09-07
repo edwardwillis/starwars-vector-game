@@ -39,6 +39,25 @@ func TestDefaultRegistryCreatesXWingLifecycleObjects(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryCreatesMillenniumFalconLifecycleObjects(t *testing.T) {
+	r := DefaultRegistry()
+	object, err := r.Create(MillenniumFalconName, 15, kinematics.Pose{})
+	if err != nil || object.Definition != MillenniumFalconName {
+		t.Fatalf("create Millennium Falcon: %v, definition=%q", err, object.Definition)
+	}
+	fragment, err := r.CreateFragment(MillenniumFalconName, 16, 0, kinematics.Pose{})
+	if err != nil || fragment.Definition != MillenniumFalconName {
+		t.Fatalf("create Millennium Falcon fragment: %v", err)
+	}
+	count, err := r.PolygonCount(MillenniumFalconName, 0)
+	if err != nil || count == 0 {
+		t.Fatalf("Falcon polygon count: %d, %v", count, err)
+	}
+	if _, err := r.CreatePolygon(MillenniumFalconName, 17, 0, 0, kinematics.Pose{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDefaultRegistryCreatesTIEInterceptorLifecycleObjects(t *testing.T) {
 	r := DefaultRegistry()
 	object, err := r.Create(TIEInterceptorName, 12, kinematics.Pose{})

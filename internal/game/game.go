@@ -352,13 +352,19 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 }
 
 func (g *Game) createShowcaseObjects() []scene.Object {
-	objects := make([]scene.Object, 0, 3)
-	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName} {
+	objects := make([]scene.Object, 0, 4)
+	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.MillenniumFalconName} {
 		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
 			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
 		})
 		if err == nil {
 			scale := 1.65
+			// The Falcon is correctly much larger in gameplay units than a
+			// fighter; use a smaller showcase distance scale so its full outline
+			// remains readable inside the selector frame.
+			if definition == catalog.MillenniumFalconName {
+				scale = 0.68
+			}
 			for partIndex := range object.Parts {
 				object.Parts[partIndex].Mesh = modelpkg.Transform(object.Parts[partIndex].Mesh, math3d.Scaling(scale, scale, scale))
 			}

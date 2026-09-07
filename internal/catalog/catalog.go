@@ -18,39 +18,57 @@ var (
 	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
-	tieFighterGeometry          = model.TIEFighterGeometryData()
-	tieFighterCore              = model.Transform(tieFighterGeometry.Core, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterLeftFoil          = model.Transform(tieFighterGeometry.LeftFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterRightFoil         = model.Transform(tieFighterGeometry.RightFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterWindow            = model.Transform(tieFighterGeometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterDebris            = transformTIEFighterFragments(tieFighterGeometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	xWingGeometry               = model.XWingGeometryData()
-	xWingFoilAssemblies         = xWingGeometry.Foils
-	xWingWindow                 = xWingGeometry.Window
-	xWingDebris                 = xWingGeometry.Fragments
-	laserBoltRays               = model.LaserBoltRays()
-	laserBoltTips               = model.LaserBoltBranches()
-	tieFighterPolygonShards     = buildTIEFighterPolygonShards()
-	tieInterceptorGeometry      = model.TIEInterceptorGeometryData()
-	tieInterceptorCockpit       = model.Transform(tieInterceptorGeometry.Cockpit, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPylons        = model.Transform(tieInterceptorGeometry.Pylons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorWindow        = model.Transform(tieInterceptorGeometry.Window, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPanels        = transformTIEInterceptorParts(tieInterceptorGeometry.Panels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorEndPanels     = transformTIEInterceptorEndPanels(tieInterceptorGeometry.EndPanels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorCannons       = transformTIEInterceptorParts(tieInterceptorGeometry.Cannons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorDebris        = transformTIEInterceptorFragments(tieInterceptorGeometry.Fragments, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPolygonShards = buildTIEInterceptorPolygonShards()
-	deathStarGeometry           = model.DeathStar(300)
+	tieFighterGeometry            = model.TIEFighterGeometryData()
+	tieFighterCore                = model.Transform(tieFighterGeometry.Core, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterLeftFoil            = model.Transform(tieFighterGeometry.LeftFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterRightFoil           = model.Transform(tieFighterGeometry.RightFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterWindow              = model.Transform(tieFighterGeometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterDebris              = transformTIEFighterFragments(tieFighterGeometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	xWingGeometry                 = model.XWingGeometryData()
+	xWingFoilAssemblies           = xWingGeometry.Foils
+	xWingWindow                   = xWingGeometry.Window
+	xWingDebris                   = xWingGeometry.Fragments
+	laserBoltRays                 = model.LaserBoltRays()
+	laserBoltTips                 = model.LaserBoltBranches()
+	tieFighterPolygonShards       = buildTIEFighterPolygonShards()
+	tieInterceptorGeometry        = model.TIEInterceptorGeometryData()
+	tieInterceptorCockpit         = model.Transform(tieInterceptorGeometry.Cockpit, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPylons          = model.Transform(tieInterceptorGeometry.Pylons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorWindow          = model.Transform(tieInterceptorGeometry.Window, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPanels          = transformTIEInterceptorParts(tieInterceptorGeometry.Panels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorEndPanels       = transformTIEInterceptorEndPanels(tieInterceptorGeometry.EndPanels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorCannons         = transformTIEInterceptorParts(tieInterceptorGeometry.Cannons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorDebris          = transformTIEInterceptorFragments(tieInterceptorGeometry.Fragments, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPolygonShards   = buildTIEInterceptorPolygonShards()
+	millenniumFalconStations      = model.MillenniumFalconStationsData()
+	millenniumFalconGeometry      = model.MillenniumFalconGeometryData()
+	millenniumFalconHull          = model.Transform(millenniumFalconGeometry.Hull, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconLeftMandible  = model.Transform(millenniumFalconGeometry.LeftMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconRightMandible = model.Transform(millenniumFalconGeometry.RightMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconCorridor      = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconCockpit       = model.Transform(millenniumFalconGeometry.Cockpit, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconWindow        = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconTurrets       = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconEngine        = model.Transform(millenniumFalconGeometry.Engine, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconDetails       = model.Transform(millenniumFalconGeometry.Details, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconDebris        = transformMillenniumFalconFragments(millenniumFalconGeometry.Fragments, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconPolygonShards = buildMillenniumFalconPolygonShards()
+	deathStarGeometry             = model.DeathStar(300)
 )
 
 const tieFighterScale = 0.72
 const tieInterceptorScale = 0.85
+
+// Falcon geometry is authored directly in gameplay units so its 34.75 m
+// length is approximately 2.8 times the 12.5 m X-Wing model.
+const millenniumFalconScale = 1.0
 
 const (
 	CubeName                    = "builtin/cube"
 	TIEFighterName              = "builtin/tie-fighter"
 	TIEInterceptorName          = "builtin/tie-interceptor"
 	XWingName                   = "builtin/x-wing"
+	MillenniumFalconName        = "builtin/millennium-falcon"
 	LaserBoltName               = "builtin/laser-bolt"
 	DeathStarName               = "builtin/death-star"
 	TIEInterceptorAppearance    = "builtin/tie-interceptor-model"
@@ -73,6 +91,12 @@ func SpecificationFor(definition string) (Specification, bool) {
 		return Specification{Title: "IMPERIAL TIE FIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "PRIMARY IMPERIAL SPACE", Description2: "SUPERIORITY FIGHTER", Length: "6.3 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "1200 KM PER HOUR", Hyperdrive: "NO", Weapons: "2 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
 	case TIEInterceptorName:
 		return Specification{Title: "IMPERIAL TIE INTERCEPTOR", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "FAST IMPERIAL INTERCEPTOR", Description2: "FOR HIGH-SPEED PURSUIT", Length: "9.6 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "111 MGLT", Hyperdrive: "NO", Weapons: "4 SFS L-S9.3 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
+	case MillenniumFalconName:
+		// Baseline values combine the official Databank length, the official
+		// Ships of the Galaxy weapon fit, and the UCS/blueprint reference for
+		// speed and hyperdrive class. They describe the familiar modified YT-1300
+		// rather than every film-era configuration.
+		return Specification{Title: "MILLENNIUM FALCON", Type: "YT-1300F LIGHT FREIGHTER", Role: "REBEL ALLIANCE", Description: "MODIFIED CORELLIAN LIGHT FREIGHTER", Description2: "FASTEST HUNK OF JUNK IN THE GALAXY", Length: "34.75 METERS", Crew: "1 PILOT 1 CO-PILOT 2 GUNNERS", Passengers: "6", MaxSpeed: "1050 KM PER HOUR", Hyperdrive: "CLASS 0.5", Weapons: "2 CEC AG-2G QUAD LASER CANNONS", Ordnance: "2 CONCUSSION MISSILE TUBES", Shields: "YES"}, true
 	default:
 		return Specification{}, false
 	}
@@ -456,6 +480,87 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 		Parts:         []scene.Part{{Name: "polygon", Mesh: template.mesh, Color: template.color, LineWidth: standardLineWidth}},
 		CollisionRole: scene.CollisionDebris, CollisionRadius: 0.15, DestructionStage: scene.DestructionPolygon,
 	}
+}
+
+// MillenniumFalcon returns the multipart Rebel freighter with a closed hull,
+// split mandibles, offset cockpit, quad turrets, engine grille, and sensor dish.
+func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	return scene.Object{
+		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Pose: pose,
+		Parts: []scene.Part{
+			{Name: "saucer hull", Mesh: millenniumFalconHull, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "left forward mandible", Mesh: millenniumFalconLeftMandible, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "right forward mandible", Mesh: millenniumFalconRightMandible, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "cockpit corridor", Mesh: millenniumFalconCorridor, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "offset cockpit", Mesh: millenniumFalconCockpit, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "quad laser turrets", Mesh: millenniumFalconTurrets, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "aft engine grille", Mesh: millenniumFalconEngine, Color: vectorBlue, LineWidth: standardLineWidth},
+			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, Detail: scene.DetailMedium},
+			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth},
+		},
+		Anchors: map[string]kinematics.Pose{
+			"center":             {Orientation: math3d.IdentityQuaternion()},
+			"cockpit":            {Position: millenniumFalconStations.CockpitCenter, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"corridor-origin":    {Position: millenniumFalconStations.CorridorOrigin, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"corridor-bend":      {Position: millenniumFalconStations.CorridorBend, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"windscreen-mount":   {Position: millenniumFalconStations.WindscreenMount, Orientation: math3d.IdentityQuaternion()},
+			"sensor-dish":        {Position: millenniumFalconStations.SensorDish, Orientation: math3d.IdentityQuaternion()},
+			"chase":              {Position: math3d.Vec3{Y: 2.4, Z: -7.2}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+			"muzzle-upper-left":  {Position: math3d.Vec3{X: -0.20, Y: 0.72, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-upper-right": {Position: math3d.Vec3{X: 0.20, Y: 0.72, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-lower-left":  {Position: math3d.Vec3{X: -0.20, Y: -0.72, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
+			"muzzle-lower-right": {Position: math3d.Vec3{X: 0.20, Y: -0.72, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
+		},
+		CollisionRole: scene.CollisionSolid, CollisionRadius: 6.4,
+		Physical: true, Hittable: true, Targetable: true, Destructible: true,
+		DestructionStage: scene.DestructionIntact, VisualRadius: 6.8,
+		DetailThresholds: scene.DetailThresholds{MediumPixels: 44, NearPixels: 125},
+	}
+}
+
+func MillenniumFalconFragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
+	if index < 0 || index >= len(millenniumFalconDebris) {
+		panic("catalog: Millennium Falcon fragment index out of range")
+	}
+	return scene.Object{ID: id, Name: "Millennium Falcon debris", Definition: MillenniumFalconName, Pose: pose,
+		Parts:         []scene.Part{{Name: "fragment", Mesh: millenniumFalconDebris[index], Color: vectorGreen, LineWidth: standardLineWidth}},
+		CollisionRole: scene.CollisionDebris, CollisionRadius: 1.55, Hittable: true, Destructible: true,
+		DestructionStage: scene.DestructionComponent}
+}
+
+func transformMillenniumFalconFragments(source [3]model.Model, transform math3d.Mat4) [3]model.Model {
+	var result [3]model.Model
+	for index, fragment := range source {
+		result[index] = model.Transform(fragment, transform)
+	}
+	return result
+}
+
+func buildMillenniumFalconPolygonShards() [3][]polygonShardTemplate {
+	var shards [3][]polygonShardTemplate
+	for component := range millenniumFalconDebris {
+		for _, polygon := range millenniumFalconDebris[component].PolygonModels() {
+			shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: vectorGreen})
+		}
+	}
+	return shards
+}
+
+func MillenniumFalconPolygonCount(component int) int {
+	if component < 0 || component >= len(millenniumFalconPolygonShards) {
+		return 0
+	}
+	return len(millenniumFalconPolygonShards[component])
+}
+
+func MillenniumFalconPolygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
+	if component < 0 || component >= len(millenniumFalconPolygonShards) || polygon < 0 || polygon >= len(millenniumFalconPolygonShards[component]) {
+		panic("catalog: Millennium Falcon polygon index out of range")
+	}
+	template := millenniumFalconPolygonShards[component][polygon]
+	return scene.Object{ID: id, Name: "Millennium Falcon polygon shard", Definition: MillenniumFalconName, Pose: pose,
+		Parts:         []scene.Part{{Name: "polygon", Mesh: template.mesh, Color: template.color, LineWidth: standardLineWidth}},
+		CollisionRole: scene.CollisionDebris, CollisionRadius: 0.15, DestructionStage: scene.DestructionPolygon}
 }
 
 // ProjectileStyle controls a projectile's visual identity independently of

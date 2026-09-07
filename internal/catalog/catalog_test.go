@@ -74,6 +74,47 @@ func TestTIEInterceptorReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
+func TestMillenniumFalconReturnsValidMultipartObject(t *testing.T) {
+	fighter := MillenniumFalcon(1, kinematics.Pose{})
+	if err := fighter.Validate(); err != nil {
+		t.Fatalf("MillenniumFalcon returned an invalid object: %v", err)
+	}
+	if len(fighter.Parts) != 9 {
+		t.Fatalf("Millennium Falcon returned %d parts, want 9", len(fighter.Parts))
+	}
+	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
+		!fighter.Physical || !fighter.Hittable || !fighter.Targetable || !fighter.Destructible {
+		t.Fatalf("Falcon has incorrect collision metadata")
+	}
+	if fighter.Parts[0].SelfOccluding || !fighter.Parts[7].SelfOccluding {
+		t.Fatal("Falcon hull should use shared depth while the sensor dish uses self-occluding depth")
+	}
+	for _, name := range []string{"center", "cockpit", "chase", "muzzle-upper-left", "muzzle-upper-right", "muzzle-lower-left", "muzzle-lower-right"} {
+		if _, ok := fighter.Anchor(name); !ok {
+			t.Fatalf("Falcon is missing %q anchor", name)
+		}
+	}
+}
+
+func TestMillenniumFalconSpecificationUsesFullReferenceFields(t *testing.T) {
+	spec, ok := SpecificationFor(MillenniumFalconName)
+	if !ok {
+		t.Fatal("Millennium Falcon specification is not registered")
+	}
+	for field, value := range map[string]string{
+		"title":      spec.Title,
+		"length":     spec.Length,
+		"max speed":  spec.MaxSpeed,
+		"hyperdrive": spec.Hyperdrive,
+		"weapons":    spec.Weapons,
+		"ordnance":   spec.Ordnance,
+	} {
+		if value == "" {
+			t.Fatalf("Millennium Falcon %s specification is empty", field)
+		}
+	}
+}
+
 func TestTIEInterceptorInstancesShareImmutableGeometry(t *testing.T) {
 	first := TIEInterceptor(1, kinematics.Pose{})
 	second := TIEInterceptor(2, kinematics.Pose{})
