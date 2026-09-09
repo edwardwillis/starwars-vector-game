@@ -100,6 +100,48 @@ func TestXWingSelfDepthDoesNotEraseItsWingEdges(t *testing.T) {
 		if len(withOwnDepth) != len(withoutDepth) {
 			t.Fatalf("yaw %.2f: self depth reduced X-Wing edges from %d to %d", yaw, len(withoutDepth), len(withOwnDepth))
 		}
+		withInteriorPolicy := pipeline.RenderWithDepthPolicy(mesh, world, depth, 41, SelfOcclusionInterior)
+		if len(withInteriorPolicy)*10 < len(withoutDepth)*9 {
+			t.Fatalf("yaw %.2f: interior policy reduced too many manifold X-Wing edges from %d to %d", yaw, len(withoutDepth), len(withInteriorPolicy))
+		}
+	}
+}
+
+func TestMillenniumFalconCompositeHullUsesSelfDepth(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
+	mesh := model.MillenniumFalconGeometryData().Hull
+	world := math3d.Translation(0, 0, -24).Mul(math3d.RotationY(0.55))
+	withoutDepth := pipeline.Render(mesh, world)
+	depth := NewDepthBuffer(800, 600)
+	pipeline.RasterizeDepthOwned(mesh, world, depth, 77)
+	withDepth := pipeline.RenderWithDepthPolicy(mesh, world, depth, 77, SelfOcclusionAll)
+	if len(withoutDepth) == 0 || len(withDepth) == 0 {
+		t.Fatalf("Falcon composite hull vanished: without depth=%d with depth=%d", len(withoutDepth), len(withDepth))
+	}
+	if len(withDepth) >= len(withoutDepth) {
+		t.Fatalf("Falcon composite hull depth pass removed no rear edges: without depth=%d with depth=%d", len(withoutDepth), len(withDepth))
+	}
+}
+
+func TestInteriorSelfOcclusionPreservesManifoldEdges(t *testing.T) {
+	verts := []math3d.Vec3{{X: -1, Z: -5}, {X: 1, Z: -5}, {Y: 1, Z: -5}, {X: 2, Z: -5}}
+	mesh := model.Model{
+		Verts: verts,
+		Faces: []model.Face{
+			{Vertices: []int{0, 1, 2}, Normal: math3d.Vec3{Z: 1}},
+			{Vertices: []int{1, 3, 2}, Normal: math3d.Vec3{Z: 1}},
+			{Vertices: []int{0, 1, 3}, Normal: math3d.Vec3{Z: 1}},
+		},
+	}
+	prepared := model.Prepare(mesh)
+	shared := model.Edge{A: 1, B: 2, AdjacentFaces: []int{0, 1}}
+	if !interiorSelfOcclusionEdge(prepared, verts, shared) {
+		t.Fatal("shared front-facing edge was not classified for self-occlusion")
+	}
+	boundary := model.Edge{A: 0, B: 1, AdjacentFaces: []int{0}}
+	if interiorSelfOcclusionEdge(prepared, verts, boundary) {
+		t.Fatal("boundary edge was incorrectly classified for self-occlusion")
 	}
 }
 

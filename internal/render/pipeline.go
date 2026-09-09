@@ -22,6 +22,17 @@ type Point struct {
 	Depth float64
 }
 
+// SelfOcclusionMode controls whether a line may be hidden by the same solid
+// that produced it. Interior mode tests shared front-facing edges while
+// preserving silhouettes and open boundaries; All also tests those boundaries.
+type SelfOcclusionMode uint8
+
+const (
+	SelfOcclusionNone SelfOcclusionMode = iota
+	SelfOcclusionInterior
+	SelfOcclusionAll
+)
+
 // Stats records work performed by one or more Render calls and frame-level
 // submission timings. A pointer can be attached to Pipeline during
 // development; nil keeps the hot path lightweight.
@@ -206,7 +217,7 @@ func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
 // Render transforms a model into visible screen-space lines. The camera uses a
 // right-handed coordinate system and looks down negative Z.
 func (p Pipeline) Render(mesh model.Model, world math3d.Mat4) []Line {
-	return p.renderLines(mesh, world, nil, 0)
+	return p.renderLines(mesh, world, nil, 0, SelfOcclusionNone)
 }
 
 // RenderWithDepth applies the same vector pipeline while rejecting line
@@ -220,10 +231,20 @@ func (p Pipeline) RenderWithDepth(mesh model.Model, world math3d.Mat4, depth *De
 // parts of one object, allowing a nearer panel to hide a rear body while a
 // part's own structural edges remain stable.
 func (p Pipeline) RenderWithDepthOwned(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64) []Line {
-	return p.renderLines(mesh, world, depth, owner)
+	mode := SelfOcclusionNone
+	if owner == 0 {
+		mode = SelfOcclusionAll
+	}
+	return p.renderLines(mesh, world, depth, owner, mode)
 }
 
-func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64) []Line {
+// RenderWithDepthPolicy renders with an explicit self-occlusion policy while
+// retaining owner-based inter-object depth tests.
+func (p Pipeline) RenderWithDepthPolicy(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64, mode SelfOcclusionMode) []Line {
+	return p.renderLines(mesh, world, depth, owner, mode)
+}
+
+func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64, selfOcclusion SelfOcclusionMode) []Line {
 	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 {
 		return nil
 	}
@@ -307,7 +328,7 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
 			segments := []Line{clipped}
 			if useDepth {
-				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias)
+				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge)
 				if len(segments) == 0 && p.Stats != nil {
 					p.Stats.DepthRejected++
 				}
@@ -332,7 +353,26 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 // visibleDepthSegments samples a projected edge against the CPU depth surface
 // and returns visible intervals. Sampling keeps final drawing vector-based while
 // allowing a line to disappear only where it passes behind another surface.
-func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64) []Line {
+func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64, mode SelfOcclusionMode, mesh model.Model, verts []math3d.Vec3, edge model.Edge) []Line {
+	sampleOwner := owner
+	selfSample := mode == SelfOcclusionAll || (mode == SelfOcclusionInterior && interiorSelfOcclusionEdge(mesh, verts, edge))
+	if selfSample {
+		// Owner zero includes this part's own depth. Interior mode reaches this
+		// path only for interior shared edges; silhouettes and boundaries keep
+		// the normal other-object query.
+		sampleOwner = 0
+	}
+	sampleRadius := 1
+	if selfSample && mode == SelfOcclusionInterior {
+		// Interior mode is used for shared structural edges, where a neighboring
+		// face can otherwise erase a legitimate crease. Full-solid mode retains a
+		// one-pixel neighborhood so rear rings on raster boundaries are occluded.
+		sampleRadius = 0
+	} else if selfSample && mode == SelfOcclusionAll {
+		// Keep the neighborhood tight for opaque solids. A wider search expands
+		// thin plates into neighboring screen pixels and causes over-occlusion.
+		sampleRadius = 1
+	}
 	length := math.Hypot(line.X2-line.X1, line.Y2-line.Y1)
 	samples := int(math.Ceil(length / 6))
 	if samples < 4 {
@@ -351,8 +391,14 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 		// Use a small relative bias: the line is normally coplanar with the
 		// surface that produced the depth sample, and numerical/raster coverage
 		// error should not make that structural edge sparkle or disappear.
-		bias := math.Max(baseBias, lineDepth*0.003)
-		return depth.nearestOtherAt(x, y, 1, owner)+bias >= lineDepth
+		bias := math.Max(baseBias, lineDepth*0.006)
+		if selfSample && mode == SelfOcclusionInterior {
+			// Interior mode is reserved for authored crease strokes. Preserve
+			// those when a neighboring coplanar face lands on the same sample;
+			// fully opaque compound solids use only the small normal tolerance.
+			bias = math.Max(bias, lineDepth*0.10)
+		}
+		return depth.nearestOtherAt(x, y, sampleRadius, sampleOwner)+bias >= lineDepth
 	}
 	segments := make([]Line, 0, samples)
 	runStart := 0.0
@@ -372,6 +418,43 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 		segments = append(segments, interpolateLine(line, runStart, 1))
 	}
 	return segments
+}
+
+func interiorSelfOcclusionEdge(mesh model.Model, verts []math3d.Vec3, edge model.Edge) bool {
+	if edge.Kind == model.EdgeDecorative || edge.Kind == model.EdgeInternal {
+		return false
+	}
+	adjacent := edge.AdjacentFaces
+	if len(adjacent) == 0 {
+		return false
+	}
+	front := 0
+	for _, faceIndex := range adjacent {
+		if faceIndex < 0 || faceIndex >= len(mesh.Faces) {
+			continue
+		}
+		face := mesh.Faces[faceIndex]
+		if len(face.Vertices) < 3 {
+			continue
+		}
+		normal := face.Normal
+		if normal.Length() <= 1e-9 {
+			a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
+			normal = b.Sub(a).Cross(c.Sub(a)).Normalize()
+		}
+		center := math3d.Vec3{}
+		for _, vertex := range face.Vertices {
+			center = center.Add(verts[vertex])
+		}
+		center = center.Scale(1 / float64(len(face.Vertices)))
+		if face.DoubleSided || normal.Dot(center.Scale(-1)) > 1e-9 {
+			front++
+		}
+	}
+	// A shared edge with two camera-facing surfaces is interior to the visible
+	// solid and may test against its own depth. Silhouettes and open boundaries
+	// have at most one front-facing incident face and must remain visible.
+	return len(adjacent) >= 2 && front >= 2
 }
 
 func interpolateLine(line Line, start, end float64) Line {

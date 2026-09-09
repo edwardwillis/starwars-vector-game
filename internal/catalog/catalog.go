@@ -43,10 +43,7 @@ var (
 	millenniumFalconStations      = model.MillenniumFalconStationsData()
 	millenniumFalconGeometry      = model.MillenniumFalconGeometryData()
 	millenniumFalconHull          = model.Transform(millenniumFalconGeometry.Hull, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconLeftMandible  = model.Transform(millenniumFalconGeometry.LeftMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconRightMandible = model.Transform(millenniumFalconGeometry.RightMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconCorridor      = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconCockpit       = model.Transform(millenniumFalconGeometry.Cockpit, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconWindow        = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconTurrets       = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconEngine        = model.Transform(millenniumFalconGeometry.Engine, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
@@ -483,19 +480,16 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 }
 
 // MillenniumFalcon returns the multipart Rebel freighter with a closed hull,
-// split mandibles, offset cockpit, quad turrets, engine grille, and sensor dish.
+// split mandibles, offset windscreen cockpit, quad turrets, engine grille, and sensor dish.
 func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
 		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Pose: pose,
 		Parts: []scene.Part{
-			{Name: "saucer hull", Mesh: millenniumFalconHull, Color: vectorGreen, LineWidth: standardLineWidth},
-			{Name: "left forward mandible", Mesh: millenniumFalconLeftMandible, Color: vectorGreen, LineWidth: standardLineWidth},
-			{Name: "right forward mandible", Mesh: millenniumFalconRightMandible, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "saucer hull, mandibles, and cargo assembly", Mesh: millenniumFalconHull, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
 			{Name: "cockpit corridor", Mesh: millenniumFalconCorridor, Color: vectorGreen, LineWidth: standardLineWidth},
-			{Name: "offset cockpit", Mesh: millenniumFalconCockpit, Color: vectorGreen, LineWidth: standardLineWidth},
 			{Name: "quad laser turrets", Mesh: millenniumFalconTurrets, Color: vectorGreen, LineWidth: standardLineWidth},
 			{Name: "aft engine grille", Mesh: millenniumFalconEngine, Color: vectorBlue, LineWidth: standardLineWidth},
-			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, Detail: scene.DetailMedium},
+			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, Detail: scene.DetailMedium},
 			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth},
 		},
 		Anchors: map[string]kinematics.Pose{

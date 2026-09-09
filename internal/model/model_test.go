@@ -109,3 +109,26 @@ func TestPrepareRetainsNonManifoldFaceAdjacency(t *testing.T) {
 	}
 	t.Fatal("did not find shared non-manifold edge")
 }
+
+func TestPrepareCoalescesDuplicateAuthoredEdges(t *testing.T) {
+	mesh := Prepare(Model{
+		Verts: []math3d.Vec3{{X: -1}, {X: 1}, {Y: 1}, {Y: -1}},
+		Edges: []Edge{
+			{A: 0, B: 1},
+			{A: 1, B: 0},
+		},
+		Faces: []Face{
+			{Vertices: []int{0, 1, 2}},
+			{Vertices: []int{1, 0, 3}},
+		},
+	})
+	for _, edge := range mesh.Topology.Edges {
+		if edge.A == 0 && edge.B == 1 {
+			if len(edge.AdjacentFaces) != 2 {
+				t.Fatalf("coalesced edge adjacency=%v, want two faces", edge.AdjacentFaces)
+			}
+			return
+		}
+	}
+	t.Fatal("did not find coalesced shared edge")
+}

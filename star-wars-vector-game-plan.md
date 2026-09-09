@@ -970,6 +970,16 @@ controllers remain the baseline for tests and offline play.
   consistent face winding. This supplies the planes, normals, and depth needed
   by vector back-face and hidden-line algorithms while preserving the classic
   outline aesthetic.
+- Concave dish/sensor modules: do not apply a convex `OrientOutward` heuristic
+  to bowl geometry. Author or validate the opening-facing winding explicitly,
+  with front concave faces and a separately modeled rear profile (normally a
+  convex dome) when both sides can be viewed. Add rear rings/spokes as real
+  surface geometry with the correct opposite normals, rather than relying on
+  duplicated or screen-facing line art. Keep front/rear curvature, cap
+  thickness, and depth ordering explicit so back-face culling and hidden-line
+  removal show the intended detail from every orientation. This pattern is
+  reusable for future sensor dishes, turrets, engine nozzles, radar bowls, and
+  other recessed emitters.
 - Reference text: Foley, van Dam, Feiner, and Hughes, *Computer Graphics:
   Principles and Practice*, 2nd ed. (Addison-Wesley, 1990), especially the
   chapters on transformations, clipping, visible-surface determination,

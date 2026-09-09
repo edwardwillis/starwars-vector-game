@@ -79,15 +79,26 @@ func TestMillenniumFalconReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("MillenniumFalcon returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 9 {
-		t.Fatalf("Millennium Falcon returned %d parts, want 9", len(fighter.Parts))
+	if len(fighter.Parts) != 6 {
+		t.Fatalf("Millennium Falcon returned %d parts, want 6", len(fighter.Parts))
 	}
 	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
 		!fighter.Physical || !fighter.Hittable || !fighter.Targetable || !fighter.Destructible {
 		t.Fatalf("Falcon has incorrect collision metadata")
 	}
-	if fighter.Parts[0].SelfOccluding || !fighter.Parts[7].SelfOccluding {
-		t.Fatal("Falcon hull should use shared depth while the sensor dish uses self-occluding depth")
+	var hull, details *scene.Part
+	for index := range fighter.Parts {
+		switch fighter.Parts[index].Name {
+		case "saucer hull, mandibles, and cargo assembly":
+			hull = &fighter.Parts[index]
+		case "sensor dish and hull details":
+			details = &fighter.Parts[index]
+		}
+	}
+	if hull == nil || details == nil ||
+		hull.SelfOcclusion != scene.SelfOcclusionInterior ||
+		hull.SelfOccluding || details.SelfOcclusion != scene.SelfOcclusionNone {
+		t.Fatal("Falcon hull/mandibles/cargo assembly or sensor dish has incorrect self-occlusion policies")
 	}
 	for _, name := range []string{"center", "cockpit", "chase", "muzzle-upper-left", "muzzle-upper-right", "muzzle-lower-left", "muzzle-lower-right"} {
 		if _, ok := fighter.Anchor(name); !ok {

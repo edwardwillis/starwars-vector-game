@@ -95,7 +95,7 @@ type worldRenderJob struct {
 	world         math3d.Mat4
 	depth         *render.DepthBuffer
 	owner         uint64
-	selfOccluding bool
+	selfOcclusion render.SelfOcclusionMode
 	objectID      scene.ObjectID
 	color         color.Color
 	lineWidth     float32
@@ -107,6 +107,43 @@ type worldRenderResult struct {
 	objectID  scene.ObjectID
 	color     color.Color
 	lineWidth float32
+}
+
+func partSelfOcclusionMode(part scene.Part, destruction bool) render.SelfOcclusionMode {
+	if destruction || part.SelfOccluding {
+		return render.SelfOcclusionAll
+	}
+	switch part.SelfOcclusion {
+	case scene.SelfOcclusionInterior:
+		return render.SelfOcclusionInterior
+	case scene.SelfOcclusionAll:
+		return render.SelfOcclusionAll
+	default:
+		return render.SelfOcclusionNone
+	}
+}
+
+func partsRequirePhysicalDepth(parts []scene.Part) bool {
+	for _, part := range parts {
+		if part.SelfOccluding || part.SelfOcclusion != scene.SelfOcclusionNone {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Game) physicalDepthRequired() bool {
+	for _, object := range g.objects {
+		if partsRequirePhysicalDepth(object.Parts) {
+			return true
+		}
+	}
+	for _, object := range g.showcaseObjects {
+		if partsRequirePhysicalDepth(object.Parts) {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -147,6 +184,8 @@ type Game struct {
 	showcaseObjects          []scene.Object
 	showcaseStarField        *starfield.Field
 	showcaseDistance         float64
+	showcaseRotating         bool
+	showcaseTopDown          bool
 	showcaseSelected         int
 	showcaseSlide            float64
 	showcasePreviousMode     camera.Mode
@@ -331,6 +370,8 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	game.showcaseStarField = starfield.New(500, gameProfile.Starfield.Seed+101, 90, math3d.Vec3{})
 	game.showcaseStarField.SetMode(starfieldMode, gameProfile.Display.FarPlane*0.85)
 	game.showcaseDistance = 16
+	game.showcaseRotating = true
+	game.showcaseTopDown = false
 	world, err := sim.New(objects)
 	if err != nil {
 		return nil, fmt.Errorf("create simulation world: %w", err)
@@ -422,6 +463,8 @@ func (g *Game) Update() error {
 		if g.showcaseActive {
 			g.showcasePreviousMode = g.viewCamera.Mode
 			g.viewCamera.Mode = camera.Fixed
+			g.showcaseRotating = true
+			g.showcaseTopDown = false
 		} else {
 			g.viewCamera.Mode = g.showcasePreviousMode
 		}
@@ -449,6 +492,12 @@ func (g *Game) Update() error {
 	}
 	if g.showcaseActive {
 		g.handleRealismSliderClick()
+		if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+			g.showcaseRotating = !g.showcaseRotating
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyT) {
+			g.showcaseTopDown = !g.showcaseTopDown
+		}
 		if len(g.showcaseObjects) > 0 {
 			if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
 				g.showcaseSelected = (g.showcaseSelected + len(g.showcaseObjects) - 1) % len(g.showcaseObjects)
@@ -468,27 +517,30 @@ func (g *Game) Update() error {
 		if inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
 			g.setRealismLevel(g.realismLevel + 1)
 		}
-		if !g.paused {
+		_, wheelY := ebiten.Wheel()
+		g.showcaseDistance = max(8, min(120, g.showcaseDistance-wheelY*2.5))
+		if g.showcaseRotating {
 			g.showcaseTime += seconds
-			_, wheelY := ebiten.Wheel()
-			g.showcaseDistance = max(16, min(90, g.showcaseDistance-wheelY*2.5))
-			mouseX, mouseY := ebiten.CursorPosition()
-			yaw := (float64(mouseX) - ScreenWidth/2) / (ScreenWidth / 2) * 0.65
-			pitch := (float64(mouseY) - ScreenHeight/2) / (ScreenHeight / 2) * 0.35
-			angle := g.showcaseTime * 0.7
-			for index := range g.showcaseObjects {
-				offset := float64(index - g.showcaseSelected)
-				half := float64(len(g.showcaseObjects)) / 2
-				for offset > half {
-					offset -= float64(len(g.showcaseObjects))
-				}
-				for offset < -half {
-					offset += float64(len(g.showcaseObjects))
-				}
-				offset += g.showcaseSlide
-				g.showcaseObjects[index].Pose.Position = math3d.Vec3{X: offset * 28, Z: -g.showcaseDistance - math.Abs(offset)*18}
-				g.showcaseObjects[index].Pose.Orientation = math3d.QuaternionFromYawPitchRoll(angle+offset*0.25+yaw, 0.12+pitch, 0)
+		}
+		mouseX, mouseY := ebiten.CursorPosition()
+		yaw := (float64(mouseX) - ScreenWidth/2) / (ScreenWidth / 2) * 0.65
+		pitch := (float64(mouseY) - ScreenHeight/2) / (ScreenHeight / 2) * 0.35
+		if g.showcaseTopDown {
+			pitch = -math.Pi / 2
+		}
+		angle := g.showcaseTime * 0.7
+		for index := range g.showcaseObjects {
+			offset := float64(index - g.showcaseSelected)
+			half := float64(len(g.showcaseObjects)) / 2
+			for offset > half {
+				offset -= float64(len(g.showcaseObjects))
 			}
+			for offset < -half {
+				offset += float64(len(g.showcaseObjects))
+			}
+			offset += g.showcaseSlide
+			g.showcaseObjects[index].Pose.Position = math3d.Vec3{X: offset * 28, Z: -g.showcaseDistance - math.Abs(offset)*18}
+			g.showcaseObjects[index].Pose.Orientation = math3d.QuaternionFromYawPitchRoll(angle+offset*0.25+yaw, 0.12+pitch, 0)
 		}
 		g.pipeline.View = math3d.Identity()
 		return nil
@@ -2663,7 +2715,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawStarfield(screen, viewFrame)
 	g.drawHyperspaceArrival(screen)
 	var depth *render.DepthBuffer
-	if g.realismLevel >= 3 {
+	if g.realismLevel >= 3 || g.physicalDepthRequired() {
 		depthStart := time.Now()
 		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
 			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
@@ -2721,7 +2773,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			worldJobs = append(worldJobs, worldRenderJob{
 				mesh: part.Mesh, world: worldMatrix, depth: depth,
 				owner:         renderOwner(object.ID, partIndex),
-				selfOccluding: part.SelfOccluding || object.DestructionStage >= scene.DestructionComponent,
+				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
 				objectID:      object.ID,
 				color:         part.Color, lineWidth: part.LineWidth,
 			})
@@ -2838,7 +2890,7 @@ func (g *Game) drawHyperspaceArrival(screen *ebiten.Image) {
 
 func (g *Game) drawShowcase(screen *ebiten.Image) {
 	var depth *render.DepthBuffer
-	if g.realismLevel >= 3 {
+	if g.realismLevel >= 3 || g.physicalDepthRequired() {
 		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
 			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
 		}
@@ -2857,10 +2909,8 @@ func (g *Game) drawShowcase(screen *ebiten.Image) {
 			var lines []render.Line
 			if depth != nil {
 				owner := renderOwner(object.ID, partIndex)
-				if part.SelfOccluding {
-					owner = 0
-				}
-				lines = g.pipeline.RenderWithDepthOwned(part.Mesh, object.WorldMatrix(), depth, owner)
+				mode := partSelfOcclusionMode(part, false)
+				lines = g.pipeline.RenderWithDepthPolicy(part.Mesh, object.WorldMatrix(), depth, owner, mode)
 			} else {
 				lines = g.pipeline.Render(part.Mesh, object.WorldMatrix())
 			}
@@ -2877,7 +2927,15 @@ func (g *Game) drawShowcase(screen *ebiten.Image) {
 	}
 	titleColor := color.RGBA{R: 80, G: 180, B: 255, A: 255}
 	drawVectorText(screen, ScreenWidth/2, 18, title, titleColor)
-	drawVectorText(screen, ScreenWidth/2, 34, "LEFT RIGHT SELECT", titleColor)
+	rotationStatus := "ROTATING"
+	if !g.showcaseRotating {
+		rotationStatus = "ROTATION PAUSED"
+	}
+	viewStatus := "NORMAL VIEW"
+	if g.showcaseTopDown {
+		viewStatus = "TOP VIEW"
+	}
+	drawVectorText(screen, ScreenWidth/2, 34, "LEFT RIGHT SELECT   SPACE "+rotationStatus+"   T "+viewStatus+"   WHEEL ZOOM", titleColor)
 	g.drawShowcaseSpecs(screen)
 	g.drawRealismSlider(screen)
 }
@@ -3218,12 +3276,7 @@ func (g *Game) renderWorldJobs(jobs []worldRenderJob) []worldRenderResult {
 		pipeline.Stats = &results[index].stats
 		if job.depth != nil {
 			owner := job.owner
-			if job.selfOccluding {
-				// Destruction fragments are intentionally allowed to test against
-				// their own depth samples so front caps/body hide rear lines.
-				owner = 0
-			}
-			results[index].lines = pipeline.RenderWithDepthOwned(job.mesh, job.world, job.depth, owner)
+			results[index].lines = pipeline.RenderWithDepthPolicy(job.mesh, job.world, job.depth, owner, job.selfOcclusion)
 		} else {
 			results[index].lines = pipeline.Render(job.mesh, job.world)
 		}

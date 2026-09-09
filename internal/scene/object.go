@@ -24,8 +24,21 @@ type Part struct {
 	// samples as well as other parts. It is useful for compound solids whose
 	// rear/internal edges must not show through their front surfaces.
 	SelfOccluding bool
+	// SelfOcclusion selects which surface edges may test against this part's
+	// own depth. SelfOcclusionInterior preserves manifold silhouette/crease
+	// edges and is reserved for overlapping interior geometry; use All when a
+	// concave part needs every edge tested.
+	SelfOcclusion SelfOcclusionPolicy
 	Detail        DetailTier
 }
+
+type SelfOcclusionPolicy uint8
+
+const (
+	SelfOcclusionNone SelfOcclusionPolicy = iota
+	SelfOcclusionInterior
+	SelfOcclusionAll
+)
 
 // DetailTier orders optional visual geometry from essential silhouette to
 // close-range decoration. It affects rendering only.

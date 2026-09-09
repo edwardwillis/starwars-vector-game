@@ -145,12 +145,26 @@ func compileTopology(verts []math3d.Vec3, authored []Edge, faces []Face) *Topolo
 		}
 	}
 	keys := make(map[edgeKey]int, len(authored)+len(faces)*3)
-	for index, edge := range authored {
+	for _, edge := range authored {
 		edge.FaceA, edge.FaceB, edge.AdjacentFaces = -1, -1, nil
 		if edge.A > edge.B {
 			edge.A, edge.B = edge.B, edge.A
 		}
-		keys[edgeKey{edge.A, edge.B}] = index
+		key := edgeKey{edge.A, edge.B}
+		if existing, ok := keys[key]; ok {
+			// Procedural meshes commonly author a ring edge once for each
+			// neighboring strip. Keep one canonical edge so every incident face
+			// is attached to the same topology record and back-face culling cannot
+			// accidentally treat the duplicate as decorative line art.
+			current := topology.Edges[existing]
+			current.Kind = mergeEdgeKind(current.Kind, edge.Kind)
+			if edge.Importance > current.Importance {
+				current.Importance = edge.Importance
+			}
+			topology.Edges[existing] = current
+			continue
+		}
+		keys[key] = len(topology.Edges)
 		topology.Edges = append(topology.Edges, edge)
 	}
 	for faceIndex, face := range faces {
@@ -185,6 +199,19 @@ func compileTopology(verts []math3d.Vec3, authored []Edge, faces []Face) *Topolo
 		}
 	}
 	return topology
+}
+
+func mergeEdgeKind(a, b EdgeKind) EdgeKind {
+	// A structural edge wins over duplicate decorative metadata because it is
+	// part of the physical surface topology. Internal edges remain internal
+	// only when every duplicate is marked internal.
+	if a == EdgeStructural || b == EdgeStructural {
+		return EdgeStructural
+	}
+	if a == EdgeInternal || b == EdgeInternal {
+		return EdgeInternal
+	}
+	return EdgeDecorative
 }
 
 type edgeKey struct{ A, B int }
@@ -330,3 +357,46 @@ func Merge(models ...Model) Model {
 	}
 	return Prepare(result)
 }
+
+// MergeWelded combines models into one index space and reuses vertices that
+// occupy the same position. It is intended for authored component joins where
+// two solids deliberately share a boundary; ordinary Merge remains separate
+// so independently moving parts do not acquire accidental topology.
+func MergeWelded(models ...Model) Model {
+	var result Model
+	result.SkipDepth = len(models) > 0
+	vertices := make(map[vertexPosition]int)
+	for _, source := range models {
+		result.SkipDepth = result.SkipDepth && source.SkipDepth
+		indices := make([]int, len(source.Verts))
+		for index, vertex := range source.Verts {
+			key := vertexPosition{
+				X: int64(math.Round(vertex.X * 1e9)),
+				Y: int64(math.Round(vertex.Y * 1e9)),
+				Z: int64(math.Round(vertex.Z * 1e9)),
+			}
+			if existing, ok := vertices[key]; ok {
+				indices[index] = existing
+				continue
+			}
+			indices[index] = len(result.Verts)
+			vertices[key] = indices[index]
+			result.Verts = append(result.Verts, vertex)
+		}
+		for _, edge := range source.Edges {
+			result.Edges = append(result.Edges, Edge{
+				A: indices[edge.A], B: indices[edge.B], Kind: edge.Kind, Importance: edge.Importance,
+			})
+		}
+		for _, face := range source.Faces {
+			vertices := make([]int, len(face.Vertices))
+			for index, vertex := range face.Vertices {
+				vertices[index] = indices[vertex]
+			}
+			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided})
+		}
+	}
+	return Prepare(result)
+}
+
+type vertexPosition struct{ X, Y, Z int64 }
