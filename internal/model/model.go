@@ -42,6 +42,10 @@ type Face struct {
 	Normal      math3d.Vec3
 	PlaneD      float64
 	DoubleSided bool
+	// OccluderOnly keeps physical depth without contributing a wireframe
+	// boundary. It is used for hidden backing surfaces where drawing the
+	// construction edge would reintroduce an internal line.
+	OccluderOnly bool
 }
 
 // Topology is immutable derived data shared by model instances. It is built
@@ -77,7 +81,7 @@ func Prepare(source Model) Model {
 	result.Edges = append([]Edge(nil), source.Edges...)
 	result.Faces = make([]Face, len(source.Faces))
 	for index, face := range source.Faces {
-		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided}
+		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	result.Topology = compileTopology(result.Verts, result.Edges, result.Faces)
 	for index := range result.Faces {
@@ -117,7 +121,7 @@ func OrientOutward(source Model) Model {
 		if normal.Dot(faceCenter.Sub(center)) < 0 {
 			reverseFaceIndices(vertices)
 		}
-		result.Faces[index] = Face{Vertices: vertices, DoubleSided: face.DoubleSided}
+		result.Faces[index] = Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	return Prepare(result)
 }
@@ -329,7 +333,7 @@ func Transform(source Model, transform math3d.Mat4) Model {
 		result.Verts[index] = transform.TransformPoint(vertex)
 	}
 	for index, face := range source.Faces {
-		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided}
+		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	result.Topology = nil
 	result = Prepare(result)
@@ -352,7 +356,7 @@ func Merge(models ...Model) Model {
 			for index, vertex := range face.Vertices {
 				vertices[index] = base + vertex
 			}
-			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided})
+			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
 		}
 	}
 	return Prepare(result)
@@ -393,7 +397,7 @@ func MergeWelded(models ...Model) Model {
 			for index, vertex := range face.Vertices {
 				vertices[index] = indices[vertex]
 			}
-			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided})
+			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
 		}
 	}
 	return Prepare(result)

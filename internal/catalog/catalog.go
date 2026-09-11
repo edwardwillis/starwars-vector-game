@@ -15,7 +15,6 @@ import (
 var (
 	vectorRed   = color.RGBA{R: 255, G: 48, B: 32, A: 255}
 	vectorGreen = color.RGBA{R: 64, G: 255, B: 96, A: 255}
-	vectorBlue  = color.RGBA{R: 48, G: 96, B: 255, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
 
 	tieFighterGeometry            = model.TIEFighterGeometryData()
@@ -42,11 +41,13 @@ var (
 	tieInterceptorPolygonShards   = buildTIEInterceptorPolygonShards()
 	millenniumFalconStations      = model.MillenniumFalconStationsData()
 	millenniumFalconGeometry      = model.MillenniumFalconGeometryData()
-	millenniumFalconHull          = model.Transform(millenniumFalconGeometry.Hull, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconHullCore      = model.Transform(millenniumFalconGeometry.HullCore, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconLeftMandible  = model.Transform(millenniumFalconGeometry.LeftMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconRightMandible = model.Transform(millenniumFalconGeometry.RightMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconCargoRamp     = model.Transform(millenniumFalconGeometry.CargoRamp, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconCorridor      = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconWindow        = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconTurrets       = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconEngine        = model.Transform(millenniumFalconGeometry.Engine, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconDetails       = model.Transform(millenniumFalconGeometry.Details, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconDebris        = transformMillenniumFalconFragments(millenniumFalconGeometry.Fragments, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconPolygonShards = buildMillenniumFalconPolygonShards()
@@ -480,15 +481,20 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 }
 
 // MillenniumFalcon returns the multipart Rebel freighter with a closed hull,
-// split mandibles, offset windscreen cockpit, quad turrets, engine grille, and sensor dish.
+// split mandibles, offset windscreen cockpit, quad turrets, and sensor dish.
 func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
 		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Pose: pose,
 		Parts: []scene.Part{
-			{Name: "saucer hull, mandibles, and cargo assembly", Mesh: millenniumFalconHull, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+			// The render layers share the welded authored boundaries from the
+			// composite model, but use distinct depth owners and policies. This
+			// preserves hull detail while making the extensions opaque.
+			{Name: "saucer hull", Mesh: millenniumFalconHullCore, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+			{Name: "left forward mandible", Mesh: millenniumFalconLeftMandible, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
+			{Name: "right forward mandible", Mesh: millenniumFalconRightMandible, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
+			{Name: "forward cargo ramp and roof", Mesh: millenniumFalconCargoRamp, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
 			{Name: "cockpit corridor", Mesh: millenniumFalconCorridor, Color: vectorGreen, LineWidth: standardLineWidth},
 			{Name: "quad laser turrets", Mesh: millenniumFalconTurrets, Color: vectorGreen, LineWidth: standardLineWidth},
-			{Name: "aft engine grille", Mesh: millenniumFalconEngine, Color: vectorBlue, LineWidth: standardLineWidth},
 			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, Detail: scene.DetailMedium},
 			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth},
 		},

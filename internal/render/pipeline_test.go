@@ -59,6 +59,23 @@ func TestBackfaceCullingUsesFaceWindingAndKeepsDecorativeLines(t *testing.T) {
 	}
 }
 
+func TestOccluderOnlyFaceWritesDepthWithoutWireframeEdges(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage()}
+	mesh := model.Model{
+		Verts: []math3d.Vec3{{X: -1, Z: -5}, {X: 1, Z: -5}, {Y: 1, Z: -5}},
+		Faces: []model.Face{{Vertices: []int{0, 1, 2}, OccluderOnly: true}},
+	}
+	if lines := pipeline.Render(mesh, math3d.Identity()); len(lines) != 0 {
+		t.Fatalf("occluder-only face emitted %d wireframe edges", len(lines))
+	}
+	depth := NewDepthBuffer(800, 600)
+	pipeline.RasterizeDepth(mesh, math3d.Identity(), depth)
+	if math.IsInf(depth.depthAt(400, 280), 1) {
+		t.Fatal("occluder-only face did not contribute depth")
+	}
+}
+
 func TestBackfaceCullingFollowsRigidRotation(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
 	pipeline.Stages = []Stage{BackfaceStage()}

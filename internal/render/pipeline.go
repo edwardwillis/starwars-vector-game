@@ -171,11 +171,17 @@ func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []m
 			continue
 		}
 		visible := false
+		renderable := false
 		for _, faceIndex := range adjacent {
 			if faceIndex >= 0 && faceIndex < len(front) && front[faceIndex] {
 				visible = true
-				break
+				if !prepared.Faces[faceIndex].OccluderOnly {
+					renderable = true
+				}
 			}
+		}
+		if visible && !renderable {
+			continue
 		}
 		if len(adjacent) == 0 {
 			visible = (edge.FaceA >= 0 && front[edge.FaceA]) || (edge.FaceB >= 0 && front[edge.FaceB])

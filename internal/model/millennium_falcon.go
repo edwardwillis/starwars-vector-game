@@ -13,6 +13,7 @@ import (
 // and geometry inspection without being rendered as a duplicate part.
 type MillenniumFalconGeometry struct {
 	Full          Model
+	HullCore      Model
 	Hull          Model
 	LeftMandible  Model
 	RightMandible Model
@@ -20,7 +21,6 @@ type MillenniumFalconGeometry struct {
 	Corridor      Model
 	Window        Model
 	Turrets       Model
-	Engine        Model
 	Details       Model
 	Fragments     [3]Model
 }
@@ -58,7 +58,7 @@ func MillenniumFalconStationsData() MillenniumFalconStations {
 // silhouette. +Z is forward, +X is starboard, and +Y is dorsal. The geometry
 // emphasizes the recognisable outline over dense greeble detail: a flattened
 // saucer hull, split forward mandibles, offset windscreen cockpit, dorsal/ventral quad
-// turrets, and the broad aft engine grille.
+// turrets, and the dorsal sensor dish.
 func MillenniumFalconGeometryData() MillenniumFalconGeometry {
 	hullCore := millenniumFalconHull()
 	leftMandible := millenniumFalconMandible(-1)
@@ -72,17 +72,16 @@ func MillenniumFalconGeometryData() MillenniumFalconGeometry {
 	corridor := millenniumFalconCockpitCorridor()
 	window := millenniumFalconWindow()
 	turrets := millenniumFalconTurrets()
-	engine := millenniumFalconEngine()
 	details := millenniumFalconDetails()
-	full := Merge(hull, corridor, window, turrets, engine, details)
+	full := Merge(hull, corridor, window, turrets, details)
 	fragments := [3]Model{
 		Merge(leftMandible, millenniumFalconTurret(-1)),
-		Merge(hullCore, cargoRamp, corridor, window, engine, details),
+		Merge(hullCore, cargoRamp, corridor, window, details),
 		Merge(rightMandible, millenniumFalconTurret(1)),
 	}
 	return MillenniumFalconGeometry{
-		Full: full, Hull: hull, LeftMandible: leftMandible, RightMandible: rightMandible, CargoRamp: cargoRamp, Corridor: corridor,
-		Window: window, Turrets: turrets, Engine: engine,
+		Full: full, HullCore: hullCore, Hull: hull, LeftMandible: leftMandible, RightMandible: rightMandible, CargoRamp: cargoRamp, Corridor: corridor,
+		Window: window, Turrets: turrets,
 		Details: details, Fragments: fragments,
 	}
 }
@@ -171,9 +170,10 @@ func falconMandibleAttachmentEdge(a, b float64) bool {
 // profiledSaucer creates a rotationally symmetric saucer shell around the Y
 // axis. Each radial station has its own half-depth, producing a deeper centre
 // and a thin perimeter without resorting to a filled billboard or open sheet.
-// The narrow front channel is deliberately opened for the integrated cargo
-// assembly; MergeWelded closes that physical continuation at its four exact
-// inner-ring attachment points.
+// The narrow front channel is represented by depth-only backing faces for the
+// integrated cargo assembly; their construction boundaries are suppressed by
+// the renderer while MergeWelded closes the physical continuation at its four
+// exact inner-ring attachment points.
 func profiledSaucer() Model {
 	type station struct {
 		radius float64
@@ -228,12 +228,15 @@ func profiledSaucer() Model {
 			)
 			upper := []int{base + segment, base + nextSegment, next + nextSegment, next + segment}
 			lower := []int{base + segments + segment, next + segments + segment, next + segments + nextSegment, base + segments + nextSegment}
-			if !falconCargoChannelFace(mesh.Verts, upper) {
-				mesh.Faces = append(mesh.Faces, Face{Vertices: upper})
+			upperFace := Face{Vertices: upper}
+			lowerFace := Face{Vertices: lower}
+			if falconCargoChannelFace(mesh.Verts, upper) {
+				upperFace.OccluderOnly = true
 			}
-			if !falconCargoChannelFace(mesh.Verts, lower) {
-				mesh.Faces = append(mesh.Faces, Face{Vertices: lower})
+			if falconCargoChannelFace(mesh.Verts, lower) {
+				lowerFace.OccluderOnly = true
 			}
+			mesh.Faces = append(mesh.Faces, upperFace, lowerFace)
 		}
 	}
 
@@ -269,10 +272,10 @@ func profiledSaucer() Model {
 	return OrientOutward(mesh)
 }
 
-// falconCargoChannelFace removes only the saucer's top/bottom faces directly
-// behind the cargo assembly. The cargo outer surfaces then become the visible
-// continuation of the hull instead of intersecting a second, hidden saucer
-// skin and leaking its internal lines through the ramp/roof.
+// falconCargoChannelFace identifies the saucer's top/bottom faces directly
+// behind the cargo assembly. Those faces remain physical depth surfaces, but
+// are marked OccluderOnly so the cargo outer surfaces become the visible
+// continuation of the hull without drawing a second internal saucer skin.
 func falconCargoChannelFace(vertices []math3d.Vec3, indices []int) bool {
 	if len(indices) == 0 {
 		return false
@@ -680,31 +683,10 @@ func falconGunnerDome(sign int) Model {
 	return OrientOutward(mesh)
 }
 
-func millenniumFalconEngine() Model {
-	// The broad aft radiator is a shallow solid with explicit grille strokes.
-	mesh := extrudeXY([]math3d.Vec3{
-		{X: -2.55, Y: -0.34}, {X: 2.55, Y: -0.34},
-		{X: 2.55, Y: 0.34}, {X: -2.55, Y: 0.34},
-	}, 0.18)
-	mesh = Transform(mesh, math3d.Translation(0, 0, -3.72))
-	for index := -4; index <= 4; index++ {
-		x := float64(index) * 0.48
-		mesh.Verts = append(mesh.Verts,
-			math3d.Vec3{X: x, Y: -0.30, Z: -3.83},
-			math3d.Vec3{X: x, Y: 0.30, Z: -3.83},
-		)
-		base := len(mesh.Verts) - 2
-		mesh.Edges = append(mesh.Edges, Edge{A: base, B: base + 1, Kind: EdgeDecorative})
-	}
-	mesh.Topology = nil
-	return Prepare(mesh)
-}
-
 func millenniumFalconDetails() Model {
 	// The raised dorsal sensor dish is a separate solid. Long decorative spokes
 	// across the saucer were intentionally omitted: they read as stray parallel
-	// trails from the aft hull in oblique views. The dedicated aft engine grille
-	// provides the ship's rear longitudinal detail instead.
+	// trails from the aft hull in oblique views.
 	dishPosition := falconSensorDishPosition()
 	dish := Transform(parabolicSensorDish(), math3d.Translation(dishPosition.X, dishPosition.Y, dishPosition.Z))
 	return Prepare(dish)
@@ -716,7 +698,7 @@ func falconSensorDishPosition() math3d.Vec3 {
 	// Lift the dish clear of the saucer: its half-metre bowl radius needs to
 	// sit above the local hull surface, otherwise the opaque hull hides the
 	// lower half of the front aperture in pitched views.
-	return math3d.Vec3{X: -1.55, Y: 1.18, Z: 1.45}
+	return math3d.Vec3{X: -1.55, Y: 1.02, Z: 2.15}
 }
 
 // parabolicSensorDish is a sparse, finite solid whose bowl opens along +Z
@@ -728,7 +710,7 @@ func parabolicSensorDish() Model {
 	mesh := Model{}
 	apex := len(mesh.Verts)
 	mesh.Verts = append(mesh.Verts, math3d.Vec3{})
-	for _, station := range []struct{ radius, z float64 }{{0.24, 0.055}, {0.50, 0.20}, {0.50, 0.12}} {
+	for _, station := range []struct{ radius, z float64 }{{0.20, 0.055}, {0.42, 0.20}, {0.42, 0.12}} {
 		for segment := 0; segment < segments; segment++ {
 			angle := 2 * math.Pi * float64(segment) / float64(segments)
 			sine, cosine := math.Sincos(angle)
@@ -783,13 +765,13 @@ func parabolicSensorDish() Model {
 	for segment := 0; segment < segments; segment++ {
 		angle := 2 * math.Pi * float64(segment) / float64(segments)
 		sine, cosine := math.Sincos(angle)
-		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: 0.50 * cosine, Y: 0.50 * sine, Z: rearOuterZ})
+		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: 0.42 * cosine, Y: 0.42 * sine, Z: rearOuterZ})
 	}
 	rearInner := len(mesh.Verts)
 	for segment := 0; segment < segments; segment++ {
 		angle := 2 * math.Pi * float64(segment) / float64(segments)
 		sine, cosine := math.Sincos(angle)
-		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: 0.24 * cosine, Y: 0.24 * sine, Z: rearInnerZ})
+		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: 0.20 * cosine, Y: 0.20 * sine, Z: rearInnerZ})
 	}
 	rearCenter := len(mesh.Verts)
 	mesh.Verts = append(mesh.Verts, math3d.Vec3{Z: rearCenterZ})

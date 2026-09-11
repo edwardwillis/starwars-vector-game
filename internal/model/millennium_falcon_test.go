@@ -12,7 +12,7 @@ func TestMillenniumFalconGeometryHasPreparedSolidParts(t *testing.T) {
 	parts := map[string]Model{
 		"full": geometry.Full, "hull": geometry.Hull, "left mandible": geometry.LeftMandible,
 		"right mandible": geometry.RightMandible, "cargo ramp": geometry.CargoRamp, "corridor": geometry.Corridor,
-		"window": geometry.Window, "turrets": geometry.Turrets, "engine": geometry.Engine,
+		"window": geometry.Window, "turrets": geometry.Turrets,
 	}
 	for name, part := range parts {
 		if err := part.Validate(); err != nil {
@@ -74,6 +74,15 @@ func TestMillenniumFalconHullWeldsMandibleRootVertices(t *testing.T) {
 
 func TestMillenniumFalconHullOwnsCargoAssemblyTopology(t *testing.T) {
 	geometry := MillenniumFalconGeometryData()
+	occluderFaces := 0
+	for _, face := range geometry.HullCore.Faces {
+		if face.OccluderOnly {
+			occluderFaces++
+		}
+	}
+	if occluderFaces == 0 {
+		t.Fatal("Falcon hull has no depth-only cargo-channel backing faces")
+	}
 	if len(geometry.Hull.Verts) < len(geometry.CargoRamp.Verts) {
 		t.Fatalf("composite hull has fewer vertices than cargo assembly: hull=%d cargo=%d", len(geometry.Hull.Verts), len(geometry.CargoRamp.Verts))
 	}
