@@ -37,22 +37,30 @@ const (
 // submission timings. A pointer can be attached to Pipeline during
 // development; nil keeps the hot path lightweight.
 type Stats struct {
-	InputVertices, TransformedVertices               int
-	InputEdges, OutputEdges                          int
-	TinyEdges                                        int
-	InputFaces                                       int
-	BackfaceRejected, PolicyRejected                 int
-	DepthRejected, ClippedEdges                      int
-	ObjectsInput, ObjectsCulled                      int
-	ObjectsVisible                                   int
-	BillboardObjects, BillboardLines                 int
-	BillboardBatches                                 int
-	StarsConsidered, StarsAnalyticRejected           int
-	StarsGeometryRejected, StarsSubmitted            int
-	ActiveAnalyticOccluders, ActiveGeometryOccluders int
-	WorldBatches                                     int
-	DepthRasterMS, GeometryMS                        float64
-	VectorSubmitMS                                   float64
+	InputVertices, TransformedVertices                 int
+	InputEdges, OutputEdges                            int
+	TinyEdges                                          int
+	InputFaces                                         int
+	BackfaceRejected, PolicyRejected                   int
+	DepthRejected, ClippedEdges                        int
+	ObjectsInput, ObjectsCulled                        int
+	ObjectsVisible                                     int
+	BillboardObjects, BillboardLines                   int
+	BillboardBatches                                   int
+	StarsConsidered, StarsAnalyticRejected             int
+	StarsGeometryRejected, StarsSubmitted              int
+	ActiveAnalyticOccluders, ActiveGeometryOccluders   int
+	DepthCandidateObjects, DepthCandidateParts         int
+	DepthFacesSubmitted, DepthTrianglesRasterized      int
+	DepthPixelsTested, DepthPixelsWritten              int
+	LineDepthSamples                                   int
+	RenderJobs, ActiveEnvironmentTiles                 int
+	EnvironmentPartsBoundsRejected                     int
+	EnvironmentFeaturesBoundsRejected                  int
+	DepthEnabledByProfile, DepthEnabledBySelfOcclusion bool
+	WorldBatches                                       int
+	DepthRasterMS, GeometryMS                          float64
+	VectorSubmitMS                                     float64
 }
 
 // Ray describes a world-space half-line produced by a screen-space aim point.
@@ -261,7 +269,7 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 	// have no surface topology to occlude against. Avoid sending their long
 	// rays through the expensive depth sampler even when a depth buffer is
 	// active for the surrounding scene.
-	useDepth := depth != nil && !prepared.SkipDepth
+	useDepth := depth != nil && (!prepared.SkipDepth || prepared.DepthTestOnly)
 	stageMesh := prepared
 	if len(prepared.Faces) > 0 {
 		stageMesh.Faces = append([]model.Face(nil), prepared.Faces...)
@@ -334,7 +342,7 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
 			segments := []Line{clipped}
 			if useDepth {
-				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge)
+				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge, p.Stats)
 				if len(segments) == 0 && p.Stats != nil {
 					p.Stats.DepthRejected++
 				}
@@ -359,7 +367,7 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 // visibleDepthSegments samples a projected edge against the CPU depth surface
 // and returns visible intervals. Sampling keeps final drawing vector-based while
 // allowing a line to disappear only where it passes behind another surface.
-func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64, mode SelfOcclusionMode, mesh model.Model, verts []math3d.Vec3, edge model.Edge) []Line {
+func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64, mode SelfOcclusionMode, mesh model.Model, verts []math3d.Vec3, edge model.Edge, stats *Stats) []Line {
 	sampleOwner := owner
 	selfSample := mode == SelfOcclusionAll || (mode == SelfOcclusionInterior && interiorSelfOcclusionEdge(mesh, verts, edge))
 	if selfSample {
@@ -388,6 +396,9 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 		samples = 64
 	}
 	visibleAt := func(t float64) bool {
+		if stats != nil {
+			stats.LineDepthSamples++
+		}
 		x := int(math.Round(line.X1 + (line.X2-line.X1)*t))
 		y := int(math.Round(line.Y1 + (line.Y2-line.Y1)*t))
 		// Perspective-correct interpolation matches the reciprocal-depth

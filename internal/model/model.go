@@ -65,9 +65,19 @@ type Model struct {
 	Edges    []Edge
 	Faces    []Face
 	Topology *Topology
-	// SkipDepth marks intentionally non-surface line art that should remain
-	// visible without expensive depth sampling (for example laser bolts).
+	// SkipDepth prevents this model from writing or sampling the CPU depth
+	// surface. It is used for intentionally independent line art such as laser
+	// bolts.
 	SkipDepth bool
+	// DepthTestOnly keeps depth writes disabled while allowing rendered lines to
+	// test against other physical surfaces. It is useful for line grids whose
+	// strokes should disappear behind solid towers without making the grid
+	// itself an occluding plane.
+	DepthTestOnly bool
+	// PointOccluder allows polygon faces to reject sparse background points
+	// such as stars even when the model does not write the frame depth buffer.
+	// This keeps physical starfield opacity independent from visible line depth.
+	PointOccluder bool
 }
 
 // Prepare compiles face normals, edge adjacency and a conservative local
@@ -302,7 +312,7 @@ func (m Model) Validate() error {
 func (m Model) PolygonModels() []Model {
 	polygons := make([]Model, 0, len(m.Faces))
 	for _, face := range m.Faces {
-		polygon := Model{Verts: make([]math3d.Vec3, len(face.Vertices))}
+	polygon := Model{Verts: make([]math3d.Vec3, len(face.Vertices)), SkipDepth: m.SkipDepth, DepthTestOnly: m.DepthTestOnly, PointOccluder: m.PointOccluder}
 		for index, vertex := range face.Vertices {
 			polygon.Verts[index] = m.Verts[vertex]
 			polygon.Edges = append(polygon.Edges, Edge{A: index, B: (index + 1) % len(face.Vertices), Kind: EdgeStructural, Importance: 1})
@@ -327,7 +337,7 @@ func Transform(source Model, transform math3d.Mat4) Model {
 		Verts:     make([]math3d.Vec3, len(source.Verts)),
 		Edges:     append([]Edge(nil), source.Edges...),
 		Faces:     make([]Face, len(source.Faces)),
-		SkipDepth: source.SkipDepth,
+		SkipDepth: source.SkipDepth, DepthTestOnly: source.DepthTestOnly, PointOccluder: source.PointOccluder,
 	}
 	for index, vertex := range source.Verts {
 		result.Verts[index] = transform.TransformPoint(vertex)
@@ -344,8 +354,12 @@ func Transform(source Model, transform math3d.Mat4) Model {
 func Merge(models ...Model) Model {
 	var result Model
 	result.SkipDepth = len(models) > 0
+	result.DepthTestOnly = len(models) > 0
+	result.PointOccluder = len(models) > 0
 	for _, source := range models {
 		result.SkipDepth = result.SkipDepth && source.SkipDepth
+		result.DepthTestOnly = result.DepthTestOnly && source.DepthTestOnly
+		result.PointOccluder = result.PointOccluder && source.PointOccluder
 		base := len(result.Verts)
 		result.Verts = append(result.Verts, source.Verts...)
 		for _, edge := range source.Edges {
@@ -369,9 +383,13 @@ func Merge(models ...Model) Model {
 func MergeWelded(models ...Model) Model {
 	var result Model
 	result.SkipDepth = len(models) > 0
+	result.DepthTestOnly = len(models) > 0
+	result.PointOccluder = len(models) > 0
 	vertices := make(map[vertexPosition]int)
 	for _, source := range models {
 		result.SkipDepth = result.SkipDepth && source.SkipDepth
+		result.DepthTestOnly = result.DepthTestOnly && source.DepthTestOnly
+		result.PointOccluder = result.PointOccluder && source.PointOccluder
 		indices := make([]int, len(source.Verts))
 		for index, vertex := range source.Verts {
 			key := vertexPosition{

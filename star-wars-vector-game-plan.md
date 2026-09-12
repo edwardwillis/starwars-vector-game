@@ -1622,3 +1622,104 @@ the game package separately when no X11 display is available. Interactive
 validation should cover all five realism levels, cockpit/chase/follow views,
 rapid panel rotations, skyfield occlusion, laser fire, collisions, and the
 full two-stage disintegration sequence.
+
+## Rendering architecture simplification — locked decision (2026-09-12)
+
+This decision supersedes the earlier proposal for arbitrarily composable
+runtime rendering stages and the strict "additive only" rule wherever they
+conflict. Keep the renderer internally phased, because coordinate transforms
+and cheap-before-expensive rejection have a necessary order, but implement one
+explicit visibility pipeline rather than a graph of interchangeable edge-stage
+interfaces.
+
+The fixed pipeline is conceptually:
+
+```text
+gather active-frame candidates
+  -> object/room/tile/feature bounds rejection
+  -> projected-size LOD and material selection
+  -> model-space face and edge classification
+  -> transform only required vertices
+  -> line and polygon frustum clipping
+  -> shared depth/visibility resolution where required
+  -> background preparation
+  -> opaque surface, vector-line and overlay batches
+  -> Ebitengine submission
+```
+
+Gameplay, showcase, transition/cut-scene, exterior, surface and interior views
+must submit candidates through this same frame preparation route. The current
+generic `Stage`/legacy `Culler` mechanisms should be removed after their useful
+behavior has moved into explicit typed phases. Rendering profiles, if retained,
+are data presets for the one pipeline (surface mode, detail thresholds, minimum
+line size and depth precision); they do not assemble different algorithms.
+Removing the realism selector later must therefore require no renderer redesign.
+The retro vector appearance remains an appearance/LOD/edge-policy choice rather
+than a less-correct visibility path.
+
+### Generalized scene background
+
+Background selection belongs to the active view/environment rather than to the
+global game draw loop. Introduce a small `ViewContext` carrying the camera pose,
+authoritative `FrameID`, and a background specification. Initially support
+`none`, distant `skyfield`, and world-space stars. Exterior and Death Star
+surface views normally select `skyfield`; enclosed Falcon/Death Star interiors
+select `none`. Later portal/window visibility may constrain a background to
+projected visible regions without introducing background-colored masks.
+
+The background implementation consumes generic visibility information and must
+not know about Death Stars, fighters, rooms or docking bays. Analytic sphere
+occluders belong to frame visibility preparation, as do projected physical
+surfaces. Prepare background visibility after gathering/classifying the scene
+so existing depth and projected results can be reused instead of transforming
+the same geometry again.
+
+### Visibility-first rendering, replacing strict additive-only rendering
+
+Preserve the performance lesson behind the old rule, not its literal wording.
+The governing rule is now:
+
+> Clear once, choose the cheapest correct visibility representation, avoid
+> background-colored erasure masks, and do not run an expensive occlusion
+> algorithm when ordinary batched opaque drawing is cheaper.
+
+Use the complementary strategies deliberately:
+
+- A large object rendered only as sparse line art, such as the arcade Death
+  Star, uses a cheap analytic occluder to reject sparse background stars. Do not
+  restore a tessellated black vector fill or paint thousands of background
+  pixels merely to simulate opacity.
+- Physical wireframe surfaces may reuse prepared faces/shared depth to hide
+  background points and other lines. Reuse frame-preparation results; avoid a
+  stars-times-every-triangle loop when a depth lookup is already available.
+- A genuinely filled opaque surface is allowed to cover previously submitted
+  background pixels through normal source-over rendering. That is the object's
+  real visible surface, not an erasure workaround. When the background is a
+  small prebatched star draw, harmless GPU overdraw may be cheaper than CPU
+  point-versus-geometry rejection and is therefore permitted.
+- Flat/textured opaque surfaces should be emitted as batched triangles. Luminous
+  vector outlines, emissive details, lasers and HUD elements are layered after
+  opaque surfaces. Transparent/glass surfaces remain a separately sorted,
+  explicitly more expensive edge case.
+
+The renderer must measure both sides of this choice. Track background points,
+analytic tests, geometry/depth tests, opaque triangle batches, raster/depth work
+and submission time. Select optimizations from measured scene cost rather than
+assuming that minimum overdraw always means minimum frame time.
+
+### Immediate implementation order
+
+1. Add missing per-phase counters and deterministic surface/interior workloads.
+2. Fix depth activation so it considers only the culled active-frame render
+   plan, never inactive showcase objects or unrelated environments.
+3. Introduce one reusable prepared-frame candidate list and route star, depth,
+   line, showcase and transition processing through it.
+4. Add aggregate tile/feature bounds, shared feature prototypes and environment
+   LOD before substantially increasing Death Star surface density.
+5. Precompute face triangles/planes and reuse face classification across
+   surface, depth, point-occlusion and line passes.
+6. Add an explicit `ViewContext`/background specification, followed by room and
+   portal environment providers for interiors.
+7. Add flat opaque triangle surfaces first, then textured materials and finally
+   sorted translucent materials; do not make filled rendering a prerequisite
+   for the vector modes.

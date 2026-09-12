@@ -180,6 +180,26 @@ func TestDepthPassSkipsDecorativeLineArt(t *testing.T) {
 	}
 }
 
+func TestDepthTestOnlyLineArtSamplesOtherSurfaces(t *testing.T) {
+	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
+	surface := model.Model{
+		Verts: []math3d.Vec3{{X: -2, Y: -2, Z: -5}, {X: 2, Y: -2, Z: -5}, {X: 2, Y: 2, Z: -5}, {X: -2, Y: 2, Z: -5}},
+		Faces: []model.Face{{Vertices: []int{0, 1, 2, 3}}},
+	}
+	depth := NewDepthBuffer(800, 600)
+	pipeline.RasterizeDepth(surface, math3d.Identity(), depth)
+	line := model.Model{
+		Verts:        []math3d.Vec3{{X: -1, Z: -6}, {X: 1, Z: -6}},
+		Edges:        []model.Edge{{A: 0, B: 1, Kind: model.EdgeDecorative}},
+		SkipDepth:    true,
+		DepthTestOnly: true,
+		PointOccluder: true,
+	}
+	if got := pipeline.RenderWithDepth(line, math3d.Identity(), depth); len(got) != 0 {
+		t.Fatalf("depth-test-only line art leaked through the nearer surface: %d lines", len(got))
+	}
+}
+
 func TestRenderRejectsEdgeBehindNearPlane(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 1, 100)
 	mesh := model.Model{

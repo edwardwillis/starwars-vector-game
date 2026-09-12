@@ -20,6 +20,31 @@ func TestDeathStarTrenchTileSharesRenderAndCollisionFeatures(t *testing.T) {
 		if err := part.Mesh.Validate(); err != nil {
 			t.Fatalf("%s: %v", part.Name, err)
 		}
+		if part.Name == "surface deck" && (part.Mesh.SkipDepth || part.Mesh.DepthTestOnly || !part.Mesh.PointOccluder) {
+			t.Fatalf("%s should write a physical occlusion face", part.Name)
+		}
+	}
+	if !tile.Parts[0].SelfOccluding || tile.Parts[0].SelfOcclusion != scene.SelfOcclusionAll {
+		t.Fatal("surface deck should ignore its own depth samples while hiding other geometry")
+	}
+	r, g, b, _ := tile.Parts[1].Color.RGBA()
+	if g <= r || g <= b {
+		t.Fatalf("trench color is not green: rgba=%d,%d,%d", r, g, b)
+	}
+}
+
+func TestDeathStarSurfaceFeaturesAreOpaque(t *testing.T) {
+	tile := DeathStarTrench().Tile(TileCoordinate{X: 1, Z: 0})
+	if len(tile.Features) == 0 {
+		t.Fatal("ordinary surface tile has no features")
+	}
+	for _, feature := range tile.Features {
+		if feature.Kind != "tower" && feature.Kind != "cannon" {
+			continue
+		}
+		if len(feature.Parts) != 1 || !feature.Parts[0].SelfOccluding || feature.Parts[0].SelfOcclusion != scene.SelfOcclusionAll {
+			t.Fatalf("%s feature is not fully self-occluding: %+v", feature.Kind, feature.Parts)
+		}
 	}
 }
 
@@ -74,6 +99,12 @@ func TestDeathStarExitVolumeAllowsClimbBackToSpace(t *testing.T) {
 
 func TestDeathStarTrenchHasOpenFlyableTop(t *testing.T) {
 	tile := DeathStarTrench().Tile(TileCoordinate{})
+	trench := tile.Parts[1].Mesh
+	for index, face := range trench.Faces {
+		if index < 3 && !face.DoubleSided {
+			t.Fatalf("trench face %d is not double-sided", index)
+		}
+	}
 	for _, plane := range tile.Planes {
 		if plane.FeatureID == "trench-floor" && plane.Center == (math3d.Vec3{Y: -14}) {
 			return

@@ -21,6 +21,7 @@ type MillenniumFalconGeometry struct {
 	Corridor      Model
 	Window        Model
 	Turrets       Model
+	Hyperdrive    Model
 	Details       Model
 	Fragments     [3]Model
 }
@@ -72,16 +73,17 @@ func MillenniumFalconGeometryData() MillenniumFalconGeometry {
 	corridor := millenniumFalconCockpitCorridor()
 	window := millenniumFalconWindow()
 	turrets := millenniumFalconTurrets()
+	hyperdrive := millenniumFalconHyperdrive()
 	details := millenniumFalconDetails()
-	full := Merge(hull, corridor, window, turrets, details)
+	full := Merge(hull, corridor, window, turrets, hyperdrive, details)
 	fragments := [3]Model{
 		Merge(leftMandible, millenniumFalconTurret(-1)),
-		Merge(hullCore, cargoRamp, corridor, window, details),
+		Merge(hullCore, cargoRamp, corridor, window, hyperdrive, details),
 		Merge(rightMandible, millenniumFalconTurret(1)),
 	}
 	return MillenniumFalconGeometry{
 		Full: full, HullCore: hullCore, Hull: hull, LeftMandible: leftMandible, RightMandible: rightMandible, CargoRamp: cargoRamp, Corridor: corridor,
-		Window: window, Turrets: turrets,
+		Window: window, Turrets: turrets, Hyperdrive: hyperdrive,
 		Details: details, Fragments: fragments,
 	}
 }
@@ -522,6 +524,52 @@ func falconCockpitHullOverlap() float64 { return 0.85 }
 func falconCockpitCorridorRadius() float64 { return 0.44 }
 
 func falconCockpitWindscreenLength() float64 { return 0.68 }
+
+// millenniumFalconHyperdrive models the three aft drive segments shown as
+// blue blocks in the reference views. Each segment is a closed, thin solid,
+// rather than a screen-facing line or one continuous band. The rear hull is
+// curved, so the segment centres follow that contour while their back faces
+// remain readable as separate rectangles from astern.
+func millenniumFalconHyperdrive() Model {
+	type segment struct {
+		centerX float64
+		width   float64
+	}
+	segments := []segment{
+		{centerX: -1.35, width: 1.12},
+		{centerX: 0, width: 1.28},
+		{centerX: 1.35, width: 1.12},
+	}
+	const (
+		height = 0.34
+		depth  = 0.16
+	)
+	parts := make([]Model, 0, len(segments))
+	for _, segment := range segments {
+		rearZ := falconRearHullZAtX(segment.centerX) - 0.035
+		localX := segment.centerX / falconHullScaleX
+		rearRadius := math.Sqrt(math.Max(0, falconHullRadius*falconHullRadius-localX*localX))
+		// The local X edge follows the tangent of the rear hull arc. The
+		// opposite sign compensates for RotationY's handedness, leaving the
+		// outward-facing (-Z) box face normal aligned with the hull surface.
+		yaw := -math.Atan2(localX, rearRadius)
+		profile := []math3d.Vec3{
+			{X: -segment.width / 2, Y: -height / 2},
+			{X: segment.width / 2, Y: -height / 2},
+			{X: segment.width / 2, Y: height / 2},
+			{X: -segment.width / 2, Y: height / 2},
+		}
+		box := extrudeXY(profile, depth)
+		parts = append(parts, Transform(box, math3d.Translation(segment.centerX, 0, rearZ).Mul(math3d.RotationY(yaw))))
+	}
+	return Merge(parts...)
+}
+
+func falconRearHullZAtX(x float64) float64 {
+	localX := x / falconHullScaleX
+	localZ := -math.Sqrt(math.Max(0, falconHullRadius*falconHullRadius-localX*localX))
+	return localZ * falconHullScaleZ
+}
 
 // sweptFalconTube builds a closed tube along a short polyline in the XZ
 // plane. The middle ring uses a mitered tangent, keeping the diagonal-to-

@@ -79,14 +79,14 @@ func TestMillenniumFalconReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("MillenniumFalcon returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 8 {
-		t.Fatalf("Millennium Falcon returned %d parts, want 8", len(fighter.Parts))
+	if len(fighter.Parts) != 9 {
+		t.Fatalf("Millennium Falcon returned %d parts, want 9", len(fighter.Parts))
 	}
 	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
 		!fighter.Physical || !fighter.Hittable || !fighter.Targetable || !fighter.Destructible {
 		t.Fatalf("Falcon has incorrect collision metadata")
 	}
-	var hull, leftMandible, rightMandible, cargo, details *scene.Part
+	var hull, leftMandible, rightMandible, cargo, drive, details *scene.Part
 	for index := range fighter.Parts {
 		switch fighter.Parts[index].Name {
 		case "saucer hull":
@@ -97,15 +97,18 @@ func TestMillenniumFalconReturnsValidMultipartObject(t *testing.T) {
 			rightMandible = &fighter.Parts[index]
 		case "forward cargo ramp and roof":
 			cargo = &fighter.Parts[index]
+		case "hyperdrive segments":
+			drive = &fighter.Parts[index]
 		case "sensor dish and hull details":
 			details = &fighter.Parts[index]
 		}
 	}
-	if hull == nil || leftMandible == nil || rightMandible == nil || cargo == nil || details == nil ||
+	if hull == nil || leftMandible == nil || rightMandible == nil || cargo == nil || drive == nil || details == nil ||
 		hull.SelfOcclusion != scene.SelfOcclusionInterior || hull.SelfOccluding ||
 		!leftMandible.SelfOccluding || leftMandible.SelfOcclusion != scene.SelfOcclusionAll ||
 		!rightMandible.SelfOccluding || rightMandible.SelfOcclusion != scene.SelfOcclusionAll ||
 		!cargo.SelfOccluding || cargo.SelfOcclusion != scene.SelfOcclusionAll ||
+		!drive.SelfOccluding || drive.SelfOcclusion != scene.SelfOcclusionAll ||
 		details.SelfOcclusion != scene.SelfOcclusionNone {
 		t.Fatal("Falcon hull, mandibles, cargo assembly, or sensor dish has incorrect self-occlusion policies")
 	}

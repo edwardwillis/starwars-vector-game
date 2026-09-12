@@ -70,14 +70,15 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 	xCenter := float64(coordinate.X) * deathStarTileSize
 	zCenter := float64(coordinate.Z) * deathStarTileSize
 	green := color.RGBA{R: 64, G: 255, B: 96, A: 255}
-	amber := color.RGBA{R: 255, G: 192, B: 48, A: 255}
 	isTrench := coordinate.X == trenchTileX && coordinate.Z >= trenchFirstTileZ && coordinate.Z <= trenchLastTileZ
 	deck := gridPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines)
-	// The deck is a flat wireframe reference surface. It remains visible line
-	// art, but does not need to occupy the CPU depth buffer for fighters flying
-	// above it; trench walls/floors and solid features still provide occlusion.
-	deck.SkipDepth = true
-	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: green, LineWidth: 1}}
+	// The deck is a flat wireframe surface. Its physical face writes the shared
+	// depth surface so trench walls and other geometry cannot draw through it;
+	// self-occlusion keeps the coplanar grid strokes stable.
+	deck.SkipDepth = false
+	deck.DepthTestOnly = false
+	deck.PointOccluder = true
+	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: green, LineWidth: 1, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll}}
 	planes := []collision.FinitePlane{{
 		Center: math3d.Vec3{X: xCenter, Z: zCenter}, Normal: math3d.Vec3{Y: 1},
 		AxisU: math3d.Vec3{X: 1}, HalfU: outerHalf, HalfV: outerHalf, FeatureID: "surface-deck",
@@ -87,9 +88,11 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 			gridPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
 			gridPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
 		)
-		deck.SkipDepth = true
+		deck.SkipDepth = false
+		deck.DepthTestOnly = false
+		deck.PointOccluder = true
 		parts[0].Mesh = deck
-		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: amber, LineWidth: 2})
+		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: green, LineWidth: 2})
 		planes = trenchPlanes(xCenter, zCenter, outerHalf, trenchHalf, depth)
 	}
 	features, boxes := tileFeatures(coordinate, xCenter, zCenter, isTrench)
@@ -126,13 +129,13 @@ func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Mode
 			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: x, Y: y, Z: z})
 		}
 	}
-	for row := 0; row < divisions; row++ {
-		for column := 0; column < divisions; column++ {
-			a, b := index(row, column), index(row, column+1)
-			c, d := index(row+1, column+1), index(row+1, column)
-			mesh.Faces = append(mesh.Faces, model.Face{Vertices: []int{d, c, b, a}})
-		}
-	}
+	// The grid strokes are detailed, but the physical surface is one planar
+	// patch. A single face gives depth and point-occlusion stages the correct
+	// solid footprint without rasterizing every small line cell.
+	mesh.Faces = append(mesh.Faces, model.Face{Vertices: []int{
+		index(divisions, 0), index(divisions, divisions),
+		index(0, divisions), index(0, 0),
+	}})
 	// Grid markings are intentional surface-associated detail. They remain
 	// eligible for face visibility and depth tests but are not mistaken for
 	// coplanar construction seams by the hidden-line policy.
@@ -168,9 +171,9 @@ func trenchWireframe(centerX, halfWidth, depth, zCenter, length float64) model.M
 		},
 	}
 	mesh.Faces = []model.Face{
-		{Vertices: []int{0, 1, 5, 4}}, // left wall, outward normal +X
-		{Vertices: []int{2, 6, 7, 3}}, // right wall, outward normal -X
-		{Vertices: []int{4, 5, 7, 6}}, // floor, navigable side +Y
+		{Vertices: []int{0, 1, 5, 4}, DoubleSided: true}, // left wall, outward normal +X
+		{Vertices: []int{2, 6, 7, 3}, DoubleSided: true}, // right wall, outward normal -X
+		{Vertices: []int{4, 5, 7, 6}, DoubleSided: true}, // floor, navigable side +Y
 	}
 	for i := 1; i < 8; i++ {
 		z := zCenter - length/2 + length*float64(i)/8
@@ -232,7 +235,7 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 		features = append(features, Feature{
 			ID: featureID(coordinate, kind, index), Kind: kind,
 			Pose:  kinematics.Pose{Position: position, Orientation: math3d.IdentityQuaternion()},
-			Parts: []scene.Part{{Name: kind, Mesh: localGeometry, Color: color.RGBA{R: 64, G: 255, B: 96, A: 255}, LineWidth: 1.5}},
+			Parts: []scene.Part{{Name: kind, Mesh: localGeometry, Color: color.RGBA{R: 64, G: 255, B: 96, A: 255}, LineWidth: 1.5, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll}},
 			Boxes: []collision.OrientedBox{box}, Targetable: true, Hittable: true,
 		})
 	}

@@ -1,14 +1,19 @@
 package game
 
 import (
+	"image/color"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
+	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/model"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
+	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
@@ -114,6 +119,157 @@ func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
 	fighter.Frame = scene.FrameID("death-star/surface")
 	if g.beginHyperspaceArrival(target) {
 		t.Fatal("surface-frame fighter incorrectly started orbital arrival")
+	}
+}
+
+func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
+	g := New()
+	if len(g.environments) == 0 {
+		t.Fatal("game has no surface environment to start in")
+	}
+	if !g.startInSurfaceMode() {
+		t.Fatal("surface start did not find an exterior-to-surface transition")
+	}
+	fighter := g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("surface start removed the player fighter")
+	}
+	if normalizedObjectFrame(*fighter) != g.environments[0].bound.FrameID {
+		t.Fatalf("surface start frame=%q, want %q", fighter.Frame, g.environments[0].bound.FrameID)
+	}
+	entry := g.environments[0].bound.Definition.Transitions[0].EntryPose
+	if fighter.Pose != entry {
+		t.Fatalf("surface start pose=%+v, want %+v", fighter.Pose, entry)
+	}
+	if g.viewCamera.Mode != camera.Cockpit || len(g.environments[0].tiles) == 0 {
+		t.Fatalf("surface start view=%v tiles=%d, want cockpit with streamed tiles", g.viewCamera.Mode, len(g.environments[0].tiles))
+	}
+	g.realismLevel = 0
+	if !g.gameplayDepthRequirements(g.activeViewFrame()).enabled() {
+		t.Fatal("opaque surface features did not request a depth pass at low realism")
+	}
+}
+
+func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
+	visibleSelf := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true)
+	visiblePlain := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, false)
+
+	t.Run("inactive showcase cannot force gameplay depth", func(t *testing.T) {
+		g := newDepthRequirementTestGame(visiblePlain)
+		g.showcaseObjects = []scene.Object{visibleSelf}
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+			t.Fatalf("inactive showcase forced gameplay depth: %+v", got)
+		}
+	})
+
+	t.Run("other frame cannot force active view depth", func(t *testing.T) {
+		other := visibleSelf
+		other.Frame = scene.FrameID("test/other")
+		g := newDepthRequirementTestGame(other)
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+			t.Fatalf("other-frame object forced depth: %+v", got)
+		}
+	})
+
+	t.Run("off screen self occluder cannot force depth", func(t *testing.T) {
+		offscreen := visibleSelf
+		offscreen.Pose.Position.X = 100
+		g := newDepthRequirementTestGame(offscreen)
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+			t.Fatalf("off-screen object forced depth: %+v", got)
+		}
+	})
+
+	t.Run("visible self occluding part forces depth", func(t *testing.T) {
+		g := newDepthRequirementTestGame(visibleSelf)
+		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
+		if !got.enabled() || !got.selfOcclusionRequired || got.profileRequested {
+			t.Fatalf("visible self occluder requirements=%+v", got)
+		}
+	})
+
+	t.Run("depth profile needs relevant physical geometry", func(t *testing.T) {
+		g := newDepthRequirementTestGame(visiblePlain)
+		g.realismLevel = 3
+		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
+		if !got.enabled() || !got.profileRequested || got.selfOcclusionRequired {
+			t.Fatalf("profile requirements=%+v", got)
+		}
+	})
+
+	t.Run("point star occlusion alone does not force scene depth", func(t *testing.T) {
+		starOccluder := visiblePlain
+		starOccluder.Parts[0].Mesh.SkipDepth = true
+		starOccluder.Parts[0].Mesh.PointOccluder = true
+		g := newDepthRequirementTestGame(starOccluder)
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() || got.candidateParts != 0 {
+			t.Fatalf("point occluder forced scene depth: %+v", got)
+		}
+	})
+
+	t.Run("cockpit excluded part cannot force cockpit depth", func(t *testing.T) {
+		cockpit := visibleSelf
+		cockpit.Parts[0].VisibleInCockpit = false
+		g := newDepthRequirementTestGame(cockpit)
+		g.viewCamera.Mode = camera.Cockpit
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+			t.Fatalf("cockpit-excluded geometry forced depth: %+v", got)
+		}
+	})
+
+	t.Run("other environment frame cannot force depth", func(t *testing.T) {
+		g := newDepthRequirementTestGame(visiblePlain)
+		g.environments = []localEnvironment{{
+			bound: environment.Bound{FrameID: scene.FrameID("test/other")},
+			tiles: map[environment.TileCoordinate]environment.Tile{{}: {Parts: []scene.Part{visibleSelf.Parts[0]}}},
+		}}
+		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+			t.Fatalf("other-frame environment forced depth: %+v", got)
+		}
+	})
+
+	t.Run("counters retain both reasons", func(t *testing.T) {
+		g := newDepthRequirementTestGame(visibleSelf)
+		g.realismLevel = 3
+		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
+		stats := render.Stats{}
+		got.record(&stats)
+		if !stats.DepthEnabledByProfile || !stats.DepthEnabledBySelfOcclusion || stats.DepthCandidateObjects != 1 || stats.DepthCandidateParts != 1 {
+			t.Fatalf("depth counters=%+v", stats)
+		}
+	})
+}
+
+func newDepthRequirementTestGame(objects ...scene.Object) *Game {
+	viewCamera := camera.New(1)
+	return &Game{
+		objects:      objects,
+		viewCamera:   viewCamera,
+		pipeline:     render.NewPipeline(100, 100, math.Pi/2, 0.1, 100),
+		detailLevels: make(map[scene.ObjectID]scene.DetailTier),
+	}
+}
+
+func depthTestObject(id scene.ObjectID, frame scene.FrameID, position math3d.Vec3, selfOccluding bool) scene.Object {
+	policy := scene.SelfOcclusionNone
+	if selfOccluding {
+		policy = scene.SelfOcclusionAll
+	}
+	return scene.Object{
+		ID: id, Name: "depth test", Frame: frame,
+		Pose:         kinematics.Pose{Position: position},
+		VisualRadius: 1,
+		Parts: []scene.Part{{
+			Name: "physical", Mesh: model.Cube(1), Color: color.RGBA{A: 255}, LineWidth: 1,
+			SelfOccluding: selfOccluding, SelfOcclusion: policy,
+		}},
+	}
+}
+
+func TestControlsTextDocumentsSurfaceStart(t *testing.T) {
+	text := controlsText(true)
+	if !strings.Contains(text, "N  START IN SURFACE MODE") {
+		t.Fatalf("start controls do not document surface mode: %q", text)
 	}
 }
 

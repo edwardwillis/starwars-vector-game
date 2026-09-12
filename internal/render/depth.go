@@ -76,14 +76,16 @@ func (buffer *DepthBuffer) write(x, y int, depth float64) {
 	buffer.writeOwned(x, y, depth, 0)
 }
 
-func (buffer *DepthBuffer) writeOwned(x, y int, depth float64, owner uint64) {
+func (buffer *DepthBuffer) writeOwned(x, y int, depth float64, owner uint64) bool {
 	if x < 0 || y < 0 || x >= buffer.Width || y >= buffer.Height {
-		return
+		return false
 	}
 	index := y*buffer.Width + x
 	if depth < buffer.Values[index] {
 		buffer.Values[index], buffer.Owners[index] = depth, owner
+		return true
 	}
+	return false
 }
 
 // RasterizeDepth adds visible model faces to the depth surface. It deliberately
@@ -101,6 +103,9 @@ func (p Pipeline) RasterizeDepthOwned(mesh model.Model, world math3d.Mat4, buffe
 	for _, face := range prepared.Faces {
 		if len(face.Vertices) < 3 {
 			continue
+		}
+		if p.Stats != nil {
+			p.Stats.DepthFacesSubmitted++
 		}
 		polygon := make([]math3d.Vec3, 0, len(face.Vertices))
 		for _, vertex := range face.Vertices {
@@ -162,8 +167,14 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 	if math.Abs(denom) < 1e-9 {
 		return
 	}
+	if p.Stats != nil {
+		p.Stats.DepthTrianglesRasterized++
+	}
 	for y := minY; y <= maxY; y++ {
 		for x := minX; x <= maxX; x++ {
+			if p.Stats != nil {
+				p.Stats.DepthPixelsTested++
+			}
 			px, py := float64(x)+.5, float64(y)+.5
 			w0 := ((by-cy)*(px-cx) + (cx-bx)*(py-cy)) / denom
 			w1 := ((cy-ay)*(px-cx) + (ax-cx)*(py-cy)) / denom
@@ -172,7 +183,9 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 				continue
 			}
 			depth := 1 / (w0/(-a.Z) + w1/(-b.Z) + w2/(-c.Z))
-			buffer.writeOwned(x, y, depth, owner)
+			if buffer.writeOwned(x, y, depth, owner) && p.Stats != nil {
+				p.Stats.DepthPixelsWritten++
+			}
 		}
 	}
 }

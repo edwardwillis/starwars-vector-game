@@ -48,6 +48,7 @@ var (
 	millenniumFalconCorridor      = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconWindow        = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconTurrets       = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconHyperdrive    = model.Transform(millenniumFalconGeometry.Hyperdrive, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconDetails       = model.Transform(millenniumFalconGeometry.Details, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconDebris        = transformMillenniumFalconFragments(millenniumFalconGeometry.Fragments, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
 	millenniumFalconPolygonShards = buildMillenniumFalconPolygonShards()
@@ -481,7 +482,8 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 }
 
 // MillenniumFalcon returns the multipart Rebel freighter with a closed hull,
-// split mandibles, offset windscreen cockpit, quad turrets, and sensor dish.
+// split mandibles, offset windscreen cockpit, quad turrets, hyperdrive segments,
+// and sensor dish.
 func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
 		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Pose: pose,
@@ -495,6 +497,7 @@ func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			{Name: "forward cargo ramp and roof", Mesh: millenniumFalconCargoRamp, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
 			{Name: "cockpit corridor", Mesh: millenniumFalconCorridor, Color: vectorGreen, LineWidth: standardLineWidth},
 			{Name: "quad laser turrets", Mesh: millenniumFalconTurrets, Color: vectorGreen, LineWidth: standardLineWidth},
+			{Name: "hyperdrive segments", Mesh: millenniumFalconHyperdrive, Color: windowAmber, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
 			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, Detail: scene.DetailMedium},
 			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth},
 		},

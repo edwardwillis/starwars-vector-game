@@ -12,7 +12,7 @@ func TestMillenniumFalconGeometryHasPreparedSolidParts(t *testing.T) {
 	parts := map[string]Model{
 		"full": geometry.Full, "hull": geometry.Hull, "left mandible": geometry.LeftMandible,
 		"right mandible": geometry.RightMandible, "cargo ramp": geometry.CargoRamp, "corridor": geometry.Corridor,
-		"window": geometry.Window, "turrets": geometry.Turrets,
+		"window": geometry.Window, "turrets": geometry.Turrets, "hyperdrive": geometry.Hyperdrive,
 	}
 	for name, part := range parts {
 		if err := part.Validate(); err != nil {
@@ -31,6 +31,35 @@ func TestMillenniumFalconGeometryHasPreparedSolidParts(t *testing.T) {
 		}
 		if len(fragment.PolygonModels()) == 0 {
 			t.Fatalf("fragment %d has no polygon shards", index)
+		}
+	}
+}
+
+func TestMillenniumFalconHyperdriveHasThreeFiniteSolidSegments(t *testing.T) {
+	drive := MillenniumFalconGeometryData().Hyperdrive
+	if err := drive.Validate(); err != nil {
+		t.Fatalf("hyperdrive geometry is invalid: %v", err)
+	}
+	if drive.Topology == nil || len(drive.Faces) != 18 {
+		t.Fatalf("hyperdrive should contain three closed boxes: faces=%d topology=%v", len(drive.Faces), drive.Topology != nil)
+	}
+	if len(drive.Verts) != 24 {
+		t.Fatalf("hyperdrive should contain three finite-thickness rectangles: vertices=%d", len(drive.Verts))
+	}
+	if drive.Topology.BoundsRadius <= 0 {
+		t.Fatal("hyperdrive has no usable bounds")
+	}
+	for index, wantZSign := range []int{-1, 0, 1} {
+		base := index * 8
+		tangent := drive.Verts[base+1].Sub(drive.Verts[base])
+		if wantZSign < 0 && tangent.Z >= -1e-9 {
+			t.Fatalf("left drive segment is not tangent to the rear arc: tangent=%v", tangent)
+		}
+		if wantZSign == 0 && math.Abs(tangent.Z) > 1e-9 {
+			t.Fatalf("middle drive segment is not horizontal: tangent=%v", tangent)
+		}
+		if wantZSign > 0 && tangent.Z <= 1e-9 {
+			t.Fatalf("right drive segment is not tangent to the rear arc: tangent=%v", tangent)
 		}
 	}
 }

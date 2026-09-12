@@ -123,27 +123,170 @@ func partSelfOcclusionMode(part scene.Part, destruction bool) render.SelfOcclusi
 	}
 }
 
-func partsRequirePhysicalDepth(parts []scene.Part) bool {
-	for _, part := range parts {
-		if part.SelfOccluding || part.SelfOcclusion != scene.SelfOcclusionNone {
-			return true
-		}
-	}
-	return false
+// depthRequirements is the small active-view summary that decides whether the
+// optional CPU depth surface is worth preparing. It deliberately contains no
+// geometry: a later PreparedFrame can consume the same candidate decisions.
+type depthRequirements struct {
+	frame                       scene.FrameID
+	profileRequested            bool
+	selfOcclusionRequired       bool
+	candidateObjects            int
+	candidateParts              int
+	activeEnvironmentTiles      int
+	environmentPartsRejected    int
+	environmentFeaturesRejected int
 }
 
-func (g *Game) physicalDepthRequired() bool {
+func (requirements depthRequirements) enabled() bool {
+	return requirements.candidateParts > 0 && (requirements.profileRequested || requirements.selfOcclusionRequired)
+}
+
+func (requirements depthRequirements) record(stats *render.Stats) {
+	if stats == nil {
+		return
+	}
+	stats.DepthCandidateObjects = requirements.candidateObjects
+	stats.DepthCandidateParts = requirements.candidateParts
+	stats.ActiveEnvironmentTiles = requirements.activeEnvironmentTiles
+	stats.EnvironmentPartsBoundsRejected = requirements.environmentPartsRejected
+	stats.EnvironmentFeaturesBoundsRejected = requirements.environmentFeaturesRejected
+	stats.DepthEnabledByProfile = requirements.enabled() && requirements.profileRequested
+	stats.DepthEnabledBySelfOcclusion = requirements.enabled() && requirements.selfOcclusionRequired
+}
+
+func (g *Game) profileRequestsSceneDepth() bool {
+	return g.realismLevel >= 3
+}
+
+func depthCandidatePart(part scene.Part) bool {
+	return len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth
+}
+
+func (g *Game) objectPartVisible(object scene.Object, part scene.Part, detail scene.DetailTier) bool {
+	if part.Detail > detail {
+		return false
+	}
+	insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
+	if insideTargetCockpit && !part.VisibleInCockpit {
+		return false
+	}
+	return !(!insideTargetCockpit && part.CockpitOnly)
+}
+
+// gameplayDepthRequirements considers only the camera's active frame and
+// surviving render candidates. In particular it must not inspect the showcase
+// collection or streamed tiles belonging to another environment frame.
+func (g *Game) gameplayDepthRequirements(viewFrame scene.FrameID) depthRequirements {
+	requirements := depthRequirements{frame: viewFrame, profileRequested: g.profileRequestsSceneDepth()}
 	for _, object := range g.objects {
-		if partsRequirePhysicalDepth(object.Parts) {
-			return true
+		if !g.swarmLaunched {
+			if _, autonomous := g.controllers[object.ID]; autonomous {
+				continue
+			}
+		}
+		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+			continue
+		}
+		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
+			continue
+		}
+		detail := g.objectDetailTier(object)
+		objectCandidate := false
+		for _, part := range object.Parts {
+			if !g.objectPartVisible(object, part, detail) || !depthCandidatePart(part) {
+				continue
+			}
+			requirements.candidateParts++
+			objectCandidate = true
+			if partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent) != render.SelfOcclusionNone {
+				requirements.selfOcclusionRequired = true
+			}
+		}
+		if objectCandidate {
+			requirements.candidateObjects++
 		}
 	}
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID != viewFrame {
+			continue
+		}
+		for _, tile := range runtime.tiles {
+			requirements.activeEnvironmentTiles++
+			for _, part := range tile.Parts {
+				if !g.meshInView(part.Mesh, math3d.Identity()) {
+					requirements.environmentPartsRejected++
+					continue
+				}
+				if !depthCandidatePart(part) {
+					continue
+				}
+				requirements.candidateParts++
+				if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
+					requirements.selfOcclusionRequired = true
+				}
+			}
+			for _, feature := range tile.Features {
+				if runtime.destroyed[feature.ID] {
+					continue
+				}
+				featureCandidate := false
+				for _, part := range feature.Parts {
+					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+						requirements.environmentPartsRejected++
+						continue
+					}
+					featureCandidate = true
+					if !depthCandidatePart(part) {
+						continue
+					}
+					requirements.candidateParts++
+					if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
+						requirements.selfOcclusionRequired = true
+					}
+				}
+				if !featureCandidate {
+					requirements.environmentFeaturesRejected++
+				}
+			}
+		}
+	}
+	return requirements
+}
+
+func (g *Game) showcaseDepthRequirements() depthRequirements {
+	requirements := depthRequirements{frame: scene.ExteriorFrame, profileRequested: g.profileRequestsSceneDepth()}
 	for _, object := range g.showcaseObjects {
-		if partsRequirePhysicalDepth(object.Parts) {
-			return true
+		if !g.objectInView(object) {
+			continue
+		}
+		objectCandidate := false
+		for _, part := range object.Parts {
+			if !depthCandidatePart(part) {
+				continue
+			}
+			requirements.candidateParts++
+			objectCandidate = true
+			if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
+				requirements.selfOcclusionRequired = true
+			}
+		}
+		if objectCandidate {
+			requirements.candidateObjects++
 		}
 	}
-	return false
+	return requirements
+}
+
+func (g *Game) prepareDepthBuffer(requirements depthRequirements) *render.DepthBuffer {
+	requirements.record(&g.renderStats)
+	if !requirements.enabled() {
+		return nil
+	}
+	if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
+		g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
+	}
+	g.depthBuffer.Clear()
+	return g.depthBuffer
 }
 
 const (
@@ -547,13 +690,17 @@ func (g *Game) Update() error {
 	}
 	g.updateControls(seconds)
 	if !g.started {
+		startSurface := inpututil.IsKeyJustPressed(ebiten.KeyN)
 		if inpututil.IsKeyJustPressed(ebiten.KeyS) ||
 			inpututil.IsKeyJustPressed(ebiten.KeyF) ||
-			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) || startSurface {
 			g.started = true
 			g.controlsRemaining = 0
 			g.controlsPinned = false
-			if fighter := g.objectByID(fighterID); fighter != nil {
+			if startSurface && g.startInSurfaceMode() {
+				// Surface starts intentionally bypass the orbital hyperspace
+				// arrival so the local flight view is available immediately.
+			} else if fighter := g.objectByID(fighterID); fighter != nil {
 				g.beginHyperspaceArrival(fighter.Pose)
 			}
 		}
@@ -686,6 +833,42 @@ func (g *Game) Update() error {
 	g.viewCamera.Update(seconds)
 	g.pipeline.View = g.viewCamera.View(g.objects)
 	return nil
+}
+
+// startInSurfaceMode places the player directly into the first registered
+// exterior-to-surface environment. It is a development-friendly start path
+// used by the title card while the near-surface flight presentation evolves;
+// normal gameplay continues to use the orbital arrival sequence.
+func (g *Game) startInSurfaceMode() bool {
+	if g.world == nil || g.objectByID(fighterID) == nil {
+		return false
+	}
+	for _, runtime := range g.environments {
+		for _, transition := range runtime.bound.Definition.Transitions {
+			if transition.Source != scene.ExteriorFrame {
+				continue
+			}
+			destination := runtime.bound.ResolveFrame(transition.Destination)
+			g.world.Objects = g.objects
+			if err := g.world.Apply(sim.Transfer{ObjectID: fighterID, Destination: destination, Anchor: transition.Name}); err != nil {
+				continue
+			}
+			fighter := g.worldObjectByID(fighterID)
+			if fighter == nil {
+				continue
+			}
+			fighter.Pose = transition.EntryPose
+			fighter.Motion = g.autoMotion
+			g.objects = g.world.Objects
+			g.viewCamera.TargetID = fighterID
+			g.viewCamera.Mode = camera.Cockpit
+			g.hyperspaceArrival = nil
+			g.refreshEnvironmentTiles()
+			g.pipeline.View = g.viewCamera.View(g.objects)
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Game) updateEnvironmentContacts(seconds float64) {
@@ -2660,14 +2843,7 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 		}
 		detail := g.objectDetailTier(object)
 		for partIndex, part := range object.Parts {
-			if part.Detail > detail || len(part.Mesh.Faces) == 0 || part.Mesh.SkipDepth {
-				continue
-			}
-			insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
-			if insideTargetCockpit && !part.VisibleInCockpit {
-				continue
-			}
-			if !insideTargetCockpit && part.CockpitOnly {
+			if !g.objectPartVisible(object, part, detail) || !depthCandidatePart(part) {
 				continue
 			}
 			g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
@@ -2678,18 +2854,18 @@ func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthB
 			continue
 		}
 		for _, tile := range runtime.tiles {
-			for _, part := range tile.Parts {
-				if len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth && g.meshInView(part.Mesh, math3d.Identity()) {
-					g.pipeline.RasterizeDepth(part.Mesh, math3d.Identity(), depth)
+			for partIndex, part := range tile.Parts {
+				if depthCandidatePart(part) && g.meshInView(part.Mesh, math3d.Identity()) {
+					g.pipeline.RasterizeDepthOwned(part.Mesh, math3d.Identity(), depth, environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex))
 				}
 			}
 			for _, feature := range tile.Features {
 				if runtime.destroyed[feature.ID] {
 					continue
 				}
-				for _, part := range feature.Parts {
-					if len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
-						g.pipeline.RasterizeDepth(part.Mesh, feature.Pose.Matrix(), depth)
+				for partIndex, part := range feature.Parts {
+					if depthCandidatePart(part) && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+						g.pipeline.RasterizeDepthOwned(part.Mesh, feature.Pose.Matrix(), depth, environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex))
 					}
 				}
 			}
@@ -2714,16 +2890,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	viewFrame := g.activeViewFrame()
 	g.drawStarfield(screen, viewFrame)
 	g.drawHyperspaceArrival(screen)
+	depthRequirements := g.gameplayDepthRequirements(viewFrame)
 	var depth *render.DepthBuffer
-	if g.realismLevel >= 3 || g.physicalDepthRequired() {
+	if depthRequirements.enabled() {
 		depthStart := time.Now()
-		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
-			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
-		}
-		g.depthBuffer.Clear()
-		depth = g.depthBuffer
+		depth = g.prepareDepthBuffer(depthRequirements)
 		g.rasterizeDepthFrame(viewFrame, depth)
 		g.renderStats.DepthRasterMS = time.Since(depthStart).Seconds() * 1000
+	} else {
+		depthRequirements.record(&g.renderStats)
 	}
 	g.beginWorldBatch()
 	worldJobs := g.worldJobs[:0]
@@ -2784,31 +2959,36 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			continue
 		}
 		for _, tile := range runtime.tiles {
-			for _, part := range tile.Parts {
+			for partIndex, part := range tile.Parts {
 				if !g.meshInView(part.Mesh, math3d.Identity()) {
 					continue
 				}
 				worldJobs = append(worldJobs, worldRenderJob{
 					mesh: part.Mesh, world: math3d.Identity(), depth: depth,
-					color: part.Color, lineWidth: part.LineWidth,
+					owner:         environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex),
+					selfOcclusion: partSelfOcclusionMode(part, false),
+					color:         part.Color, lineWidth: part.LineWidth,
 				})
 			}
 			for _, feature := range tile.Features {
 				if runtime.destroyed[feature.ID] {
 					continue
 				}
-				for _, part := range feature.Parts {
+				for partIndex, part := range feature.Parts {
 					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
 						continue
 					}
 					worldJobs = append(worldJobs, worldRenderJob{
 						mesh: part.Mesh, world: feature.Pose.Matrix(), depth: depth,
-						color: part.Color, lineWidth: part.LineWidth,
+						owner:         environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex),
+						selfOcclusion: partSelfOcclusionMode(part, false),
+						color:         part.Color, lineWidth: part.LineWidth,
 					})
 				}
 			}
 		}
 	}
+	g.renderStats.RenderJobs = len(worldJobs)
 	geometryStart := time.Now()
 	results := g.renderWorldJobs(worldJobs)
 	g.worldJobs = worldJobs
@@ -2890,19 +3070,18 @@ func (g *Game) drawHyperspaceArrival(screen *ebiten.Image) {
 
 func (g *Game) drawShowcase(screen *ebiten.Image) {
 	var depth *render.DepthBuffer
-	if g.realismLevel >= 3 || g.physicalDepthRequired() {
-		if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
-			g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
-		}
-		g.depthBuffer.Clear()
-		depth = g.depthBuffer
+	depthRequirements := g.showcaseDepthRequirements()
+	if depthRequirements.enabled() {
+		depth = g.prepareDepthBuffer(depthRequirements)
 		for _, object := range g.showcaseObjects {
 			for partIndex, part := range object.Parts {
-				if len(part.Mesh.Faces) > 0 {
+				if depthCandidatePart(part) {
 					g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
 				}
 			}
 		}
+	} else {
+		depthRequirements.record(&g.renderStats)
 	}
 	for _, object := range g.showcaseObjects {
 		for partIndex, part := range object.Parts {
@@ -3079,6 +3258,27 @@ func (g *Game) objectInView(object scene.Object) bool {
 // a TIE foil) to occlude another part (such as its cockpit) within one object.
 func renderOwner(objectID scene.ObjectID, partIndex int) uint64 {
 	return (uint64(objectID) << 32) | uint64(partIndex+1)
+}
+
+// environmentPartOwner gives streamed surface geometry a stable depth owner.
+// Without distinct owners, a trench's own coplanar floor and wall surfaces
+// compete with their vector edges and can shimmer as the camera moves.
+func environmentPartOwner(hostID scene.ObjectID, coordinate environment.TileCoordinate, featureID string, partIndex int) uint64 {
+	const prime = uint64(1099511628211)
+	hash := uint64(14695981039346656037) ^ uint64(hostID)
+	mix := func(value uint64) {
+		hash ^= value
+		hash *= prime
+	}
+	mix(uint64(int64(coordinate.X)))
+	mix(uint64(int64(coordinate.Z)))
+	for index := 0; index < len(featureID); index++ {
+		mix(uint64(featureID[index]))
+	}
+	mix(uint64(partIndex + 1))
+	// Keep environment owners outside the ordinary object-owner range and
+	// avoid zero, which deliberately means "include every depth sample".
+	return hash | (uint64(1) << 63)
 }
 
 // meshInView applies the same conservative projected-sphere test to streamed
@@ -3320,6 +3520,7 @@ func addRenderStats(total *render.Stats, part render.Stats) {
 	total.BackfaceRejected += part.BackfaceRejected
 	total.PolicyRejected += part.PolicyRejected
 	total.DepthRejected += part.DepthRejected
+	total.LineDepthSamples += part.LineDepthSamples
 	total.ClippedEdges += part.ClippedEdges
 }
 
@@ -3437,7 +3638,7 @@ func controlsText(startPrompt bool) string {
 		"[ / ]  rendering realism\n" +
 		"?  show / hide controls\n\n"
 	if startPrompt {
-		return text + "PRESS S OR FIRE TO START"
+		return text + "PRESS S OR FIRE TO START\nN  START IN SURFACE MODE"
 	}
 	return text + "PRESS R TO RESTART"
 }
@@ -3498,7 +3699,7 @@ func (g *Game) buildStarOccluders(viewFrame scene.FrameID) {
 		}
 		insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
 		for _, part := range object.Parts {
-			if part.Mesh.SkipDepth || len(part.Mesh.Faces) == 0 {
+			if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || len(part.Mesh.Faces) == 0 {
 				continue
 			}
 			if insideTargetCockpit && !part.VisibleInCockpit {
@@ -3518,7 +3719,7 @@ func (g *Game) buildStarOccluders(viewFrame scene.FrameID) {
 		}
 		for _, tile := range runtime.tiles {
 			for _, part := range tile.Parts {
-				if part.Mesh.SkipDepth || !g.meshInView(part.Mesh, math3d.Identity()) {
+				if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || !g.meshInView(part.Mesh, math3d.Identity()) {
 					continue
 				}
 				for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, math3d.Identity()) {
@@ -3530,7 +3731,7 @@ func (g *Game) buildStarOccluders(viewFrame scene.FrameID) {
 					continue
 				}
 				for _, part := range feature.Parts {
-					if part.Mesh.SkipDepth || !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
+					if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
 						continue
 					}
 					for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, feature.Pose.Matrix()) {
@@ -3647,7 +3848,10 @@ func (g *Game) hudText() string {
 			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
 			"Render objects: %d in, %d visible, %d culled | Vertices: %d input, %d transformed\n"+
 			"Faces: %d input | Edges: %d input, %d output | Rejected: backface %d, policy %d, depth %d, tiny %d\n"+
-			"Clipped edges: %d | Vectors: %d world batches\n"+
+			"Clipped edges: %d | Vectors: %d jobs, %d world batches\n"+
+			"Depth: %d candidate objects, %d candidate parts | enabled profile %t self %t\n"+
+			"Depth work: %d faces, %d triangles, %d pixels tested, %d written, %d line samples\n"+
+			"Environment: %d active tiles | rejected %d parts, %d features\n"+
 			"Billboards: %d objects, %d lines, %d batches | Star occlusion: %d analytic, %d geometry | Stars: %d considered, %d rejected, %d submitted\n"+
 			"Timing ms: depth %.2f | geometry %.2f | vector submit %.2f\n"+
 			"Profile: %s\n"+
@@ -3685,7 +3889,20 @@ func (g *Game) hudText() string {
 		g.renderStats.DepthRejected,
 		g.renderStats.TinyEdges,
 		g.renderStats.ClippedEdges,
+		g.renderStats.RenderJobs,
 		g.renderStats.WorldBatches,
+		g.renderStats.DepthCandidateObjects,
+		g.renderStats.DepthCandidateParts,
+		g.renderStats.DepthEnabledByProfile,
+		g.renderStats.DepthEnabledBySelfOcclusion,
+		g.renderStats.DepthFacesSubmitted,
+		g.renderStats.DepthTrianglesRasterized,
+		g.renderStats.DepthPixelsTested,
+		g.renderStats.DepthPixelsWritten,
+		g.renderStats.LineDepthSamples,
+		g.renderStats.ActiveEnvironmentTiles,
+		g.renderStats.EnvironmentPartsBoundsRejected,
+		g.renderStats.EnvironmentFeaturesBoundsRejected,
 		g.renderStats.BillboardObjects,
 		g.renderStats.BillboardLines,
 		g.renderStats.BillboardBatches,
