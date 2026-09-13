@@ -44,6 +44,8 @@ type flightMode int
 
 const swarmInterceptorSlots = 2
 
+const transitionEnvironmentTileRadius = 2
+
 type autonomousRespawn struct {
 	readyAt    float64
 	definition string
@@ -358,51 +360,101 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 			}
 		}
 	}
-	for _, runtime := range g.environments {
+	for runtimeIndex := range g.environments {
+		runtime := &g.environments[runtimeIndex]
 		if runtime.bound.FrameID != prepared.frame {
 			continue
 		}
-		group := environmentDepthGroup(runtime.bound.HostID)
 		for _, tile := range runtime.tiles {
-			if g.pipeline.Stats != nil {
-				g.pipeline.Stats.ActiveEnvironmentTiles++
-			}
-			for partIndex, part := range tile.Parts {
-				if !g.meshInView(part.Mesh, math3d.Identity()) {
-					if g.pipeline.Stats != nil {
-						g.pipeline.Stats.EnvironmentPartsBoundsRejected++
-					}
-					continue
-				}
-				prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex), color: part.Color, lineWidth: part.LineWidth, group: group, selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
-			}
-			for _, feature := range tile.Features {
-				if runtime.destroyed[feature.ID] {
-					continue
-				}
-				world := feature.Pose.Matrix()
-				visible := false
-				for partIndex, part := range feature.Parts {
-					if !g.meshInView(part.Mesh, world) {
-						if g.pipeline.Stats != nil {
-							g.pipeline.Stats.EnvironmentPartsBoundsRejected++
-						}
-						continue
-					}
-					visible = true
-					prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex), color: part.Color, lineWidth: part.LineWidth, group: group, selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
-				}
-				if !visible && g.pipeline.Stats != nil {
-					g.pipeline.Stats.EnvironmentFeaturesBoundsRejected++
-				}
-			}
+			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity())
 		}
 	}
+	g.appendTransitionEnvironmentCandidates(prepared)
 	g.assignPreparedDepth(prepared)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
 	}
 	return prepared
+}
+
+// appendEnvironmentTileCandidates is the common preparation boundary for
+// active surface geometry and environment geometry shown during an approach
+// presentation. frameWorld expresses the environment frame in the camera's
+// current frame; active environments therefore pass identity while exterior
+// transition/cut-scene views pass the destination frame's world transform.
+func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime *localEnvironment, tile environment.Tile, frameWorld math3d.Mat4) {
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.ActiveEnvironmentTiles++
+	}
+	group := environmentDepthGroup(runtime.bound.HostID)
+	for partIndex, part := range tile.Parts {
+		if !g.meshInView(part.Mesh, frameWorld) {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.EnvironmentPartsBoundsRejected++
+			}
+			continue
+		}
+		prepared.candidates = append(prepared.candidates, preparedCandidate{
+			mesh: part.Mesh, world: frameWorld,
+			owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex),
+			color: part.Color, lineWidth: part.LineWidth, group: group,
+			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
+			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+		})
+	}
+	for _, feature := range tile.Features {
+		if runtime.destroyed[feature.ID] {
+			continue
+		}
+		world := frameWorld.Mul(feature.Pose.Matrix())
+		visible := false
+		for partIndex, part := range feature.Parts {
+			if !g.meshInView(part.Mesh, world) {
+				if g.pipeline.Stats != nil {
+					g.pipeline.Stats.EnvironmentPartsBoundsRejected++
+				}
+				continue
+			}
+			visible = true
+			prepared.candidates = append(prepared.candidates, preparedCandidate{
+				mesh: part.Mesh, world: world,
+				owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex),
+				color: part.Color, lineWidth: part.LineWidth, group: group,
+				selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
+				testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+			})
+		}
+		if !visible && g.pipeline.Stats != nil {
+			g.pipeline.Stats.EnvironmentFeaturesBoundsRejected++
+		}
+	}
+}
+
+// appendTransitionEnvironmentCandidates adds the destination patch visible in
+// the controlled craft's approach presentation. The patch is already acquired
+// during Update, so preparation remains a read-only classification pass and
+// all transition geometry follows the same depth, point-occlusion, clipping,
+// batching, and instrumentation path as ordinary world geometry.
+func (g *Game) appendTransitionEnvironmentCandidates(prepared *preparedFrame) {
+	transition, runtime, ok := g.viewTransitionEnvironment()
+	if !ok || runtime.bound.FrameID == prepared.frame {
+		return
+	}
+	framePose, err := g.world.FramePose(transition.destination)
+	if err != nil {
+		return
+	}
+	frameWorld := framePose.Matrix()
+	for tileX := -transitionEnvironmentTileRadius; tileX <= transitionEnvironmentTileRadius; tileX++ {
+		for tileZ := -transitionEnvironmentTileRadius; tileZ <= transitionEnvironmentTileRadius; tileZ++ {
+			coordinate := environment.TileCoordinate{X: tileX, Z: tileZ}
+			tile, exists := runtime.tiles[coordinate]
+			if !exists {
+				continue
+			}
+			g.appendEnvironmentTileCandidates(prepared, runtime, tile, frameWorld)
+		}
+	}
 }
 
 func (g *Game) prepareShowcaseFrame() *preparedFrame {
@@ -906,6 +958,7 @@ func (g *Game) Update() error {
 			g.objects = g.world.Objects
 			g.advanceEnvironmentTransitions(seconds, inpututil.IsKeyJustPressed(ebiten.KeyEscape))
 		}
+		g.refreshTransitionEnvironmentTiles()
 		g.pipeline.View = g.viewCamera.View(g.objects)
 		return nil
 	}
@@ -957,6 +1010,7 @@ func (g *Game) Update() error {
 		return err
 	}
 	g.refreshEnvironmentTiles()
+	g.refreshTransitionEnvironmentTiles()
 	g.updateDebris(seconds)
 	g.resolveLaserCollisions(previousPositions)
 	g.resolveSolidCollisions(previousPositions)
@@ -1246,6 +1300,48 @@ func (g *Game) refreshEnvironmentTiles() {
 			}
 		}
 		runtime.tiles = tiles
+	}
+}
+
+// viewTransitionEnvironment resolves the one environment presentation visible
+// to this camera. Other fighters may transition concurrently, but their
+// destination patches must not add invisible preparation or tile-generation
+// work to the local view.
+func (g *Game) viewTransitionEnvironment() (environmentTransition, *localEnvironment, bool) {
+	if g.world == nil || g.viewCamera == nil {
+		return environmentTransition{}, nil, false
+	}
+	transition, exists := g.transitions[g.viewCamera.TargetID]
+	if !exists {
+		return environmentTransition{}, nil, false
+	}
+	for index := range g.environments {
+		if g.environments[index].bound.FrameID == transition.destination {
+			return transition, &g.environments[index], true
+		}
+	}
+	return environmentTransition{}, nil, false
+}
+
+// refreshTransitionEnvironmentTiles acquires presentation geometry during the
+// update phase. Drawing and prepared-frame construction never invoke a tile
+// factory, which keeps rendering free of simulation/cache mutation and gives
+// future cut scenes the same explicit preparation boundary.
+func (g *Game) refreshTransitionEnvironmentTiles() {
+	_, runtime, ok := g.viewTransitionEnvironment()
+	if !ok {
+		return
+	}
+	if runtime.tiles == nil {
+		runtime.tiles = make(map[environment.TileCoordinate]environment.Tile)
+	}
+	for tileX := -transitionEnvironmentTileRadius; tileX <= transitionEnvironmentTileRadius; tileX++ {
+		for tileZ := -transitionEnvironmentTileRadius; tileZ <= transitionEnvironmentTileRadius; tileZ++ {
+			coordinate := environment.TileCoordinate{X: tileX, Z: tileZ}
+			if _, exists := runtime.tiles[coordinate]; !exists {
+				runtime.tiles[coordinate] = runtime.bound.Definition.Tile(coordinate)
+			}
+		}
 	}
 }
 
@@ -3065,7 +3161,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.pipeline.Stats.ObjectsVisible++
 		}
 	}
-	g.drawTransitionEnvironment(screen)
 	g.renderStats.GeometryMS = time.Since(geometryStart).Seconds() * 1000
 	vectorSubmitStart := time.Now()
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
@@ -3224,56 +3319,6 @@ func drawVectorTextWithNumericHighlight(screen *ebiten.Image, centerX, topY floa
 		}
 		drawVectorGlyph(screen, left, topY, character, textColor)
 		left += glyphWidth + glyphGap
-	}
-}
-
-func (g *Game) drawTransitionEnvironment(screen *ebiten.Image) {
-	if len(g.transitions) == 0 || g.world == nil {
-		return
-	}
-	for _, transition := range g.transitions {
-		if transition.objectID != g.viewCamera.TargetID {
-			continue
-		}
-		var runtime *localEnvironment
-		for index := range g.environments {
-			if g.environments[index].bound.FrameID == transition.destination {
-				runtime = &g.environments[index]
-				break
-			}
-		}
-		if runtime == nil {
-			continue
-		}
-		framePose, err := g.world.FramePose(transition.destination)
-		if err != nil {
-			continue
-		}
-		frameWorld := framePose.Matrix()
-		// Preload a compact patch around the declared entry corridor. It is
-		// rendered in host/world coordinates during the exterior transition;
-		// normal surface streaming takes over after the frame transfer.
-		for tileX := -2; tileX <= 2; tileX++ {
-			for tileZ := -2; tileZ <= 2; tileZ++ {
-				coordinate := environment.TileCoordinate{X: tileX, Z: tileZ}
-				tile, exists := runtime.tiles[coordinate]
-				if !exists {
-					tile = runtime.bound.Definition.Tile(coordinate)
-				}
-				for _, part := range tile.Parts {
-					g.queueWorldLines(g.pipeline.Render(part.Mesh, frameWorld), part.Color, part.LineWidth)
-				}
-				for _, feature := range tile.Features {
-					if runtime.destroyed[feature.ID] {
-						continue
-					}
-					for _, part := range feature.Parts {
-						worldMatrix := frameWorld.Mul(feature.Pose.Matrix())
-						g.queueWorldLines(g.pipeline.Render(part.Mesh, worldMatrix), part.Color, part.LineWidth)
-					}
-				}
-			}
-		}
 	}
 }
 

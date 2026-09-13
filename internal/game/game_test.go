@@ -16,6 +16,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
+	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 )
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
@@ -291,6 +292,76 @@ func TestPreparedEnvironmentCandidatesShareFrameDomain(t *testing.T) {
 	for _, candidate := range prepared.candidates {
 		if candidate.domain != environmentDepthGroup(42) {
 			t.Fatalf("environment candidate domain=%v", candidate.domain)
+		}
+		if candidate.world != math3d.Identity() {
+			t.Fatalf("active environment candidate world=%v, want identity", candidate.world)
+		}
+	}
+}
+
+func TestTransitionEnvironmentUsesPreparedFrame(t *testing.T) {
+	destination := scene.FrameID("test/surface")
+	framePose := kinematics.Pose{
+		Position:    math3d.Vec3{X: 3, Y: 2, Z: -8},
+		Orientation: math3d.IdentityQuaternion(),
+	}
+	part := scene.Part{
+		Name: "surface", Mesh: model.Cube(1), Color: color.RGBA{G: 255, A: 255}, LineWidth: 1,
+		SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll,
+	}
+	featurePose := kinematics.Pose{Position: math3d.Vec3{X: 0.5}, Orientation: math3d.IdentityQuaternion()}
+	tileCalls := 0
+	g := newDepthRequirementTestGame()
+	g.world = &sim.World{Frames: map[scene.FrameID]sim.Frame{
+		scene.ExteriorFrame: {ID: scene.ExteriorFrame, Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}},
+		destination:         {ID: destination, Pose: framePose},
+	}}
+	g.transitions = map[scene.ObjectID]environmentTransition{
+		fighterID: {objectID: fighterID, destination: destination},
+	}
+	g.environments = []localEnvironment{{
+		bound: environment.Bound{
+			HostID: 42, FrameID: destination,
+			Definition: environment.Definition{Tile: func(coordinate environment.TileCoordinate) environment.Tile {
+				tileCalls++
+				return environment.Tile{
+					Coordinate: coordinate,
+					Parts:      []scene.Part{part},
+					Features: []environment.Feature{
+						{ID: "tower", Pose: featurePose, Parts: []scene.Part{part}},
+						{ID: "destroyed", Pose: featurePose, Parts: []scene.Part{part}},
+					},
+				}
+			}},
+		},
+		destroyed: map[string]bool{"destroyed": true},
+	}}
+
+	g.refreshTransitionEnvironmentTiles()
+	wantTiles := (transitionEnvironmentTileRadius*2 + 1) * (transitionEnvironmentTileRadius*2 + 1)
+	if tileCalls != wantTiles || len(g.environments[0].tiles) != wantTiles {
+		t.Fatalf("transition acquisition made %d tile calls and retained %d tiles, want %d", tileCalls, len(g.environments[0].tiles), wantTiles)
+	}
+	prepared := g.prepareGameplayFrame()
+	if tileCalls != wantTiles {
+		t.Fatalf("prepared-frame construction invoked tile factory: calls=%d, want %d", tileCalls, wantTiles)
+	}
+	if len(prepared.candidates) != wantTiles*2 {
+		t.Fatalf("prepared %d transition candidates, want %d tile/visible-feature candidates", len(prepared.candidates), wantTiles*2)
+	}
+	if len(prepared.domains) != 1 || prepared.domains[0].id != environmentDepthGroup(42) {
+		t.Fatalf("transition domains=%+v, want one environment domain", prepared.domains)
+	}
+	if prepared.candidates[0].world != framePose.Matrix() {
+		t.Fatalf("transition tile world=%v, want destination frame transform %v", prepared.candidates[0].world, framePose.Matrix())
+	}
+	wantFeatureWorld := framePose.Matrix().Mul(featurePose.Matrix())
+	if prepared.candidates[1].world != wantFeatureWorld {
+		t.Fatalf("transition feature world=%v, want %v", prepared.candidates[1].world, wantFeatureWorld)
+	}
+	for _, candidate := range prepared.candidates {
+		if !candidate.pointOccluder || candidate.domain != environmentDepthGroup(42) {
+			t.Fatalf("transition candidate bypassed occlusion/depth classification: %+v", candidate)
 		}
 	}
 }
