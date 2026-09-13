@@ -101,6 +101,55 @@ type worldRenderJob struct {
 	lineWidth     float32
 }
 
+type preparedCandidate struct {
+	mesh           modelpkg.Model
+	world          math3d.Mat4
+	owner          uint64
+	objectID       scene.ObjectID
+	color          color.Color
+	lineWidth      float32
+	selfOcclusion  render.SelfOcclusionMode
+	group          depthDomainID
+	domain         depthDomainID
+	writesDepth    bool
+	testsDepth     bool
+	pointOccluder  bool
+	analyticSphere bool
+	object         scene.Object
+	billboard      appearance.Billboard
+	isBillboard    bool
+}
+
+type depthDomainKind uint8
+
+const (
+	depthDomainNone depthDomainKind = iota
+	depthDomainScene
+	depthDomainObject
+	depthDomainEnvironment
+)
+
+type depthDomainID struct {
+	kind depthDomainKind
+	id   scene.ObjectID
+}
+
+func (domain depthDomainID) active() bool { return domain.kind != depthDomainNone }
+
+type preparedDepthDomain struct {
+	id      depthDomainID
+	members []int
+	writers []int
+}
+
+type preparedFrame struct {
+	frame        scene.FrameID
+	candidates   []preparedCandidate
+	domains      []preparedDepthDomain
+	domainLookup map[depthDomainID]int
+	unscoped     []int
+}
+
 type worldRenderResult struct {
 	lines     []render.Line
 	stats     render.Stats
@@ -123,43 +172,8 @@ func partSelfOcclusionMode(part scene.Part, destruction bool) render.SelfOcclusi
 	}
 }
 
-// depthRequirements is the small active-view summary that decides whether the
-// optional CPU depth surface is worth preparing. It deliberately contains no
-// geometry: a later PreparedFrame can consume the same candidate decisions.
-type depthRequirements struct {
-	frame                       scene.FrameID
-	profileRequested            bool
-	selfOcclusionRequired       bool
-	candidateObjects            int
-	candidateParts              int
-	activeEnvironmentTiles      int
-	environmentPartsRejected    int
-	environmentFeaturesRejected int
-}
-
-func (requirements depthRequirements) enabled() bool {
-	return requirements.candidateParts > 0 && (requirements.profileRequested || requirements.selfOcclusionRequired)
-}
-
-func (requirements depthRequirements) record(stats *render.Stats) {
-	if stats == nil {
-		return
-	}
-	stats.DepthCandidateObjects = requirements.candidateObjects
-	stats.DepthCandidateParts = requirements.candidateParts
-	stats.ActiveEnvironmentTiles = requirements.activeEnvironmentTiles
-	stats.EnvironmentPartsBoundsRejected = requirements.environmentPartsRejected
-	stats.EnvironmentFeaturesBoundsRejected = requirements.environmentFeaturesRejected
-	stats.DepthEnabledByProfile = requirements.enabled() && requirements.profileRequested
-	stats.DepthEnabledBySelfOcclusion = requirements.enabled() && requirements.selfOcclusionRequired
-}
-
 func (g *Game) profileRequestsSceneDepth() bool {
 	return g.realismLevel >= 3
-}
-
-func depthCandidatePart(part scene.Part) bool {
-	return len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth
 }
 
 func (g *Game) objectPartVisible(object scene.Object, part scene.Part, detail scene.DetailTier) bool {
@@ -173,120 +187,240 @@ func (g *Game) objectPartVisible(object scene.Object, part scene.Part, detail sc
 	return !(!insideTargetCockpit && part.CockpitOnly)
 }
 
-// gameplayDepthRequirements considers only the camera's active frame and
-// surviving render candidates. In particular it must not inspect the showcase
-// collection or streamed tiles belonging to another environment frame.
-func (g *Game) gameplayDepthRequirements(viewFrame scene.FrameID) depthRequirements {
-	requirements := depthRequirements{frame: viewFrame, profileRequested: g.profileRequestsSceneDepth()}
+var sceneDepthDomain = depthDomainID{kind: depthDomainScene}
+
+func objectDepthGroup(id scene.ObjectID) depthDomainID {
+	return depthDomainID{kind: depthDomainObject, id: id}
+}
+
+func environmentDepthGroup(id scene.ObjectID) depthDomainID {
+	return depthDomainID{kind: depthDomainEnvironment, id: id}
+}
+
+func (g *Game) resetPreparedFrame(frame scene.FrameID) *preparedFrame {
+	prepared := &g.prepared
+	prepared.frame = frame
+	prepared.candidates = prepared.candidates[:0]
+	prepared.domains = prepared.domains[:0]
+	prepared.unscoped = prepared.unscoped[:0]
+	if prepared.domainLookup == nil {
+		prepared.domainLookup = make(map[depthDomainID]int)
+	} else {
+		clear(prepared.domainLookup)
+	}
+	return prepared
+}
+
+func depthWriteCandidate(part scene.Part) bool {
+	return len(part.Mesh.Faces) > 0 && !part.Mesh.SkipDepth && !part.Mesh.DepthTestOnly
+}
+
+func depthTestCandidate(part scene.Part) bool {
+	return !part.Mesh.SkipDepth || part.Mesh.DepthTestOnly
+}
+
+func pointOcclusionCandidate(part scene.Part) bool {
+	return len(part.Mesh.Faces) > 0 && (!part.Mesh.SkipDepth || part.Mesh.PointOccluder)
+}
+
+func addPreparedDomain(prepared *preparedFrame, id depthDomainID) *preparedDepthDomain {
+	if index, ok := prepared.domainLookup[id]; ok {
+		return &prepared.domains[index]
+	}
+	index := len(prepared.domains)
+	if index < cap(prepared.domains) {
+		prepared.domains = prepared.domains[:index+1]
+		domain := &prepared.domains[index]
+		domain.id = id
+		domain.members = domain.members[:0]
+		domain.writers = domain.writers[:0]
+	} else {
+		prepared.domains = append(prepared.domains, preparedDepthDomain{id: id})
+	}
+	prepared.domainLookup[id] = index
+	return &prepared.domains[index]
+}
+
+func (g *Game) assignPreparedDepth(prepared *preparedFrame) {
+	profile := g.profileRequestsSceneDepth()
+	physical := false
+	for _, candidate := range prepared.candidates {
+		physical = physical || candidate.writesDepth
+	}
+	if profile && physical {
+		addPreparedDomain(prepared, sceneDepthDomain)
+		for index := range prepared.candidates {
+			candidate := &prepared.candidates[index]
+			if candidate.writesDepth || candidate.testsDepth {
+				candidate.domain = sceneDepthDomain
+			}
+		}
+	} else {
+		for _, candidate := range prepared.candidates {
+			if candidate.writesDepth && candidate.selfOcclusion != render.SelfOcclusionNone {
+				addPreparedDomain(prepared, candidate.group)
+			}
+		}
+		for index := range prepared.candidates {
+			candidate := &prepared.candidates[index]
+			if _, ok := prepared.domainLookup[candidate.group]; ok && (candidate.writesDepth || candidate.testsDepth) {
+				candidate.domain = candidate.group
+			}
+		}
+	}
+	for index := range prepared.candidates {
+		candidate := &prepared.candidates[index]
+		if !candidate.domain.active() {
+			prepared.unscoped = append(prepared.unscoped, index)
+			continue
+		}
+		domain := addPreparedDomain(prepared, candidate.domain)
+		domain.members = append(domain.members, index)
+		if candidate.writesDepth {
+			domain.writers = append(domain.writers, index)
+		}
+	}
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.ActiveDepthDomains = len(prepared.domains)
+		g.pipeline.Stats.DepthEnabledByProfile = profile && physical
+		for _, candidate := range prepared.candidates {
+			if candidate.writesDepth {
+				g.pipeline.Stats.DepthCandidateParts++
+			}
+			if candidate.domain.active() && candidate.selfOcclusion != render.SelfOcclusionNone {
+				g.pipeline.Stats.DepthEnabledBySelfOcclusion = true
+			}
+			if candidate.writesDepth && candidate.domain.active() {
+				g.pipeline.Stats.DepthWritingCandidates++
+			}
+			if candidate.testsDepth && candidate.domain.active() {
+				g.pipeline.Stats.DepthTestingCandidates++
+			}
+		}
+	}
+}
+
+func (g *Game) prepareGameplayFrame() *preparedFrame {
+	prepared := g.resetPreparedFrame(g.activeViewFrame())
 	for _, object := range g.objects {
 		if !g.swarmLaunched {
 			if _, autonomous := g.controllers[object.ID]; autonomous {
 				continue
 			}
 		}
-		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+		if normalizedObjectFrame(object) != prepared.frame {
 			continue
 		}
-		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
+		if g.pipeline.Stats != nil {
+			g.pipeline.Stats.ObjectsInput++
+		}
+		if !g.objectInView(object) {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.ObjectsCulled++
+				g.pipeline.Stats.ObjectsBoundsRejected++
+			}
 			continue
 		}
-		detail := g.objectDetailTier(object)
-		objectCandidate := false
-		for _, part := range object.Parts {
-			if !g.objectPartVisible(object, part, detail) || !depthCandidatePart(part) {
+		definition, hasAppearance := g.appearanceRegistry.ForObject(object.Definition, object.Appearance)
+		if hasAppearance && definition.Kind == "vector-billboard" {
+			prepared.candidates = append(prepared.candidates, preparedCandidate{
+				object: object, billboard: definition.Billboard, isBillboard: true,
+				analyticSphere: definition.PointOccluder == "sphere",
+			})
+			continue
+		}
+		candidateStart := len(prepared.candidates)
+		detail, world := g.objectDetailTier(object), object.WorldMatrix()
+		group := objectDepthGroup(object.ID)
+		if transient, ok := g.debris[object.ID]; ok && transient.rootObjectID != 0 {
+			group = objectDepthGroup(transient.rootObjectID)
+		}
+		for partIndex, part := range object.Parts {
+			if !g.objectPartVisible(object, part, detail) {
 				continue
 			}
-			requirements.candidateParts++
-			objectCandidate = true
-			if partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent) != render.SelfOcclusionNone {
-				requirements.selfOcclusionRequired = true
-			}
+			prepared.candidates = append(prepared.candidates, preparedCandidate{
+				mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID,
+				color: part.Color, lineWidth: part.LineWidth, group: group,
+				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
+				writesDepth:   depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !(hasAppearance && definition.PointOccluder == "sphere"),
+			})
 		}
-		if objectCandidate {
-			requirements.candidateObjects++
+		if hasAppearance && definition.PointOccluder == "sphere" {
+			prepared.candidates = append(prepared.candidates, preparedCandidate{analyticSphere: true, object: object})
+		}
+		if g.pipeline.Stats != nil {
+			for _, candidate := range prepared.candidates[candidateStart:] {
+				if candidate.writesDepth {
+					g.pipeline.Stats.DepthCandidateObjects++
+					break
+				}
+			}
 		}
 	}
 	for _, runtime := range g.environments {
-		if runtime.bound.FrameID != viewFrame {
+		if runtime.bound.FrameID != prepared.frame {
 			continue
 		}
+		group := environmentDepthGroup(runtime.bound.HostID)
 		for _, tile := range runtime.tiles {
-			requirements.activeEnvironmentTiles++
-			for _, part := range tile.Parts {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.ActiveEnvironmentTiles++
+			}
+			for partIndex, part := range tile.Parts {
 				if !g.meshInView(part.Mesh, math3d.Identity()) {
-					requirements.environmentPartsRejected++
+					if g.pipeline.Stats != nil {
+						g.pipeline.Stats.EnvironmentPartsBoundsRejected++
+					}
 					continue
 				}
-				if !depthCandidatePart(part) {
-					continue
-				}
-				requirements.candidateParts++
-				if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
-					requirements.selfOcclusionRequired = true
-				}
+				prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex), color: part.Color, lineWidth: part.LineWidth, group: group, selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
 			}
 			for _, feature := range tile.Features {
 				if runtime.destroyed[feature.ID] {
 					continue
 				}
-				featureCandidate := false
-				for _, part := range feature.Parts {
-					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
-						requirements.environmentPartsRejected++
+				world := feature.Pose.Matrix()
+				visible := false
+				for partIndex, part := range feature.Parts {
+					if !g.meshInView(part.Mesh, world) {
+						if g.pipeline.Stats != nil {
+							g.pipeline.Stats.EnvironmentPartsBoundsRejected++
+						}
 						continue
 					}
-					featureCandidate = true
-					if !depthCandidatePart(part) {
-						continue
-					}
-					requirements.candidateParts++
-					if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
-						requirements.selfOcclusionRequired = true
-					}
+					visible = true
+					prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex), color: part.Color, lineWidth: part.LineWidth, group: group, selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
 				}
-				if !featureCandidate {
-					requirements.environmentFeaturesRejected++
+				if !visible && g.pipeline.Stats != nil {
+					g.pipeline.Stats.EnvironmentFeaturesBoundsRejected++
 				}
 			}
 		}
 	}
-	return requirements
+	g.assignPreparedDepth(prepared)
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
+	}
+	return prepared
 }
 
-func (g *Game) showcaseDepthRequirements() depthRequirements {
-	requirements := depthRequirements{frame: scene.ExteriorFrame, profileRequested: g.profileRequestsSceneDepth()}
+func (g *Game) prepareShowcaseFrame() *preparedFrame {
+	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
 	for _, object := range g.showcaseObjects {
 		if !g.objectInView(object) {
 			continue
 		}
-		objectCandidate := false
-		for _, part := range object.Parts {
-			if !depthCandidatePart(part) {
-				continue
-			}
-			requirements.candidateParts++
-			objectCandidate = true
-			if partSelfOcclusionMode(part, false) != render.SelfOcclusionNone {
-				requirements.selfOcclusionRequired = true
-			}
-		}
-		if objectCandidate {
-			requirements.candidateObjects++
+		world := object.WorldMatrix()
+		for partIndex, part := range object.Parts {
+			prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID, color: part.Color, lineWidth: part.LineWidth, group: objectDepthGroup(object.ID), selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
 		}
 	}
-	return requirements
-}
-
-func (g *Game) prepareDepthBuffer(requirements depthRequirements) *render.DepthBuffer {
-	requirements.record(&g.renderStats)
-	if !requirements.enabled() {
-		return nil
+	g.assignPreparedDepth(prepared)
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
 	}
-	if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
-		g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
-	}
-	g.depthBuffer.Clear()
-	return g.depthBuffer
+	return prepared
 }
 
 const (
@@ -362,6 +496,7 @@ type Game struct {
 	billboardBatches         []vectorLineBatch
 	worldBatches             []vectorLineBatch
 	worldJobs                []worldRenderJob
+	prepared                 preparedFrame
 	visibleObjectIDs         map[scene.ObjectID]bool
 	starPixel                *ebiten.Image
 	starVertices             []ebiten.Vertex
@@ -2820,191 +2955,110 @@ func (g *Game) updateZoom() {
 	g.viewCamera.AdjustZoom(zoomInput*g.profile.Display.ZoomSpeed*g.profile.Simulation.TickSeconds + wheelY*0.2)
 }
 
-// rasterizeDepthFrame builds the optional CPU occlusion surface from physical
-// polygon geometry in the active coordinate frame. Decorative vector-only
-// models (laser bolts, HUD art, and billboards) deliberately do not contribute
-// depth, so they remain visible as line art while surface objects can hide
-// their rear edges.
-func (g *Game) rasterizeDepthFrame(viewFrame scene.FrameID, depth *render.DepthBuffer) {
-	if depth == nil {
-		return
+// rasterizePreparedDomain builds one isolated CPU occlusion surface from the
+// already classified candidates in a single depth domain.
+func (g *Game) rasterizePreparedDomain(prepared *preparedFrame, domain *preparedDepthDomain, depth *render.DepthBuffer) {
+	for _, candidateIndex := range domain.writers {
+		candidate := prepared.candidates[candidateIndex]
+		g.pipeline.RasterizeDepthOwned(candidate.mesh, candidate.world, depth, candidate.owner)
 	}
-	for _, object := range g.objects {
-		if !g.swarmLaunched {
-			if _, autonomous := g.controllers[object.ID]; autonomous {
-				continue
-			}
-		}
-		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+}
+
+func (g *Game) depthBufferForPrepared(prepared *preparedFrame) *render.DepthBuffer {
+	if len(prepared.domains) == 0 {
+		return nil
+	}
+	if g.depthBuffer == nil || g.depthBuffer.Width != g.pipeline.Width || g.depthBuffer.Height != g.pipeline.Height {
+		g.depthBuffer = render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
+	}
+	return g.depthBuffer
+}
+
+func jobsForPreparedCandidates(prepared *preparedFrame, indexes []int, depth *render.DepthBuffer, jobs []worldRenderJob) []worldRenderJob {
+	for _, candidateIndex := range indexes {
+		candidate := prepared.candidates[candidateIndex]
+		if candidate.isBillboard || candidate.analyticSphere {
 			continue
 		}
-		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
-			continue
+		jobDepth := (*render.DepthBuffer)(nil)
+		if depth != nil && candidate.testsDepth {
+			jobDepth = depth
 		}
-		detail := g.objectDetailTier(object)
-		for partIndex, part := range object.Parts {
-			if !g.objectPartVisible(object, part, detail) || !depthCandidatePart(part) {
-				continue
-			}
-			g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
-		}
+		jobs = append(jobs, worldRenderJob{mesh: candidate.mesh, world: candidate.world, depth: jobDepth, owner: candidate.owner, selfOcclusion: candidate.selfOcclusion, objectID: candidate.objectID, color: candidate.color, lineWidth: candidate.lineWidth})
 	}
-	for _, runtime := range g.environments {
-		if runtime.bound.FrameID != viewFrame {
-			continue
-		}
-		for _, tile := range runtime.tiles {
-			for partIndex, part := range tile.Parts {
-				if depthCandidatePart(part) && g.meshInView(part.Mesh, math3d.Identity()) {
-					g.pipeline.RasterizeDepthOwned(part.Mesh, math3d.Identity(), depth, environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex))
-				}
-			}
-			for _, feature := range tile.Features {
-				if runtime.destroyed[feature.ID] {
-					continue
-				}
-				for partIndex, part := range feature.Parts {
-					if depthCandidatePart(part) && g.meshInView(part.Mesh, feature.Pose.Matrix()) {
-						g.pipeline.RasterizeDepthOwned(part.Mesh, feature.Pose.Matrix(), depth, environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex))
-					}
-				}
-			}
-		}
-	}
+	return jobs
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(background)
-	if g.pipeline.Stats != nil {
-		*g.pipeline.Stats = render.Stats{}
+	g.renderStats = render.Stats{}
+	g.pipeline.FineStats = g.showHUD
+	if g.showHUD {
+		g.pipeline.Stats = &g.renderStats
+	} else {
+		g.pipeline.Stats = nil
 	}
 	if g.showcaseActive {
+		prepared := g.prepareShowcaseFrame()
 		if g.showcaseStarField != nil {
-			g.showcaseStarPoints = g.showcaseStarField.ProjectInto(g.pipeline, g.showcaseStarPoints)
+			g.buildStarOccluders(prepared)
+			g.showcaseStarPoints = g.showcaseStarField.ProjectInto(g.pipeline, g.showcaseStarPoints, &g.starOccluders)
 			g.drawStarPoints(screen, g.showcaseStarPoints)
 		}
-		g.drawShowcase(screen)
+		g.drawShowcase(screen, prepared)
 		return
 	}
 	visibleObjects := 0
-	viewFrame := g.activeViewFrame()
-	g.drawStarfield(screen, viewFrame)
+	prepared := g.prepareGameplayFrame()
+	g.drawStarfield(screen, prepared)
 	g.drawHyperspaceArrival(screen)
-	depthRequirements := g.gameplayDepthRequirements(viewFrame)
-	var depth *render.DepthBuffer
-	if depthRequirements.enabled() {
-		depthStart := time.Now()
-		depth = g.prepareDepthBuffer(depthRequirements)
-		g.rasterizeDepthFrame(viewFrame, depth)
-		g.renderStats.DepthRasterMS = time.Since(depthStart).Seconds() * 1000
-	} else {
-		depthRequirements.record(&g.renderStats)
-	}
 	g.beginWorldBatch()
 	worldJobs := g.worldJobs[:0]
-	if cap(worldJobs) < len(g.objects)*3 {
-		worldJobs = make([]worldRenderJob, 0, len(g.objects)*3)
-	}
-	for _, object := range g.objects {
-		if !g.swarmLaunched {
-			if _, autonomous := g.controllers[object.ID]; autonomous {
-				continue
-			}
-		}
-		if normalizedObjectFrame(object) != viewFrame {
-			continue
-		}
-		if g.pipeline.Stats != nil {
-			g.pipeline.Stats.ObjectsInput++
-		}
-		if !g.objectInView(object) {
-			if g.pipeline.Stats != nil {
-				g.pipeline.Stats.ObjectsCulled++
-			}
-			continue
-		}
-		if definition, ok := g.appearanceRegistry.ForObject(object.Definition, object.Appearance); ok && definition.Kind == "vector-billboard" {
-			if g.drawBillboard(screen, object, definition.Billboard) {
-				visibleObjects++
-				if g.pipeline.Stats != nil {
-					g.pipeline.Stats.ObjectsVisible++
-				}
-			}
-			continue
-		}
-		detail := g.objectDetailTier(object)
-		worldMatrix := object.WorldMatrix()
-		for partIndex, part := range object.Parts {
-			if part.Detail > detail {
-				continue
-			}
-			insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
-			if insideTargetCockpit && !part.VisibleInCockpit {
-				continue
-			}
-			if !insideTargetCockpit && part.CockpitOnly {
-				continue
-			}
-			worldJobs = append(worldJobs, worldRenderJob{
-				mesh: part.Mesh, world: worldMatrix, depth: depth,
-				owner:         renderOwner(object.ID, partIndex),
-				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
-				objectID:      object.ID,
-				color:         part.Color, lineWidth: part.LineWidth,
-			})
-		}
-	}
-	for _, runtime := range g.environments {
-		if runtime.bound.FrameID != viewFrame {
-			continue
-		}
-		for _, tile := range runtime.tiles {
-			for partIndex, part := range tile.Parts {
-				if !g.meshInView(part.Mesh, math3d.Identity()) {
-					continue
-				}
-				worldJobs = append(worldJobs, worldRenderJob{
-					mesh: part.Mesh, world: math3d.Identity(), depth: depth,
-					owner:         environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex),
-					selfOcclusion: partSelfOcclusionMode(part, false),
-					color:         part.Color, lineWidth: part.LineWidth,
-				})
-			}
-			for _, feature := range tile.Features {
-				if runtime.destroyed[feature.ID] {
-					continue
-				}
-				for partIndex, part := range feature.Parts {
-					if !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
-						continue
-					}
-					worldJobs = append(worldJobs, worldRenderJob{
-						mesh: part.Mesh, world: feature.Pose.Matrix(), depth: depth,
-						owner:         environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex),
-						selfOcclusion: partSelfOcclusionMode(part, false),
-						color:         part.Color, lineWidth: part.LineWidth,
-					})
-				}
-			}
-		}
-	}
-	g.renderStats.RenderJobs = len(worldJobs)
-	geometryStart := time.Now()
-	results := g.renderWorldJobs(worldJobs)
-	g.worldJobs = worldJobs
 	if g.visibleObjectIDs == nil {
 		g.visibleObjectIDs = make(map[scene.ObjectID]bool)
 	}
 	for objectID := range g.visibleObjectIDs {
 		delete(g.visibleObjectIDs, objectID)
 	}
-	for _, result := range results {
+	geometryStart := time.Now()
+	depth := g.depthBufferForPrepared(prepared)
+	for _, candidate := range prepared.candidates {
+		if candidate.isBillboard && g.drawBillboard(screen, candidate.object, candidate.billboard) {
+			visibleObjects++
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.ObjectsVisible++
+			}
+		}
+	}
+	worldJobs = jobsForPreparedCandidates(prepared, prepared.unscoped, nil, worldJobs[:0])
+	g.renderStats.RenderJobs += len(worldJobs)
+	for _, result := range g.renderWorldJobs(worldJobs) {
 		addRenderStats(&g.renderStats, result.stats)
 		g.queueWorldLines(result.lines, result.color, result.lineWidth)
 		if result.objectID != 0 && len(result.lines) > 0 {
 			g.visibleObjectIDs[result.objectID] = true
 		}
 	}
+	for domainIndex := range prepared.domains {
+		domain := &prepared.domains[domainIndex]
+		worldJobs = worldJobs[:0]
+		depthStart := time.Now()
+		depth.Clear()
+		g.rasterizePreparedDomain(prepared, domain, depth)
+		if g.pipeline.Stats != nil {
+			g.renderStats.DepthRasterMS += time.Since(depthStart).Seconds() * 1000
+		}
+		worldJobs = jobsForPreparedCandidates(prepared, domain.members, depth, worldJobs)
+		g.renderStats.RenderJobs += len(worldJobs)
+		for _, result := range g.renderWorldJobs(worldJobs) {
+			addRenderStats(&g.renderStats, result.stats)
+			g.queueWorldLines(result.lines, result.color, result.lineWidth)
+			if result.objectID != 0 && len(result.lines) > 0 {
+				g.visibleObjectIDs[result.objectID] = true
+			}
+		}
+	}
+	g.worldJobs = worldJobs
 	for range g.visibleObjectIDs {
 		visibleObjects++
 		if g.pipeline.Stats != nil {
@@ -3068,35 +3122,31 @@ func (g *Game) drawHyperspaceArrival(screen *ebiten.Image) {
 	}
 }
 
-func (g *Game) drawShowcase(screen *ebiten.Image) {
-	var depth *render.DepthBuffer
-	depthRequirements := g.showcaseDepthRequirements()
-	if depthRequirements.enabled() {
-		depth = g.prepareDepthBuffer(depthRequirements)
-		for _, object := range g.showcaseObjects {
-			for partIndex, part := range object.Parts {
-				if depthCandidatePart(part) {
-					g.pipeline.RasterizeDepthOwned(part.Mesh, object.WorldMatrix(), depth, renderOwner(object.ID, partIndex))
-				}
+func (g *Game) drawShowcase(screen *ebiten.Image, prepared *preparedFrame) {
+	depth := g.depthBufferForPrepared(prepared)
+	drawCandidates := func(indexes []int, domainDepth *render.DepthBuffer) {
+		for _, candidateIndex := range indexes {
+			candidate := prepared.candidates[candidateIndex]
+			if candidate.isBillboard || candidate.analyticSphere {
+				continue
 			}
-		}
-	} else {
-		depthRequirements.record(&g.renderStats)
-	}
-	for _, object := range g.showcaseObjects {
-		for partIndex, part := range object.Parts {
 			var lines []render.Line
-			if depth != nil {
-				owner := renderOwner(object.ID, partIndex)
-				mode := partSelfOcclusionMode(part, false)
-				lines = g.pipeline.RenderWithDepthPolicy(part.Mesh, object.WorldMatrix(), depth, owner, mode)
+			if domainDepth != nil && candidate.testsDepth {
+				lines = g.pipeline.RenderWithDepthPolicy(candidate.mesh, candidate.world, domainDepth, candidate.owner, candidate.selfOcclusion)
 			} else {
-				lines = g.pipeline.Render(part.Mesh, object.WorldMatrix())
+				lines = g.pipeline.Render(candidate.mesh, candidate.world)
 			}
 			for _, line := range lines {
-				drawLine(screen, line, part.Color, part.LineWidth)
+				drawLine(screen, line, candidate.color, candidate.lineWidth)
 			}
 		}
+	}
+	drawCandidates(prepared.unscoped, nil)
+	for domainIndex := range prepared.domains {
+		domain := &prepared.domains[domainIndex]
+		depth.Clear()
+		g.rasterizePreparedDomain(prepared, domain, depth)
+		drawCandidates(domain.members, depth)
 	}
 	title := "FIGHTER SHOWCASE"
 	if len(g.showcaseObjects) > 0 {
@@ -3473,7 +3523,9 @@ func (g *Game) renderWorldJobs(jobs []worldRenderJob) []worldRenderResult {
 	renderOne := func(index int) {
 		job := jobs[index]
 		pipeline := g.pipeline
-		pipeline.Stats = &results[index].stats
+		if g.pipeline.Stats != nil {
+			pipeline.Stats = &results[index].stats
+		}
 		if job.depth != nil {
 			owner := job.owner
 			results[index].lines = pipeline.RenderWithDepthPolicy(job.mesh, job.world, job.depth, owner, job.selfOcclusion)
@@ -3667,8 +3719,8 @@ func (g *Game) toggleControls() {
 	g.controlsPinned = true
 }
 
-func (g *Game) drawStarfield(screen *ebiten.Image, viewFrame scene.FrameID) {
-	g.buildStarOccluders(viewFrame)
+func (g *Game) drawStarfield(screen *ebiten.Image, prepared *preparedFrame) {
+	g.buildStarOccluders(prepared)
 	g.starPoints = g.starField.ProjectInto(g.pipeline, g.starPoints, &g.starOccluders)
 	g.drawStarPoints(screen, g.starPoints)
 }
@@ -3677,68 +3729,19 @@ func (g *Game) drawStarfield(screen *ebiten.Image, viewFrame scene.FrameID) {
 // occluders describe large line-art bodies such as the Death Star; ordinary
 // surface models contribute their already-authored, camera-facing triangles.
 // Neither path paints or clears the framebuffer.
-func (g *Game) buildStarOccluders(viewFrame scene.FrameID) {
+func (g *Game) buildStarOccluders(prepared *preparedFrame) {
 	g.starOccluders.Reset()
 	g.starOccluders.Stats = g.pipeline.Stats
-	for _, object := range g.objects {
-		if !g.swarmLaunched {
-			if _, autonomous := g.controllers[object.ID]; autonomous {
-				continue
-			}
-		}
-		if normalizedObjectFrame(object) != viewFrame || !g.objectInView(object) {
+	for _, candidate := range prepared.candidates {
+		if candidate.analyticSphere {
+			g.addSphereStarOccluder(candidate.object)
 			continue
 		}
-		definition, hasAppearance := g.appearanceRegistry.ForObject(object.Definition, object.Appearance)
-		if hasAppearance && definition.PointOccluder == "sphere" {
-			g.addSphereStarOccluder(object)
+		if !candidate.pointOccluder {
 			continue
 		}
-		if hasAppearance && definition.Kind == "vector-billboard" {
-			continue
-		}
-		insideTargetCockpit := g.viewCamera.Mode == camera.Cockpit && object.ID == g.viewCamera.TargetID
-		for _, part := range object.Parts {
-			if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || len(part.Mesh.Faces) == 0 {
-				continue
-			}
-			if insideTargetCockpit && !part.VisibleInCockpit {
-				continue
-			}
-			if !insideTargetCockpit && part.CockpitOnly {
-				continue
-			}
-			for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, object.WorldMatrix()) {
-				g.starOccluders.Add(triangle)
-			}
-		}
-	}
-	for _, runtime := range g.environments {
-		if runtime.bound.FrameID != viewFrame {
-			continue
-		}
-		for _, tile := range runtime.tiles {
-			for _, part := range tile.Parts {
-				if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || !g.meshInView(part.Mesh, math3d.Identity()) {
-					continue
-				}
-				for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, math3d.Identity()) {
-					g.starOccluders.Add(triangle)
-				}
-			}
-			for _, feature := range tile.Features {
-				if runtime.destroyed[feature.ID] {
-					continue
-				}
-				for _, part := range feature.Parts {
-					if (part.Mesh.SkipDepth && !part.Mesh.PointOccluder) || !g.meshInView(part.Mesh, feature.Pose.Matrix()) {
-						continue
-					}
-					for _, triangle := range g.pipeline.ProjectSolidOccluders(part.Mesh, feature.Pose.Matrix()) {
-						g.starOccluders.Add(triangle)
-					}
-				}
-			}
+		for _, triangle := range g.pipeline.ProjectSolidOccluders(candidate.mesh, candidate.world) {
+			g.starOccluders.Add(triangle)
 		}
 	}
 	if g.pipeline.Stats != nil {
@@ -3849,7 +3852,7 @@ func (g *Game) hudText() string {
 			"Render objects: %d in, %d visible, %d culled | Vertices: %d input, %d transformed\n"+
 			"Faces: %d input | Edges: %d input, %d output | Rejected: backface %d, policy %d, depth %d, tiny %d\n"+
 			"Clipped edges: %d | Vectors: %d jobs, %d world batches\n"+
-			"Depth: %d candidate objects, %d candidate parts | enabled profile %t self %t\n"+
+			"Prepared: %d candidates | Depth: %d candidate objects, %d candidate parts, %d writing, %d testing, %d domains | enabled profile %t self %t\n"+
 			"Depth work: %d faces, %d triangles, %d pixels tested, %d written, %d line samples\n"+
 			"Environment: %d active tiles | rejected %d parts, %d features\n"+
 			"Billboards: %d objects, %d lines, %d batches | Star occlusion: %d analytic, %d geometry | Stars: %d considered, %d rejected, %d submitted\n"+
@@ -3891,8 +3894,12 @@ func (g *Game) hudText() string {
 		g.renderStats.ClippedEdges,
 		g.renderStats.RenderJobs,
 		g.renderStats.WorldBatches,
+		g.renderStats.CandidatesPrepared,
 		g.renderStats.DepthCandidateObjects,
 		g.renderStats.DepthCandidateParts,
+		g.renderStats.DepthWritingCandidates,
+		g.renderStats.DepthTestingCandidates,
+		g.renderStats.ActiveDepthDomains,
 		g.renderStats.DepthEnabledByProfile,
 		g.renderStats.DepthEnabledBySelfOcclusion,
 		g.renderStats.DepthFacesSubmitted,

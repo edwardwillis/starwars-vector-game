@@ -1,0 +1,41 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Ebitengine and virtual-display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            libgl1 \
+            libgl1-mesa-dri \
+            libx11-6 \
+            libxcursor1 \
+            libxext6 \
+            libxi6 \
+            libxinerama1 \
+            libxrandr2 \
+            libxrender1
+
+      - name: Run complete test suite
+        run: make test

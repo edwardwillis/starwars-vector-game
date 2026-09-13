@@ -14,19 +14,27 @@ type DepthBuffer struct {
 	Width, Height int
 	Values        []float64
 	Owners        []uint64
+	touched       []int
 }
 
 func NewDepthBuffer(width, height int) *DepthBuffer {
 	size := maxInt(0, width*height)
 	buffer := &DepthBuffer{Width: width, Height: height, Values: make([]float64, size), Owners: make([]uint64, size)}
-	buffer.Clear()
+	for index := range buffer.Values {
+		buffer.Values[index] = math.Inf(1)
+	}
 	return buffer
 }
 
 func (buffer *DepthBuffer) Clear() {
-	for index := range buffer.Values {
+	// Local depth domains reuse one full-size buffer. Reset only pixels written
+	// by the preceding domain so several small objects do not each incur a
+	// full-screen clear.
+	for _, index := range buffer.touched {
 		buffer.Values[index] = math.Inf(1)
+		buffer.Owners[index] = 0
 	}
+	buffer.touched = buffer.touched[:0]
 }
 
 func (buffer *DepthBuffer) depthAt(x, y int) float64 {
@@ -82,6 +90,9 @@ func (buffer *DepthBuffer) writeOwned(x, y int, depth float64, owner uint64) boo
 	}
 	index := y*buffer.Width + x
 	if depth < buffer.Values[index] {
+		if math.IsInf(buffer.Values[index], 1) {
+			buffer.touched = append(buffer.touched, index)
+		}
 		buffer.Values[index], buffer.Owners[index] = depth, owner
 		return true
 	}
@@ -172,7 +183,7 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 	}
 	for y := minY; y <= maxY; y++ {
 		for x := minX; x <= maxX; x++ {
-			if p.Stats != nil {
+			if p.FineStats && p.Stats != nil {
 				p.Stats.DepthPixelsTested++
 			}
 			px, py := float64(x)+.5, float64(y)+.5
@@ -183,7 +194,7 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 				continue
 			}
 			depth := 1 / (w0/(-a.Z) + w1/(-b.Z) + w2/(-c.Z))
-			if buffer.writeOwned(x, y, depth, owner) && p.Stats != nil {
+			if buffer.writeOwned(x, y, depth, owner) && p.FineStats && p.Stats != nil {
 				p.Stats.DepthPixelsWritten++
 			}
 		}

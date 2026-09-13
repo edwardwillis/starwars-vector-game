@@ -73,6 +73,38 @@ sudo apt install gcc libc6-dev libgl1-mesa-dev libxcursor-dev \
   libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
 ```
 
+Headless test runs additionally require a virtual X11 display:
+
+```sh
+sudo apt install xvfb libgl1 libgl1-mesa-dri libx11-6 libxcursor1 \
+  libxext6 libxi6 libxinerama1 libxrandr2 libxrender1
+```
+
+## Testing
+
+Run the complete suite with:
+
+```sh
+make test
+```
+
+On headless Linux, this automatically runs Ebitengine under Xvfb. On systems
+with an active display, it runs `go test ./...` directly. Additional package
+patterns or test flags can be passed to the wrapper when needed:
+
+```sh
+./scripts/test.sh ./internal/game -run TestFireLaser
+```
+
+For a faster display-independent development loop, run:
+
+```sh
+make test-unit
+```
+
+The CI workflow runs the complete Xvfb-backed suite on every push and pull
+request.
+
 ## Run locally
 
 ```sh

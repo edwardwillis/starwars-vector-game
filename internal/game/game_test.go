@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
@@ -145,19 +146,19 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 		t.Fatalf("surface start view=%v tiles=%d, want cockpit with streamed tiles", g.viewCamera.Mode, len(g.environments[0].tiles))
 	}
 	g.realismLevel = 0
-	if !g.gameplayDepthRequirements(g.activeViewFrame()).enabled() {
+	if len(g.prepareGameplayFrame().domains) == 0 {
 		t.Fatal("opaque surface features did not request a depth pass at low realism")
 	}
 }
 
-func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
+func TestGameplayPreparedFrameUsesOnlyActiveCandidates(t *testing.T) {
 	visibleSelf := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true)
 	visiblePlain := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, false)
 
 	t.Run("inactive showcase cannot force gameplay depth", func(t *testing.T) {
 		g := newDepthRequirementTestGame(visiblePlain)
 		g.showcaseObjects = []scene.Object{visibleSelf}
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 {
 			t.Fatalf("inactive showcase forced gameplay depth: %+v", got)
 		}
 	})
@@ -166,7 +167,7 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 		other := visibleSelf
 		other.Frame = scene.FrameID("test/other")
 		g := newDepthRequirementTestGame(other)
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 {
 			t.Fatalf("other-frame object forced depth: %+v", got)
 		}
 	})
@@ -175,15 +176,15 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 		offscreen := visibleSelf
 		offscreen.Pose.Position.X = 100
 		g := newDepthRequirementTestGame(offscreen)
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 {
 			t.Fatalf("off-screen object forced depth: %+v", got)
 		}
 	})
 
 	t.Run("visible self occluding part forces depth", func(t *testing.T) {
 		g := newDepthRequirementTestGame(visibleSelf)
-		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
-		if !got.enabled() || !got.selfOcclusionRequired || got.profileRequested {
+		got := g.prepareGameplayFrame()
+		if len(got.domains) != 1 || got.domains[0].id != objectDepthGroup(visibleSelf.ID) {
 			t.Fatalf("visible self occluder requirements=%+v", got)
 		}
 	})
@@ -191,8 +192,8 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 	t.Run("depth profile needs relevant physical geometry", func(t *testing.T) {
 		g := newDepthRequirementTestGame(visiblePlain)
 		g.realismLevel = 3
-		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
-		if !got.enabled() || !got.profileRequested || got.selfOcclusionRequired {
+		got := g.prepareGameplayFrame()
+		if len(got.domains) != 1 || got.domains[0].id != sceneDepthDomain {
 			t.Fatalf("profile requirements=%+v", got)
 		}
 	})
@@ -202,7 +203,7 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 		starOccluder.Parts[0].Mesh.SkipDepth = true
 		starOccluder.Parts[0].Mesh.PointOccluder = true
 		g := newDepthRequirementTestGame(starOccluder)
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() || got.candidateParts != 0 {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 || len(got.candidates) != 1 {
 			t.Fatalf("point occluder forced scene depth: %+v", got)
 		}
 	})
@@ -212,7 +213,7 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 		cockpit.Parts[0].VisibleInCockpit = false
 		g := newDepthRequirementTestGame(cockpit)
 		g.viewCamera.Mode = camera.Cockpit
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 || len(got.candidates) != 0 {
 			t.Fatalf("cockpit-excluded geometry forced depth: %+v", got)
 		}
 	})
@@ -223,7 +224,7 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 			bound: environment.Bound{FrameID: scene.FrameID("test/other")},
 			tiles: map[environment.TileCoordinate]environment.Tile{{}: {Parts: []scene.Part{visibleSelf.Parts[0]}}},
 		}}
-		if got := g.gameplayDepthRequirements(scene.ExteriorFrame); got.enabled() {
+		if got := g.prepareGameplayFrame(); len(got.domains) != 0 {
 			t.Fatalf("other-frame environment forced depth: %+v", got)
 		}
 	})
@@ -231,13 +232,111 @@ func TestGameplayDepthRequirementsUseOnlyActiveCandidates(t *testing.T) {
 	t.Run("counters retain both reasons", func(t *testing.T) {
 		g := newDepthRequirementTestGame(visibleSelf)
 		g.realismLevel = 3
-		got := g.gameplayDepthRequirements(scene.ExteriorFrame)
 		stats := render.Stats{}
-		got.record(&stats)
-		if !stats.DepthEnabledByProfile || !stats.DepthEnabledBySelfOcclusion || stats.DepthCandidateObjects != 1 || stats.DepthCandidateParts != 1 {
+		g.pipeline.Stats = &stats
+		g.prepareGameplayFrame()
+		if !stats.DepthEnabledByProfile || !stats.DepthEnabledBySelfOcclusion || stats.ActiveDepthDomains != 1 || stats.DepthWritingCandidates != 1 {
 			t.Fatalf("depth counters=%+v", stats)
 		}
 	})
+}
+
+func TestPreparedDepthDomainsStayLocalUnlessProfileRequestsSceneDepth(t *testing.T) {
+	first := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true)
+	second := depthTestObject(2, scene.ExteriorFrame, math3d.Vec3{X: 1, Z: -5}, false)
+	g := newDepthRequirementTestGame(first, second)
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.domains) != 1 || prepared.domains[0].id != objectDepthGroup(1) {
+		t.Fatalf("local domains=%v", prepared.domains)
+	}
+	for _, candidate := range prepared.candidates {
+		if candidate.objectID == 2 && candidate.domain.active() {
+			t.Fatalf("unrelated candidate received local depth: %+v", candidate)
+		}
+	}
+
+	second.Parts[0].SelfOccluding, second.Parts[0].SelfOcclusion = true, scene.SelfOcclusionAll
+	g = newDepthRequirementTestGame(first, second)
+	prepared = g.prepareGameplayFrame()
+	if len(prepared.domains) != 2 {
+		t.Fatalf("independent self-occluders domains=%v", prepared.domains)
+	}
+
+	g = newDepthRequirementTestGame(first, second)
+	g.realismLevel = 3
+	prepared = g.prepareGameplayFrame()
+	if len(prepared.domains) != 1 || prepared.domains[0].id != sceneDepthDomain {
+		t.Fatalf("scene profile domains=%v", prepared.domains)
+	}
+	for _, candidate := range prepared.candidates {
+		if candidate.domain != sceneDepthDomain {
+			t.Fatalf("profile omitted active candidate: %+v", candidate)
+		}
+	}
+}
+
+func TestPreparedEnvironmentCandidatesShareFrameDomain(t *testing.T) {
+	part := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true).Parts[0]
+	g := newDepthRequirementTestGame()
+	g.environments = []localEnvironment{{
+		bound: environment.Bound{HostID: 42, FrameID: scene.ExteriorFrame},
+		tiles: map[environment.TileCoordinate]environment.Tile{
+			{}: {Parts: []scene.Part{part}, Features: []environment.Feature{{ID: "tower", Parts: []scene.Part{part}}}},
+		},
+	}}
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.domains) != 1 || prepared.domains[0].id != environmentDepthGroup(42) {
+		t.Fatalf("environment domains=%v", prepared.domains)
+	}
+	for _, candidate := range prepared.candidates {
+		if candidate.domain != environmentDepthGroup(42) {
+			t.Fatalf("environment candidate domain=%v", candidate.domain)
+		}
+	}
+}
+
+func TestDepthDomainIDsDoNotCollide(t *testing.T) {
+	if objectDepthGroup(2) == objectDepthGroup(3) {
+		t.Fatal("adjacent object IDs produced the same depth domain")
+	}
+	if environmentDepthGroup(2) == environmentDepthGroup(3) {
+		t.Fatal("adjacent environment host IDs produced the same depth domain")
+	}
+	if objectDepthGroup(2) == environmentDepthGroup(2) {
+		t.Fatal("object and environment produced the same depth domain")
+	}
+
+	first := depthTestObject(2, scene.ExteriorFrame, math3d.Vec3{X: -1, Z: -5}, true)
+	second := depthTestObject(3, scene.ExteriorFrame, math3d.Vec3{X: 1, Z: -5}, true)
+	prepared := newDepthRequirementTestGame(first, second).prepareGameplayFrame()
+	if len(prepared.domains) != 2 || prepared.candidates[0].domain == prepared.candidates[1].domain {
+		t.Fatalf("independent adjacent objects were merged into domains: %+v", prepared.domains)
+	}
+}
+
+func TestDeathStarBillboardRetainsAnalyticPointOcclusion(t *testing.T) {
+	deathStar := catalog.DeathStar(40, kinematics.Pose{Position: math3d.Vec3{Z: -50}})
+	deathStar.Appearance = appearance.DeathStarArcadeName
+	g := newDepthRequirementTestGame(deathStar)
+	g.appearanceRegistry = appearance.DefaultRegistry()
+
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.candidates) != 1 || !prepared.candidates[0].isBillboard || !prepared.candidates[0].analyticSphere {
+		t.Fatalf("Death Star billboard candidate lost analytic opacity: %+v", prepared.candidates)
+	}
+	g.buildStarOccluders(prepared)
+	if len(g.starOccluders.Items) != 1 || g.starOccluders.Items[0].OccluderKind() != render.OccluderAnalytic {
+		t.Fatalf("Death Star billboard produced occluders %+v", g.starOccluders.Items)
+	}
+}
+
+func TestPreparedShowcaseRejectsOffscreenObjects(t *testing.T) {
+	offscreen := depthTestObject(900, scene.ExteriorFrame, math3d.Vec3{X: 100, Z: -5}, true)
+	g := newDepthRequirementTestGame()
+	g.showcaseObjects = []scene.Object{offscreen}
+	if prepared := g.prepareShowcaseFrame(); len(prepared.candidates) != 0 || len(prepared.domains) != 0 {
+		t.Fatalf("offscreen showcase prepared=%+v", prepared)
+	}
 }
 
 func newDepthRequirementTestGame(objects ...scene.Object) *Game {
@@ -443,13 +542,14 @@ func TestResetFighterRestoresInitialPoseAndStopsManualMotion(t *testing.T) {
 
 func TestFireLaserSpawnsTrackedBolt(t *testing.T) {
 	g := New()
+	baseObjects := len(g.objects)
+	firstBoltID := g.nextObjectID
 	g.fireLaser()
-	baseObjects := g.profile.Swarm.Count + 1
 	if len(g.objects) != baseObjects+2 || len(g.projectiles) != 2 {
 		t.Fatalf("fire produced %d objects and %d projectiles, want %d and 2", len(g.objects), len(g.projectiles), baseObjects+2)
 	}
 	bolt := g.objects[baseObjects]
-	if bolt.ID != scene.ObjectID(baseObjects+1) || g.owners[bolt.ID] != fighterID {
+	if bolt.ID != firstBoltID || g.owners[bolt.ID] != fighterID {
 		t.Fatalf("unexpected bolt identity or owner: id=%d owner=%d", bolt.ID, g.owners[bolt.ID])
 	}
 	if g.nextMuzzlePair != 1 || g.laserBeamPair != 0 || g.laserBeamTime != g.profile.Combat.BeamTime {
@@ -487,8 +587,8 @@ func TestFireRateAllowsOnlyThreeVolleysInRollingWindow(t *testing.T) {
 
 func TestProjectileExpiresAndIsRemoved(t *testing.T) {
 	g := New()
+	baseObjects := len(g.objects)
 	g.fireLaser()
-	baseObjects := g.profile.Swarm.Count + 1
 	boltIDs := []scene.ObjectID{g.objects[baseObjects].ID, g.objects[baseObjects+1].ID}
 	for _, boltID := range boltIDs {
 		g.projectiles[boltID] = g.profile.Simulation.TickSeconds / 2
@@ -774,7 +874,10 @@ func TestLaserHitBreaksComponentIntoFreshPolygonShards(t *testing.T) {
 	if g.objectByID(componentID) != nil || g.objectByID(boltID) != nil {
 		t.Fatal("component hit did not consume the component and projectile")
 	}
-	wantPolygons := catalog.TIEFighterPolygonCount(componentIndex)
+	wantPolygons, err := g.catalogRegistry.PolygonCount(component.Definition, componentIndex)
+	if err != nil {
+		t.Fatalf("polygon count for %q component %d: %v", component.Definition, componentIndex, err)
+	}
 	polygonCount := 0
 	componentCount := 0
 	for id, transient := range g.debris {

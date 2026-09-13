@@ -51,6 +51,9 @@ type Stats struct {
 	StarsGeometryRejected, StarsSubmitted              int
 	ActiveAnalyticOccluders, ActiveGeometryOccluders   int
 	DepthCandidateObjects, DepthCandidateParts         int
+	CandidatesPrepared, ObjectsBoundsRejected          int
+	DepthWritingCandidates, DepthTestingCandidates     int
+	ActiveDepthDomains                                 int
 	DepthFacesSubmitted, DepthTrianglesRasterized      int
 	DepthPixelsTested, DepthPixelsWritten              int
 	LineDepthSamples                                   int
@@ -214,6 +217,7 @@ type Pipeline struct {
 	MinLinePixels float64
 	DepthBias     float64
 	Stats         *Stats
+	FineStats     bool
 }
 
 func NewPipeline(width, height int, verticalFOV, near, far float64) Pipeline {
@@ -342,7 +346,11 @@ func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthB
 		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
 			segments := []Line{clipped}
 			if useDepth {
-				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge, p.Stats)
+				stats := (*Stats)(nil)
+				if p.FineStats {
+					stats = p.Stats
+				}
+				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge, stats)
 				if len(segments) == 0 && p.Stats != nil {
 					p.Stats.DepthRejected++
 				}
