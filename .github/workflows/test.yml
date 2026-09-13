@@ -27,15 +27,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             xvfb \
-            libgl1 \
-            libgl1-mesa-dri \
-            libx11-6 \
-            libxcursor1 \
-            libxext6 \
-            libxi6 \
-            libxinerama1 \
-            libxrandr2 \
-            libxrender1
+            gcc \
+            libc6-dev \
+            libgl1-mesa-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxxf86vm-dev \
+            libasound2-dev \
+            pkg-config
 
       - name: Run complete test suite
         run: make test
