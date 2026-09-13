@@ -117,3 +117,24 @@ func (m Mat4) TransformDirection(direction Vec3) Vec3 {
 	result := m.Transform(Vec4{X: direction.X, Y: direction.Y, Z: direction.Z})
 	return Vec3{X: result.X, Y: result.Y, Z: result.Z}
 }
+
+// TransformNormal applies the inverse transpose of the affine transform's
+// linear 3x3 component. Unlike TransformDirection, this remains perpendicular
+// to surfaces under the non-uniform instance scaling used by shared geometry.
+func (m Mat4) TransformNormal(normal Vec3) Vec3 {
+	a, b, c := m[0][0], m[0][1], m[0][2]
+	d, e, f := m[1][0], m[1][1], m[1][2]
+	g, h, i := m[2][0], m[2][1], m[2][2]
+	c00, c01, c02 := e*i-f*h, f*g-d*i, d*h-e*g
+	c10, c11, c12 := c*h-b*i, a*i-c*g, b*g-a*h
+	c20, c21, c22 := b*f-c*e, c*d-a*f, a*e-b*d
+	determinant := a*c00 + b*c01 + c*c02
+	if math.Abs(determinant) <= 1e-12 {
+		return m.TransformDirection(normal)
+	}
+	return Vec3{
+		X: (c00*normal.X + c01*normal.Y + c02*normal.Z) / determinant,
+		Y: (c10*normal.X + c11*normal.Y + c12*normal.Z) / determinant,
+		Z: (c20*normal.X + c21*normal.Y + c22*normal.Z) / determinant,
+	}
+}

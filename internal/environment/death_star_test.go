@@ -48,6 +48,29 @@ func TestDeathStarSurfaceFeaturesAreOpaque(t *testing.T) {
 	}
 }
 
+func TestDeathStarTilesProvideAggregateBoundsAndSharedFeatureTopology(t *testing.T) {
+	definition := DeathStarTrench()
+	first := definition.Tile(TileCoordinate{X: 1, Z: 0})
+	second := definition.Tile(TileCoordinate{X: 2, Z: 0})
+	if !first.Bounds.Valid() || !second.Bounds.Valid() {
+		t.Fatalf("tile bounds are not prepared: first=%+v second=%+v", first.Bounds, second.Bounds)
+	}
+	if len(first.Features) == 0 || len(second.Features) == 0 {
+		t.Fatal("surface tiles have no reusable feature instances")
+	}
+	for _, feature := range first.Features {
+		if !feature.Bounds.Valid() || feature.Scale == (math3d.Vec3{}) {
+			t.Fatalf("feature %q lacks local bounds or instance scale: %+v", feature.ID, feature)
+		}
+		if feature.Detail != scene.DetailMedium {
+			t.Fatalf("feature %q detail=%v, want medium", feature.ID, feature.Detail)
+		}
+	}
+	if first.Features[0].Parts[0].Mesh.Topology != second.Features[0].Parts[0].Mesh.Topology {
+		t.Fatal("repeated installations do not share immutable model topology")
+	}
+}
+
 func TestDeathStarTrenchIsFiniteWithinOrdinarySurface(t *testing.T) {
 	definition := DeathStarTrench()
 	ordinary := definition.Tile(TileCoordinate{X: 1, Z: 0})

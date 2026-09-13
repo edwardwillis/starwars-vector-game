@@ -109,26 +109,25 @@ func (p Pipeline) RasterizeDepthOwned(mesh model.Model, world math3d.Mat4, buffe
 	if buffer == nil || len(mesh.Faces) == 0 {
 		return
 	}
-	viewWorld := p.View.Mul(world)
-	prepared := model.Prepare(mesh)
-	for _, face := range prepared.Faces {
-		if len(face.Vertices) < 3 {
-			continue
+	geometry := p.PrepareGeometry(mesh, world, true)
+	p.RasterizePreparedDepthOwned(&geometry, buffer, owner)
+}
+
+// RasterizePreparedDepthOwned consumes the shared projected face triangles;
+// it performs no model traversal, camera transform, clipping, or projection.
+func (p Pipeline) RasterizePreparedDepthOwned(geometry *PreparedGeometry, buffer *DepthBuffer, owner uint64) {
+	if geometry == nil || buffer == nil {
+		return
+	}
+	lastFace := -1
+	for _, triangle := range geometry.Triangles {
+		if triangle.Face != lastFace {
+			if p.Stats != nil {
+				p.Stats.DepthFacesSubmitted++
+			}
+			lastFace = triangle.Face
 		}
-		if p.Stats != nil {
-			p.Stats.DepthFacesSubmitted++
-		}
-		polygon := make([]math3d.Vec3, 0, len(face.Vertices))
-		for _, vertex := range face.Vertices {
-			polygon = append(polygon, viewWorld.TransformPoint(mesh.Verts[vertex]))
-		}
-		polygon = clipPolygonZ(polygon, -p.Near, true)
-		if p.Far > p.Near {
-			polygon = clipPolygonZ(polygon, -p.Far, false)
-		}
-		for index := 1; index+1 < len(polygon); index++ {
-			p.rasterizeTriangle(polygon[0], polygon[index], polygon[index+1], buffer, owner)
-		}
+		p.rasterizePreparedTriangle(triangle.A, triangle.B, triangle.C, buffer, owner)
 	}
 }
 
@@ -166,10 +165,17 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 	if a.Z > -p.Near || b.Z > -p.Near || c.Z > -p.Near {
 		return
 	}
-	pa, pb, pc := p.Projection.TransformPoint(a), p.Projection.TransformPoint(b), p.Projection.TransformPoint(c)
-	ax, ay := (pa.X+1)*.5*float64(p.Width), (1-pa.Y)*.5*float64(p.Height)
-	bx, by := (pb.X+1)*.5*float64(p.Width), (1-pb.Y)*.5*float64(p.Height)
-	cx, cy := (pc.X+1)*.5*float64(p.Width), (1-pc.Y)*.5*float64(p.Height)
+	project := func(vertex math3d.Vec3) Point {
+		projected := p.Projection.TransformPoint(vertex)
+		return Point{X: (projected.X + 1) * .5 * float64(p.Width), Y: (1 - projected.Y) * .5 * float64(p.Height), Depth: -vertex.Z}
+	}
+	p.rasterizePreparedTriangle(project(a), project(b), project(c), buffer, owner)
+}
+
+func (p Pipeline) rasterizePreparedTriangle(a, b, c Point, buffer *DepthBuffer, owner uint64) {
+	ax, ay := a.X, a.Y
+	bx, by := b.X, b.Y
+	cx, cy := c.X, c.Y
 	minX := maxInt(0, int(math.Floor(minFloat(ax, minFloat(bx, cx)))))
 	maxX := minInt(buffer.Width-1, int(math.Ceil(maxFloat(ax, maxFloat(bx, cx)))))
 	minY := maxInt(0, int(math.Floor(minFloat(ay, minFloat(by, cy)))))
@@ -193,7 +199,7 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 			if w0 < 0 || w1 < 0 || w2 < 0 {
 				continue
 			}
-			depth := 1 / (w0/(-a.Z) + w1/(-b.Z) + w2/(-c.Z))
+			depth := 1 / (w0/a.Depth + w1/b.Depth + w2/c.Depth)
 			if buffer.writeOwned(x, y, depth, owner) && p.FineStats && p.Stats != nil {
 				p.Stats.DepthPixelsWritten++
 			}

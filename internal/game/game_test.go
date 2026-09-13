@@ -276,6 +276,29 @@ func TestPreparedDepthDomainsStayLocalUnlessProfileRequestsSceneDepth(t *testing
 	}
 }
 
+func TestGameplayPreparedGeometryIsNotRecomputedByConsumers(t *testing.T) {
+	object := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true)
+	g := newDepthRequirementTestGame(object)
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.candidates) != 1 || prepared.candidates[0].geometry == nil {
+		t.Fatalf("gameplay candidate lacks prepared geometry: %+v", prepared.candidates)
+	}
+	if stats.GeometryPreparations != 1 || stats.TransformedVertices != len(object.Parts[0].Mesh.Verts) {
+		t.Fatalf("preparation stats=%+v", stats)
+	}
+	preparations, transforms, classifications := stats.GeometryPreparations, stats.TransformedVertices, stats.FacesClassified
+
+	g.buildStarOccluders(prepared)
+	depth := render.NewDepthBuffer(g.pipeline.Width, g.pipeline.Height)
+	g.rasterizePreparedDomain(prepared, &prepared.domains[0], depth)
+	g.pipeline.RenderPrepared(prepared.candidates[0].geometry, depth, prepared.candidates[0].owner, prepared.candidates[0].selfOcclusion)
+	if stats.GeometryPreparations != preparations || stats.TransformedVertices != transforms || stats.FacesClassified != classifications {
+		t.Fatalf("prepared consumers repeated geometry work: before=%d/%d/%d after=%d/%d/%d", preparations, transforms, classifications, stats.GeometryPreparations, stats.TransformedVertices, stats.FacesClassified)
+	}
+}
+
 func TestPreparedEnvironmentCandidatesShareFrameDomain(t *testing.T) {
 	part := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true).Parts[0]
 	g := newDepthRequirementTestGame()
@@ -363,6 +386,62 @@ func TestTransitionEnvironmentUsesPreparedFrame(t *testing.T) {
 		if !candidate.pointOccluder || candidate.domain != environmentDepthGroup(42) {
 			t.Fatalf("transition candidate bypassed occlusion/depth classification: %+v", candidate)
 		}
+	}
+}
+
+func TestEnvironmentAggregateBoundsRejectBeforeParts(t *testing.T) {
+	part := scene.Part{Mesh: model.Transform(model.Cube(1), math3d.Translation(100, 0, -5)), LineWidth: 1}
+	tile := environment.PrepareTile(environment.Tile{Parts: []scene.Part{part}})
+	runtime := localEnvironment{bound: environment.Bound{HostID: 42}}
+	g := newDepthRequirementTestGame()
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
+	g.appendEnvironmentTileCandidates(prepared, &runtime, tile, math3d.Identity())
+
+	if len(prepared.candidates) != 0 || stats.EnvironmentTilesInput != 1 ||
+		stats.EnvironmentTilesBoundsRejected != 1 || stats.EnvironmentPartsBoundsRejected != 0 {
+		t.Fatalf("aggregate rejection candidates=%d stats=%+v", len(prepared.candidates), stats)
+	}
+}
+
+func TestEnvironmentFeatureLODRejectsBeforePartsAndUsesHysteresis(t *testing.T) {
+	part := scene.Part{Mesh: model.Cube(1), LineWidth: 1}
+	nearPart := part
+	nearPart.Detail = scene.DetailNear
+	feature := environment.Feature{
+		ID: "tower", Pose: kinematics.Pose{Position: math3d.Vec3{Z: -80}, Orientation: math3d.IdentityQuaternion()},
+		Parts: []scene.Part{part, nearPart}, Detail: scene.DetailMedium,
+	}
+	runtime := localEnvironment{bound: environment.Bound{
+		HostID:     42,
+		Definition: environment.Definition{DetailThresholds: scene.DetailThresholds{MediumPixels: 10, NearPixels: 20}},
+	}}
+	g := newDepthRequirementTestGame()
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+
+	far := environment.PrepareTile(environment.Tile{Features: []environment.Feature{feature}})
+	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
+	g.appendEnvironmentTileCandidates(prepared, &runtime, far, math3d.Identity())
+	if len(prepared.candidates) != 0 || stats.EnvironmentFeaturesLODRejected != 1 || stats.EnvironmentPartsBoundsRejected != 0 {
+		t.Fatalf("far feature was not rejected before parts: candidates=%d stats=%+v", len(prepared.candidates), stats)
+	}
+
+	feature.Pose.Position.Z = -2
+	closeTile := environment.PrepareTile(environment.Tile{Features: []environment.Feature{feature}})
+	stats = render.Stats{}
+	prepared = g.resetPreparedFrame(scene.ExteriorFrame)
+	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity())
+	if len(prepared.candidates) != 1 || stats.EnvironmentInstancesPrepared != 1 || stats.EnvironmentPartsLODRejected != 1 {
+		t.Fatalf("medium feature detail candidates=%d stats=%+v", len(prepared.candidates), stats)
+	}
+
+	stats = render.Stats{}
+	prepared = g.resetPreparedFrame(scene.ExteriorFrame)
+	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity())
+	if len(prepared.candidates) != 2 || stats.EnvironmentInstancesPrepared != 1 || stats.EnvironmentPartsLODRejected != 0 {
+		t.Fatalf("near feature detail candidates=%d stats=%+v", len(prepared.candidates), stats)
 	}
 }
 

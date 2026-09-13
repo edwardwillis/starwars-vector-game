@@ -9,6 +9,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/collision"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/model"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
@@ -35,38 +36,133 @@ type Transition struct {
 }
 
 type TileCoordinate struct{ X, Z int }
+
+// RenderBounds is a conservative sphere in the containing geometry's local
+// coordinates. It is presentation metadata only: collision and targeting keep
+// using their authoritative planes and boxes even when visuals are culled.
+type RenderBounds struct {
+	Center math3d.Vec3
+	Radius float64
+}
+
+func (bounds RenderBounds) Valid() bool { return bounds.Radius > 0 }
+
 type Tile struct {
 	Coordinate TileCoordinate
 	Parts      []scene.Part
 	Features   []Feature
 	Planes     []collision.FinitePlane
 	Boxes      []collision.OrientedBox
+	Bounds     RenderBounds
 }
 
 // Feature describes an addressable installation generated with a tile. The
 // local model and collider share one pose so a later authoritative object can
 // be spawned without reconstructing placement from renderer data.
 type Feature struct {
-	ID         string
-	Kind       string
-	Pose       kinematics.Pose
+	ID   string
+	Kind string
+	Pose kinematics.Pose
+	// Scale turns shared immutable prototype meshes into differently sized
+	// feature instances without baking a fresh mesh for every streamed tile.
+	// The zero value means unit scale for compatibility with existing features.
+	Scale      math3d.Vec3
 	Parts      []scene.Part
 	Boxes      []collision.OrientedBox
+	Bounds     RenderBounds
+	Detail     scene.DetailTier
 	Targetable bool
 	Hittable   bool
 }
 
+// Matrix returns the feature-local transform used by every visual pass.
+func (feature Feature) Matrix() math3d.Mat4 {
+	scale := feature.Scale
+	if scale == (math3d.Vec3{}) {
+		scale = math3d.Vec3{X: 1, Y: 1, Z: 1}
+	}
+	return feature.Pose.Matrix().Mul(math3d.Scaling(scale.X, scale.Y, scale.Z))
+}
+
 type Definition struct {
-	Name           string
-	Frame          scene.FrameID
-	HostDefinition string
-	LocalPose      kinematics.Pose
-	Bounds         Volume
-	ExitVolume     Volume
-	TileSize       float64
-	TileRadius     int
-	Transitions    []Transition
-	Tile           func(TileCoordinate) Tile
+	Name             string
+	Frame            scene.FrameID
+	HostDefinition   string
+	LocalPose        kinematics.Pose
+	Bounds           Volume
+	ExitVolume       Volume
+	TileSize         float64
+	TileRadius       int
+	DetailThresholds scene.DetailThresholds
+	Transitions      []Transition
+	Tile             func(TileCoordinate) Tile
+}
+
+// PrepareTile compiles immutable model topology and aggregate render bounds
+// once when a tile enters the stream. Candidate preparation can then reject a
+// tile or feature without walking and transforming each contained mesh.
+func PrepareTile(source Tile) Tile {
+	tile := source
+	var tileBounds RenderBounds
+	for index := range tile.Parts {
+		tile.Parts[index].Mesh = model.Prepare(tile.Parts[index].Mesh)
+		tileBounds = mergeRenderBounds(tileBounds, modelRenderBounds(tile.Parts[index].Mesh, math3d.Identity()))
+	}
+	for featureIndex := range tile.Features {
+		feature := &tile.Features[featureIndex]
+		var featureBounds RenderBounds
+		for partIndex := range feature.Parts {
+			feature.Parts[partIndex].Mesh = model.Prepare(feature.Parts[partIndex].Mesh)
+			featureBounds = mergeRenderBounds(featureBounds, modelRenderBounds(feature.Parts[partIndex].Mesh, math3d.Identity()))
+		}
+		feature.Bounds = featureBounds
+		tileBounds = mergeRenderBounds(tileBounds, transformRenderBounds(featureBounds, feature.Matrix()))
+	}
+	tile.Bounds = tileBounds
+	return tile
+}
+
+func modelRenderBounds(mesh model.Model, transform math3d.Mat4) RenderBounds {
+	prepared := model.Prepare(mesh)
+	if prepared.Topology == nil || prepared.Topology.BoundsRadius <= 0 {
+		return RenderBounds{}
+	}
+	return transformRenderBounds(RenderBounds{Center: prepared.Topology.BoundsCenter, Radius: prepared.Topology.BoundsRadius}, transform)
+}
+
+func transformRenderBounds(bounds RenderBounds, transform math3d.Mat4) RenderBounds {
+	if !bounds.Valid() {
+		return RenderBounds{}
+	}
+	scale := max(
+		transform.TransformDirection(math3d.Vec3{X: 1}).Length(),
+		transform.TransformDirection(math3d.Vec3{Y: 1}).Length(),
+		transform.TransformDirection(math3d.Vec3{Z: 1}).Length(),
+	)
+	return RenderBounds{Center: transform.TransformPoint(bounds.Center), Radius: bounds.Radius * scale}
+}
+
+func mergeRenderBounds(first, second RenderBounds) RenderBounds {
+	if !first.Valid() {
+		return second
+	}
+	if !second.Valid() {
+		return first
+	}
+	delta := second.Center.Sub(first.Center)
+	distance := delta.Length()
+	if first.Radius >= distance+second.Radius {
+		return first
+	}
+	if second.Radius >= distance+first.Radius {
+		return second
+	}
+	radius := (distance + first.Radius + second.Radius) * 0.5
+	center := first.Center
+	if distance > 1e-12 {
+		center = center.Add(delta.Scale((radius - first.Radius) / distance))
+	}
+	return RenderBounds{Center: center, Radius: radius}
 }
 
 // Bound is one environment definition attached to one concrete host object.
@@ -117,6 +213,10 @@ func (registry *Registry) Register(def Definition) error {
 	}
 	if def.TileSize <= 0 || def.TileRadius < 0 {
 		return fmt.Errorf("environment %q requires a positive tile size and non-negative tile radius", def.Name)
+	}
+	if def.DetailThresholds.MediumPixels < 0 || def.DetailThresholds.NearPixels < 0 ||
+		(def.DetailThresholds.NearPixels > 0 && def.DetailThresholds.NearPixels < def.DetailThresholds.MediumPixels) {
+		return fmt.Errorf("environment %q has invalid detail thresholds", def.Name)
 	}
 	if err := def.Bounds.Validate(); err != nil {
 		return fmt.Errorf("environment %q bounds: %w", def.Name, err)

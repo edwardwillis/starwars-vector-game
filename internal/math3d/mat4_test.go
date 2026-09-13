@@ -18,6 +18,15 @@ func TestTransformDirectionIgnoresTranslation(t *testing.T) {
 	assertVec3(t, Translation(10, 20, 30).TransformDirection(direction), direction)
 }
 
+func TestTransformNormalRemainsPerpendicularUnderNonUniformScale(t *testing.T) {
+	transform := RotationZ(0.4).Mul(Scaling(2, 1, 3))
+	tangentA := transform.TransformDirection(Vec3{X: 1, Y: 1})
+	tangentB := transform.TransformDirection(Vec3{Z: 1})
+	normal := transform.TransformNormal(Vec3{X: 1, Y: -1}).Normalize()
+	assertClose(t, normal.Dot(tangentA), 0)
+	assertClose(t, normal.Dot(tangentB), 0)
+}
+
 func TestRotations(t *testing.T) {
 	quarterTurn := math.Pi / 2
 	assertVec3(t, RotationX(quarterTurn).TransformPoint(Vec3{Y: 1}), Vec3{Z: 1})

@@ -53,6 +53,14 @@ func TestPrepareCompilesNormalsAndAdjacency(t *testing.T) {
 	if len(prepared.Topology.Edges) != 12 {
 		t.Fatalf("compiled edges=%d, want 12", len(prepared.Topology.Edges))
 	}
+	if len(prepared.Topology.FaceTriangles) != 12 || len(prepared.Topology.FaceTriangleOffsets) != 7 {
+		t.Fatalf("compiled triangles=%d offsets=%v, want 12 triangles and 7 offsets", len(prepared.Topology.FaceTriangles), prepared.Topology.FaceTriangleOffsets)
+	}
+	for face := range prepared.Faces {
+		if prepared.Topology.FaceTriangleOffsets[face+1]-prepared.Topology.FaceTriangleOffsets[face] != 2 {
+			t.Fatalf("cube face %d does not own two precomputed triangles", face)
+		}
+	}
 	for index, normal := range prepared.Topology.FaceNormals {
 		if normal.Length() < .99 || normal.Length() > 1.01 {
 			t.Fatalf("face %d normal is not unit length: %v", index, normal)

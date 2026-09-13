@@ -24,6 +24,10 @@ const (
 	trenchLastTileZ     = 2
 )
 
+// Repeated installations share one immutable unit solid. Instance scale and
+// pose carry variation, avoiding separately transformed topology per tile.
+var deathStarInstallationPrototype = model.Cube(1)
+
 func DeathStarTrench() Definition {
 	return Definition{
 		Name: DeathStarTrenchName, Frame: DeathStarTrenchFrame, HostDefinition: "builtin/death-star",
@@ -39,9 +43,10 @@ func DeathStarTrench() Definition {
 		Bounds: Volume{Center: math3d.Vec3{Y: 8}, HalfExtents: math3d.Vec3{X: 1e9, Y: 45, Z: 1e9}},
 		// Leaving this altitude band means the fighter has climbed away from
 		// the tangent surface and should return to exterior space.
-		ExitVolume: Volume{Center: math3d.Vec3{Y: 8}, HalfExtents: math3d.Vec3{X: 1e9, Y: 45, Z: 1e9}},
-		TileSize:   deathStarTileSize,
-		TileRadius: deathStarTileRadius,
+		ExitVolume:       Volume{Center: math3d.Vec3{Y: 8}, HalfExtents: math3d.Vec3{X: 1e9, Y: 45, Z: 1e9}},
+		TileSize:         deathStarTileSize,
+		TileRadius:       deathStarTileRadius,
+		DetailThresholds: scene.DetailThresholds{MediumPixels: 5, NearPixels: 16},
 		Transitions: []Transition{{
 			Name:        "approach",
 			Source:      scene.ExteriorFrame,
@@ -109,13 +114,13 @@ func deathStarTrenchTile(coordinate TileCoordinate) Tile {
 		// it. The later bomb projectile will opt into the mission-specific hit.
 		features = append(features, Feature{ID: portID, Kind: "exhaust-port", Pose: kinematics.Pose{Position: math3d.Vec3{X: xCenter, Y: -depth + 0.03, Z: portZ}, Orientation: math3d.IdentityQuaternion()}, Parts: []scene.Part{{Name: "exhaust port", Mesh: port, Color: color.RGBA{R: 255, G: 80, B: 48, A: 255}, LineWidth: 2}}, Boxes: []collision.OrientedBox{portBox}, Targetable: true, Hittable: false})
 	}
-	return Tile{
+	return PrepareTile(Tile{
 		Coordinate: coordinate,
 		Parts:      parts,
 		Features:   features,
 		Planes:     planes,
 		Boxes:      boxes,
-	}
+	})
 }
 
 func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Model {
@@ -225,7 +230,6 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 		height := position.Y * 2
 		variation := (coordinate.X*17 + coordinate.Z*31 + index + 3000) % 3
 		width := 4.0 + float64(variation)
-		localGeometry := model.Transform(model.Cube(1), math3d.Scaling(width, height, width))
 		kind := "tower"
 		if index == 1 {
 			kind = "cannon"
@@ -235,8 +239,9 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 		features = append(features, Feature{
 			ID: featureID(coordinate, kind, index), Kind: kind,
 			Pose:  kinematics.Pose{Position: position, Orientation: math3d.IdentityQuaternion()},
-			Parts: []scene.Part{{Name: kind, Mesh: localGeometry, Color: color.RGBA{R: 64, G: 255, B: 96, A: 255}, LineWidth: 1.5, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll}},
-			Boxes: []collision.OrientedBox{box}, Targetable: true, Hittable: true,
+			Scale: math3d.Vec3{X: width, Y: height, Z: width},
+			Parts: []scene.Part{{Name: kind, Mesh: deathStarInstallationPrototype, Color: color.RGBA{R: 64, G: 255, B: 96, A: 255}, LineWidth: 1.5, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll}},
+			Boxes: []collision.OrientedBox{box}, Detail: scene.DetailMedium, Targetable: true, Hittable: true,
 		})
 	}
 	return features, boxes

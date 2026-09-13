@@ -48,15 +48,24 @@ type Face struct {
 	OccluderOnly bool
 }
 
+// FaceTriangle is one immutable fan-triangulation entry for an authored face.
+// It is shared by every instance and avoids rebuilding ordinary unclipped
+// polygon triangles in each visibility pass.
+type FaceTriangle struct {
+	Face, A, B, C int
+}
+
 // Topology is immutable derived data shared by model instances. It is built
 // once from the authored vertices, faces and edges and reused by visibility
 // stages.
 type Topology struct {
-	Edges        []Edge
-	FaceNormals  []math3d.Vec3
-	FacePlaneD   []float64
-	BoundsCenter math3d.Vec3
-	BoundsRadius float64
+	Edges               []Edge
+	FaceNormals         []math3d.Vec3
+	FacePlaneD          []float64
+	FaceTriangles       []FaceTriangle
+	FaceTriangleOffsets []int
+	BoundsCenter        math3d.Vec3
+	BoundsRadius        float64
 }
 
 // Model is a wireframe mesh made from vertices and the edges between them.
@@ -143,7 +152,11 @@ func reverseFaceIndices(indices []int) {
 }
 
 func compileTopology(verts []math3d.Vec3, authored []Edge, faces []Face) *Topology {
-	topology := &Topology{FaceNormals: make([]math3d.Vec3, len(faces)), FacePlaneD: make([]float64, len(faces))}
+	topology := &Topology{
+		FaceNormals:         make([]math3d.Vec3, len(faces)),
+		FacePlaneD:          make([]float64, len(faces)),
+		FaceTriangleOffsets: make([]int, len(faces)+1),
+	}
 	if len(verts) > 0 {
 		min, max := verts[0], verts[0]
 		for _, vertex := range verts[1:] {
@@ -182,8 +195,16 @@ func compileTopology(verts []math3d.Vec3, authored []Edge, faces []Face) *Topolo
 		topology.Edges = append(topology.Edges, edge)
 	}
 	for faceIndex, face := range faces {
+		topology.FaceTriangleOffsets[faceIndex] = len(topology.FaceTriangles)
 		normal, d := faceNormal(verts, face.Vertices)
 		topology.FaceNormals[faceIndex], topology.FacePlaneD[faceIndex] = normal, d
+		if len(face.Vertices) >= 3 {
+			for triangleIndex := 1; triangleIndex+1 < len(face.Vertices); triangleIndex++ {
+				topology.FaceTriangles = append(topology.FaceTriangles, FaceTriangle{
+					Face: faceIndex, A: face.Vertices[0], B: face.Vertices[triangleIndex], C: face.Vertices[triangleIndex+1],
+				})
+			}
+		}
 		for i, a := range face.Vertices {
 			b := face.Vertices[(i+1)%len(face.Vertices)]
 			key := edgeKey{a, b}
@@ -212,6 +233,7 @@ func compileTopology(verts []math3d.Vec3, authored []Edge, faces []Face) *Topolo
 			topology.Edges[edgeIndex] = edge
 		}
 	}
+	topology.FaceTriangleOffsets[len(faces)] = len(topology.FaceTriangles)
 	return topology
 }
 
@@ -312,7 +334,7 @@ func (m Model) Validate() error {
 func (m Model) PolygonModels() []Model {
 	polygons := make([]Model, 0, len(m.Faces))
 	for _, face := range m.Faces {
-	polygon := Model{Verts: make([]math3d.Vec3, len(face.Vertices)), SkipDepth: m.SkipDepth, DepthTestOnly: m.DepthTestOnly, PointOccluder: m.PointOccluder}
+		polygon := Model{Verts: make([]math3d.Vec3, len(face.Vertices)), SkipDepth: m.SkipDepth, DepthTestOnly: m.DepthTestOnly, PointOccluder: m.PointOccluder}
 		for index, vertex := range face.Vertices {
 			polygon.Verts[index] = m.Verts[vertex]
 			polygon.Edges = append(polygon.Edges, Edge{A: index, B: (index + 1) % len(face.Vertices), Kind: EdgeStructural, Importance: 1})

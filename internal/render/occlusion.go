@@ -43,6 +43,17 @@ func (set *PointOccluderSet) Add(occluder PointOccluder) {
 	}
 }
 
+// AddPreparedGeometry appends shared projected triangles directly, avoiding
+// an intermediate per-candidate occluder slice in the frame hot path.
+func (set *PointOccluderSet) AddPreparedGeometry(geometry *PreparedGeometry) {
+	if set == nil || geometry == nil {
+		return
+	}
+	for _, triangle := range geometry.Triangles {
+		set.Items = append(set.Items, TriangleOccluder{A: triangle.A, B: triangle.B, C: triangle.C})
+	}
+}
+
 func (set *PointOccluderSet) OccluderKind() OccluderKind { return OccluderGeometry }
 
 func (set *PointOccluderSet) OccludesPoint(point Point) bool {
@@ -138,58 +149,19 @@ func (p Pipeline) ProjectSolidOccluders(mesh model.Model, world math3d.Mat4) []T
 	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 || len(mesh.Faces) == 0 {
 		return nil
 	}
-	prepared := model.Prepare(mesh)
-	viewWorld := p.View.Mul(world)
-	occluders := make([]TriangleOccluder, 0, len(prepared.Faces)*2)
-	for _, face := range prepared.Faces {
-		if len(face.Vertices) < 3 || face.DoubleSided == false && face.Normal.Length() <= 1e-9 {
-			continue
-		}
-		polygon := make([]math3d.Vec3, 0, len(face.Vertices))
-		for _, index := range face.Vertices {
-			if index < 0 || index >= len(prepared.Verts) {
-				polygon = nil
-				break
-			}
-			polygon = append(polygon, viewWorld.TransformPoint(prepared.Verts[index]))
-		}
-		if len(polygon) < 3 {
-			continue
-		}
-		if !face.DoubleSided {
-			normal := viewWorld.TransformDirection(face.Normal).Normalize()
-			center := math3d.Vec3{}
-			for _, vertex := range polygon {
-				center = center.Add(vertex)
-			}
-			center = center.Scale(1 / float64(len(polygon)))
-			if normal.Dot(center.Scale(-1)) <= 1e-9 {
-				continue
-			}
-		}
-		polygon = clipPolygonZ(polygon, -p.Near, true)
-		if p.Far > p.Near {
-			polygon = clipPolygonZ(polygon, -p.Far, false)
-		}
-		for index := 1; index+1 < len(polygon); index++ {
-			vertices := [3]Point{}
-			valid := true
-			for vertexIndex, vertex := range [3]math3d.Vec3{polygon[0], polygon[index], polygon[index+1]} {
-				if vertex.Z >= -p.Near || (p.Far > p.Near && vertex.Z <= -p.Far) {
-					valid = false
-					break
-				}
-				projected := p.Projection.TransformPoint(vertex)
-				vertices[vertexIndex] = Point{
-					X:     (projected.X + 1) * 0.5 * float64(p.Width),
-					Y:     (1 - projected.Y) * 0.5 * float64(p.Height),
-					Depth: -vertex.Z,
-				}
-			}
-			if valid {
-				occluders = append(occluders, TriangleOccluder{A: vertices[0], B: vertices[1], C: vertices[2]})
-			}
-		}
+	geometry := p.PrepareGeometry(mesh, world, true)
+	return p.ProjectPreparedSolidOccluders(&geometry)
+}
+
+// ProjectPreparedSolidOccluders exposes the already clipped and projected
+// front-facing triangles without revisiting model geometry.
+func (p Pipeline) ProjectPreparedSolidOccluders(geometry *PreparedGeometry) []TriangleOccluder {
+	if geometry == nil || len(geometry.Triangles) == 0 {
+		return nil
+	}
+	occluders := make([]TriangleOccluder, 0, len(geometry.Triangles))
+	for _, triangle := range geometry.Triangles {
+		occluders = append(occluders, TriangleOccluder{A: triangle.A, B: triangle.B, C: triangle.C})
 	}
 	return occluders
 }

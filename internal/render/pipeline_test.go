@@ -37,6 +37,30 @@ func TestRenderCubeProducesEveryEdge(t *testing.T) {
 	}
 }
 
+func TestPreparedGeometryIsSharedAcrossLineDepthAndPointOcclusion(t *testing.T) {
+	stats := Stats{}
+	pipeline := NewPipeline(160, 120, math.Pi/2, 0.1, 100)
+	pipeline.Stages = StagesForProfile(ProfileMaximum)
+	pipeline.Stats = &stats
+	geometry := pipeline.PrepareGeometry(model.Cube(2), math3d.Translation(0, 0, -5), true)
+	if stats.GeometryPreparations != 1 || stats.TransformedVertices != 8 || stats.FacesClassified != 6 || len(geometry.Triangles) == 0 {
+		t.Fatalf("initial preparation geometry=%+v stats=%+v", geometry, stats)
+	}
+	transforms, classifications, preparations := stats.TransformedVertices, stats.FacesClassified, stats.GeometryPreparations
+
+	depth := NewDepthBuffer(160, 120)
+	pipeline.RasterizePreparedDepthOwned(&geometry, depth, 7)
+	if len(pipeline.ProjectPreparedSolidOccluders(&geometry)) != len(geometry.Triangles) {
+		t.Fatal("point occlusion did not consume the shared projected triangles")
+	}
+	if len(pipeline.RenderPrepared(&geometry, depth, 7, SelfOcclusionNone)) == 0 {
+		t.Fatal("prepared geometry produced no vector lines")
+	}
+	if stats.TransformedVertices != transforms || stats.FacesClassified != classifications || stats.GeometryPreparations != preparations {
+		t.Fatalf("downstream pass repeated preparation: before=%d/%d/%d after=%d/%d/%d", transforms, classifications, preparations, stats.TransformedVertices, stats.FacesClassified, stats.GeometryPreparations)
+	}
+}
+
 func TestBackfaceCullingUsesFaceWindingAndKeepsDecorativeLines(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
 	pipeline.Stages = []Stage{BackfaceStage()}
@@ -189,9 +213,9 @@ func TestDepthTestOnlyLineArtSamplesOtherSurfaces(t *testing.T) {
 	depth := NewDepthBuffer(800, 600)
 	pipeline.RasterizeDepth(surface, math3d.Identity(), depth)
 	line := model.Model{
-		Verts:        []math3d.Vec3{{X: -1, Z: -6}, {X: 1, Z: -6}},
-		Edges:        []model.Edge{{A: 0, B: 1, Kind: model.EdgeDecorative}},
-		SkipDepth:    true,
+		Verts:         []math3d.Vec3{{X: -1, Z: -6}, {X: 1, Z: -6}},
+		Edges:         []model.Edge{{A: 0, B: 1, Kind: model.EdgeDecorative}},
+		SkipDepth:     true,
 		DepthTestOnly: true,
 		PointOccluder: true,
 	}

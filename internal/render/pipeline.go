@@ -37,33 +37,36 @@ const (
 // submission timings. A pointer can be attached to Pipeline during
 // development; nil keeps the hot path lightweight.
 type Stats struct {
-	InputVertices, TransformedVertices                 int
-	InputEdges, OutputEdges                            int
-	TinyEdges                                          int
-	InputFaces                                         int
-	BackfaceRejected, PolicyRejected                   int
-	DepthRejected, ClippedEdges                        int
-	ObjectsInput, ObjectsCulled                        int
-	ObjectsVisible                                     int
-	BillboardObjects, BillboardLines                   int
-	BillboardBatches                                   int
-	StarsConsidered, StarsAnalyticRejected             int
-	StarsGeometryRejected, StarsSubmitted              int
-	ActiveAnalyticOccluders, ActiveGeometryOccluders   int
-	DepthCandidateObjects, DepthCandidateParts         int
-	CandidatesPrepared, ObjectsBoundsRejected          int
-	DepthWritingCandidates, DepthTestingCandidates     int
-	ActiveDepthDomains                                 int
-	DepthFacesSubmitted, DepthTrianglesRasterized      int
-	DepthPixelsTested, DepthPixelsWritten              int
-	LineDepthSamples                                   int
-	RenderJobs, ActiveEnvironmentTiles                 int
-	EnvironmentPartsBoundsRejected                     int
-	EnvironmentFeaturesBoundsRejected                  int
-	DepthEnabledByProfile, DepthEnabledBySelfOcclusion bool
-	WorldBatches                                       int
-	DepthRasterMS, GeometryMS                          float64
-	VectorSubmitMS                                     float64
+	InputVertices, TransformedVertices                                int
+	InputEdges, OutputEdges                                           int
+	TinyEdges                                                         int
+	InputFaces                                                        int
+	BackfaceRejected, PolicyRejected                                  int
+	DepthRejected, ClippedEdges                                       int
+	ObjectsInput, ObjectsCulled                                       int
+	ObjectsVisible                                                    int
+	BillboardObjects, BillboardLines                                  int
+	BillboardBatches                                                  int
+	StarsConsidered, StarsAnalyticRejected                            int
+	StarsGeometryRejected, StarsSubmitted                             int
+	ActiveAnalyticOccluders, ActiveGeometryOccluders                  int
+	DepthCandidateObjects, DepthCandidateParts                        int
+	CandidatesPrepared, ObjectsBoundsRejected                         int
+	GeometryPreparations, FacesClassified, PreparedTriangles          int
+	DepthWritingCandidates, DepthTestingCandidates                    int
+	ActiveDepthDomains                                                int
+	DepthFacesSubmitted, DepthTrianglesRasterized                     int
+	DepthPixelsTested, DepthPixelsWritten                             int
+	LineDepthSamples                                                  int
+	RenderJobs, ActiveEnvironmentTiles                                int
+	EnvironmentTilesInput, EnvironmentTilesBoundsRejected             int
+	EnvironmentFeaturesInput, EnvironmentInstancesPrepared            int
+	EnvironmentPartsBoundsRejected, EnvironmentPartsLODRejected       int
+	EnvironmentFeaturesBoundsRejected, EnvironmentFeaturesLODRejected int
+	DepthEnabledByProfile, DepthEnabledBySelfOcclusion                bool
+	WorldBatches                                                      int
+	DepthRasterMS, GeometryMS                                         float64
+	VectorSubmitMS                                                    float64
 }
 
 // Ray describes a world-space half-line produced by a screen-space aim point.
@@ -152,56 +155,8 @@ func backfaceCull(verts []math3d.Vec3, mesh model.Model, edges []model.Edge) []m
 	}
 	prepared := model.Prepare(mesh)
 	front := make([]bool, len(mesh.Faces))
-	for faceIndex, face := range prepared.Faces {
-		if len(face.Vertices) < 3 {
-			continue
-		}
-		n := face.Normal
-		if n.Length() <= 1e-9 {
-			a, b, c := verts[face.Vertices[0]], verts[face.Vertices[1]], verts[face.Vertices[2]]
-			n = b.Sub(a).Cross(c.Sub(a)).Normalize()
-		}
-		center := math3d.Vec3{}
-		for _, vertex := range face.Vertices {
-			center = center.Add(verts[vertex])
-		}
-		center = center.Scale(1 / float64(len(face.Vertices)))
-		front[faceIndex] = n.Dot(center.Scale(-1)) > 1e-9 || face.DoubleSided
-	}
-	out := make([]model.Edge, 0, len(prepared.Topology.Edges))
-	for _, edge := range prepared.Topology.Edges {
-		// Internal diagonals exist only to make non-planar authored surfaces
-		// explicit triangles. They must never become visible vector strokes,
-		// including in the deliberately sparse arcade profile.
-		if edge.Kind == model.EdgeInternal {
-			continue
-		}
-		adjacent := edge.AdjacentFaces
-		if len(adjacent) == 0 && edge.FaceA < 0 && edge.FaceB < 0 {
-			out = append(out, edge)
-			continue
-		}
-		visible := false
-		renderable := false
-		for _, faceIndex := range adjacent {
-			if faceIndex >= 0 && faceIndex < len(front) && front[faceIndex] {
-				visible = true
-				if !prepared.Faces[faceIndex].OccluderOnly {
-					renderable = true
-				}
-			}
-		}
-		if visible && !renderable {
-			continue
-		}
-		if len(adjacent) == 0 {
-			visible = (edge.FaceA >= 0 && front[edge.FaceA]) || (edge.FaceB >= 0 && front[edge.FaceB])
-		}
-		if visible {
-			out = append(out, edge)
-		}
-	}
-	return out
+	classifyFaceVisibility(verts, prepared.Faces, front)
+	return backfaceCullClassified(prepared, front, edges, make([]model.Edge, 0, len(prepared.Topology.Edges)))
 }
 
 // Pipeline contains the configurable stages of the wireframe renderer.
@@ -263,57 +218,28 @@ func (p Pipeline) RenderWithDepthPolicy(mesh model.Model, world math3d.Mat4, dep
 }
 
 func (p Pipeline) renderLines(mesh model.Model, world math3d.Mat4, depth *DepthBuffer, owner uint64, selfOcclusion SelfOcclusionMode) []Line {
+	geometry := p.PrepareGeometry(mesh, world, false)
+	return p.RenderPrepared(&geometry, depth, owner, selfOcclusion)
+}
+
+// RenderPrepared projects and depth-tests geometry already transformed and
+// classified for this camera and frame.
+func (p Pipeline) RenderPrepared(geometry *PreparedGeometry, depth *DepthBuffer, owner uint64, selfOcclusion SelfOcclusionMode) []Line {
 	if p.Width <= 0 || p.Height <= 0 || p.Near <= 0 {
 		return nil
 	}
-
-	viewWorld := p.View.Mul(world)
-	prepared := model.Prepare(mesh)
+	if geometry == nil {
+		return nil
+	}
+	prepared := geometry.Mesh
 	// Decorative line-art models (laser bolts, reticles, and similar effects)
 	// have no surface topology to occlude against. Avoid sending their long
 	// rays through the expensive depth sampler even when a depth buffer is
 	// active for the surrounding scene.
 	useDepth := depth != nil && (!prepared.SkipDepth || prepared.DepthTestOnly)
 	stageMesh := prepared
-	if len(prepared.Faces) > 0 {
-		stageMesh.Faces = append([]model.Face(nil), prepared.Faces...)
-		for index := range stageMesh.Faces {
-			stageMesh.Faces[index].Normal = viewWorld.TransformDirection(prepared.Faces[index].Normal).Normalize()
-		}
-	}
-	verts := make([]math3d.Vec3, len(prepared.Verts))
-	if p.Stats != nil {
-		p.Stats.InputVertices += len(mesh.Verts)
-		p.Stats.TransformedVertices += len(mesh.Verts)
-	}
-	if p.Stats != nil {
-		p.Stats.InputFaces += len(mesh.Faces)
-	}
-	for index, vertex := range prepared.Verts {
-		verts[index] = viewWorld.TransformPoint(vertex)
-	}
-
-	edges := mesh.Edges
-	if p.Stats != nil {
-		p.Stats.InputEdges += len(edges)
-	}
-	if p.Culler != nil {
-		edges = p.Culler.Cull(verts, edges)
-	}
-	for _, stage := range p.Stages {
-		if stage != nil {
-			before := len(edges)
-			edges = stage.Process(verts, stageMesh, edges)
-			if p.Stats != nil && before > len(edges) {
-				switch stage.Name() {
-				case "backface-culling":
-					p.Stats.BackfaceRejected += before - len(edges)
-				default:
-					p.Stats.PolicyRejected += before - len(edges)
-				}
-			}
-		}
-	}
+	stageMesh.Faces = geometry.Faces
+	verts, edges := geometry.Vertices, geometry.Edges
 
 	lines := make([]Line, 0, len(edges))
 	for _, edge := range edges {

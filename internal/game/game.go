@@ -59,9 +59,11 @@ type destructionTransient struct {
 }
 
 type localEnvironment struct {
-	bound     environment.Bound
-	tiles     map[environment.TileCoordinate]environment.Tile
-	destroyed map[string]bool
+	bound            environment.Bound
+	tiles            map[environment.TileCoordinate]environment.Tile
+	destroyed        map[string]bool
+	detailLevels     map[string]scene.DetailTier
+	tileDetailLevels map[environment.TileCoordinate]scene.DetailTier
 }
 
 type environmentTransition struct {
@@ -93,8 +95,7 @@ type hyperspaceArrival struct {
 }
 
 type worldRenderJob struct {
-	mesh          modelpkg.Model
-	world         math3d.Mat4
+	geometry      *render.PreparedGeometry
 	depth         *render.DepthBuffer
 	owner         uint64
 	selfOcclusion render.SelfOcclusionMode
@@ -104,6 +105,7 @@ type worldRenderJob struct {
 }
 
 type preparedCandidate struct {
+	geometry       *render.PreparedGeometry
 	mesh           modelpkg.Model
 	world          math3d.Mat4
 	owner          uint64
@@ -147,6 +149,7 @@ type preparedDepthDomain struct {
 type preparedFrame struct {
 	frame        scene.FrameID
 	candidates   []preparedCandidate
+	geometries   []render.PreparedGeometry
 	domains      []preparedDepthDomain
 	domainLookup map[depthDomainID]int
 	unscoped     []int
@@ -203,6 +206,7 @@ func (g *Game) resetPreparedFrame(frame scene.FrameID) *preparedFrame {
 	prepared := &g.prepared
 	prepared.frame = frame
 	prepared.candidates = prepared.candidates[:0]
+	prepared.geometries = prepared.geometries[:0]
 	prepared.domains = prepared.domains[:0]
 	prepared.unscoped = prepared.unscoped[:0]
 	if prepared.domainLookup == nil {
@@ -211,6 +215,37 @@ func (g *Game) resetPreparedFrame(frame scene.FrameID) *preparedFrame {
 		clear(prepared.domainLookup)
 	}
 	return prepared
+}
+
+// prepareCandidateGeometry performs the one per-frame camera transform and
+// visibility classification for every concrete candidate. Depth and sparse
+// point occlusion request projected surface triangles; line-only candidates
+// avoid that additional work.
+func (g *Game) prepareCandidateGeometry(prepared *preparedFrame) {
+	count := 0
+	for index := range prepared.candidates {
+		candidate := &prepared.candidates[index]
+		candidate.geometry = nil
+		if !candidate.isBillboard && !candidate.analyticSphere {
+			count++
+		}
+	}
+	if cap(prepared.geometries) < count {
+		prepared.geometries = make([]render.PreparedGeometry, count)
+	} else {
+		prepared.geometries = prepared.geometries[:count]
+	}
+	geometryIndex := 0
+	for index := range prepared.candidates {
+		candidate := &prepared.candidates[index]
+		if candidate.isBillboard || candidate.analyticSphere {
+			continue
+		}
+		geometry := &prepared.geometries[geometryIndex]
+		g.pipeline.PrepareGeometryInto(geometry, candidate.mesh, candidate.world, candidate.writesDepth || candidate.pointOccluder)
+		candidate.geometry = geometry
+		geometryIndex++
+	}
 }
 
 func depthWriteCandidate(part scene.Part) bool {
@@ -370,6 +405,7 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 		}
 	}
 	g.appendTransitionEnvironmentCandidates(prepared)
+	g.prepareCandidateGeometry(prepared)
 	g.assignPreparedDepth(prepared)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
@@ -384,10 +420,30 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 // transition/cut-scene views pass the destination frame's world transform.
 func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime *localEnvironment, tile environment.Tile, frameWorld math3d.Mat4) {
 	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.EnvironmentTilesInput++
+	}
+	tileDetail := scene.DetailNear
+	if tile.Bounds.Valid() {
+		visible, projectedRadius := g.renderBoundsInView(tile.Bounds, frameWorld)
+		if !visible {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.EnvironmentTilesBoundsRejected++
+			}
+			return
+		}
+		tileDetail = g.environmentTileDetailTier(runtime, tile.Coordinate, projectedRadius)
+	}
+	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.ActiveEnvironmentTiles++
 	}
 	group := environmentDepthGroup(runtime.bound.HostID)
 	for partIndex, part := range tile.Parts {
+		if part.Detail > tileDetail {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.EnvironmentPartsLODRejected++
+			}
+			continue
+		}
 		if !g.meshInView(part.Mesh, frameWorld) {
 			if g.pipeline.Stats != nil {
 				g.pipeline.Stats.EnvironmentPartsBoundsRejected++
@@ -406,9 +462,37 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 		if runtime.destroyed[feature.ID] {
 			continue
 		}
-		world := frameWorld.Mul(feature.Pose.Matrix())
+		if g.pipeline.Stats != nil {
+			g.pipeline.Stats.EnvironmentFeaturesInput++
+		}
+		world := frameWorld.Mul(feature.Matrix())
+		detail := scene.DetailNear
+		if feature.Bounds.Valid() {
+			visible, projectedRadius := g.renderBoundsInView(feature.Bounds, world)
+			if !visible {
+				if g.pipeline.Stats != nil {
+					g.pipeline.Stats.EnvironmentFeaturesBoundsRejected++
+				}
+				continue
+			}
+			detail = g.environmentFeatureDetailTier(runtime, feature.ID, projectedRadius)
+			if detail < feature.Detail {
+				if g.pipeline.Stats != nil {
+					g.pipeline.Stats.EnvironmentFeaturesLODRejected++
+				}
+				continue
+			}
+		}
 		visible := false
+		lodEligible := false
 		for partIndex, part := range feature.Parts {
+			if part.Detail > detail {
+				if g.pipeline.Stats != nil {
+					g.pipeline.Stats.EnvironmentPartsLODRejected++
+				}
+				continue
+			}
+			lodEligible = true
 			if !g.meshInView(part.Mesh, world) {
 				if g.pipeline.Stats != nil {
 					g.pipeline.Stats.EnvironmentPartsBoundsRejected++
@@ -424,8 +508,10 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 				testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
 			})
 		}
-		if !visible && g.pipeline.Stats != nil {
+		if !visible && lodEligible && g.pipeline.Stats != nil {
 			g.pipeline.Stats.EnvironmentFeaturesBoundsRejected++
+		} else if visible && g.pipeline.Stats != nil {
+			g.pipeline.Stats.EnvironmentInstancesPrepared++
 		}
 	}
 }
@@ -468,6 +554,7 @@ func (g *Game) prepareShowcaseFrame() *preparedFrame {
 			prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID, color: part.Color, lineWidth: part.LineWidth, group: objectDepthGroup(object.ID), selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
 		}
 	}
+	g.prepareCandidateGeometry(prepared)
 	g.assignPreparedDepth(prepared)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
@@ -771,9 +858,11 @@ func (g *Game) installEnvironments() error {
 			return err
 		}
 		runtime := localEnvironment{
-			bound:     bound,
-			tiles:     make(map[environment.TileCoordinate]environment.Tile),
-			destroyed: make(map[string]bool),
+			bound:            bound,
+			tiles:            make(map[environment.TileCoordinate]environment.Tile),
+			destroyed:        make(map[string]bool),
+			detailLevels:     make(map[string]scene.DetailTier),
+			tileDetailLevels: make(map[environment.TileCoordinate]scene.DetailTier),
 		}
 		g.environments = append(g.environments, runtime)
 	}
@@ -1296,7 +1385,20 @@ func (g *Game) refreshEnvironmentTiles() {
 			if tile, exists := runtime.tiles[coordinate]; exists {
 				tiles[coordinate] = tile
 			} else {
-				tiles[coordinate] = runtime.bound.Definition.Tile(coordinate)
+				tile = runtime.bound.Definition.Tile(coordinate)
+				if !tile.Bounds.Valid() {
+					tile = environment.PrepareTile(tile)
+				}
+				tiles[coordinate] = tile
+			}
+		}
+		for coordinate, oldTile := range runtime.tiles {
+			if desired[coordinate] {
+				continue
+			}
+			delete(runtime.tileDetailLevels, coordinate)
+			for _, feature := range oldTile.Features {
+				delete(runtime.detailLevels, feature.ID)
 			}
 		}
 		runtime.tiles = tiles
@@ -1339,7 +1441,11 @@ func (g *Game) refreshTransitionEnvironmentTiles() {
 		for tileZ := -transitionEnvironmentTileRadius; tileZ <= transitionEnvironmentTileRadius; tileZ++ {
 			coordinate := environment.TileCoordinate{X: tileX, Z: tileZ}
 			if _, exists := runtime.tiles[coordinate]; !exists {
-				runtime.tiles[coordinate] = runtime.bound.Definition.Tile(coordinate)
+				tile := runtime.bound.Definition.Tile(coordinate)
+				if !tile.Bounds.Valid() {
+					tile = environment.PrepareTile(tile)
+				}
+				runtime.tiles[coordinate] = tile
 			}
 		}
 	}
@@ -3056,7 +3162,7 @@ func (g *Game) updateZoom() {
 func (g *Game) rasterizePreparedDomain(prepared *preparedFrame, domain *preparedDepthDomain, depth *render.DepthBuffer) {
 	for _, candidateIndex := range domain.writers {
 		candidate := prepared.candidates[candidateIndex]
-		g.pipeline.RasterizeDepthOwned(candidate.mesh, candidate.world, depth, candidate.owner)
+		g.pipeline.RasterizePreparedDepthOwned(candidate.geometry, depth, candidate.owner)
 	}
 }
 
@@ -3080,7 +3186,7 @@ func jobsForPreparedCandidates(prepared *preparedFrame, indexes []int, depth *re
 		if depth != nil && candidate.testsDepth {
 			jobDepth = depth
 		}
-		jobs = append(jobs, worldRenderJob{mesh: candidate.mesh, world: candidate.world, depth: jobDepth, owner: candidate.owner, selfOcclusion: candidate.selfOcclusion, objectID: candidate.objectID, color: candidate.color, lineWidth: candidate.lineWidth})
+		jobs = append(jobs, worldRenderJob{geometry: candidate.geometry, depth: jobDepth, owner: candidate.owner, selfOcclusion: candidate.selfOcclusion, objectID: candidate.objectID, color: candidate.color, lineWidth: candidate.lineWidth})
 	}
 	return jobs
 }
@@ -3226,11 +3332,11 @@ func (g *Game) drawShowcase(screen *ebiten.Image, prepared *preparedFrame) {
 				continue
 			}
 			var lines []render.Line
+			candidateDepth := (*render.DepthBuffer)(nil)
 			if domainDepth != nil && candidate.testsDepth {
-				lines = g.pipeline.RenderWithDepthPolicy(candidate.mesh, candidate.world, domainDepth, candidate.owner, candidate.selfOcclusion)
-			} else {
-				lines = g.pipeline.Render(candidate.mesh, candidate.world)
+				candidateDepth = domainDepth
 			}
+			lines = g.pipeline.RenderPrepared(candidate.geometry, candidateDepth, candidate.owner, candidate.selfOcclusion)
 			for _, line := range lines {
 				drawLine(screen, line, candidate.color, candidate.lineWidth)
 			}
@@ -3384,27 +3490,47 @@ func (g *Game) meshInView(mesh modelpkg.Model, world math3d.Mat4) bool {
 	if prepared.Topology == nil || prepared.Topology.BoundsRadius <= 0 {
 		return true
 	}
-	center := world.TransformPoint(prepared.Topology.BoundsCenter)
-	radius := world.TransformDirection(math3d.Vec3{X: prepared.Topology.BoundsRadius}).Length()
-	if radius <= 0 {
-		radius = prepared.Topology.BoundsRadius
+	visible, _ := g.renderBoundsInView(environment.RenderBounds{
+		Center: prepared.Topology.BoundsCenter,
+		Radius: prepared.Topology.BoundsRadius,
+	}, world)
+	return visible
+}
+
+// renderBoundsInView performs the common aggregate sphere rejection and also
+// reports projected pixel radius for LOD selection. The maximum transformed
+// basis length keeps non-uniformly scaled feature prototypes conservative.
+func (g *Game) renderBoundsInView(bounds environment.RenderBounds, world math3d.Mat4) (bool, float64) {
+	if !bounds.Valid() {
+		return true, 0
 	}
+	center := world.TransformPoint(bounds.Center)
+	scale := max(
+		world.TransformDirection(math3d.Vec3{X: 1}).Length(),
+		world.TransformDirection(math3d.Vec3{Y: 1}).Length(),
+		world.TransformDirection(math3d.Vec3{Z: 1}).Length(),
+	)
+	if scale <= 0 {
+		scale = 1
+	}
+	radius := bounds.Radius * scale
 	cameraPoint := g.pipeline.View.TransformPoint(center)
 	depth := -cameraPoint.Z
 	if depth+radius < g.pipeline.Near {
-		return false
+		return false, 0
 	}
 	if g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far {
-		return false
+		return false, 0
 	}
 	if depth <= 0 {
-		return true
+		return true, math.Hypot(float64(g.pipeline.Width), float64(g.pipeline.Height))
 	}
 	projectedRadius := radius / depth * g.pipeline.Projection[1][1]
-	return cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
+	visible := cameraPoint.X/depth*g.pipeline.Projection[0][0] >= -1-projectedRadius &&
 		cameraPoint.X/depth*g.pipeline.Projection[0][0] <= 1+projectedRadius &&
 		cameraPoint.Y/depth*g.pipeline.Projection[1][1] >= -1-projectedRadius &&
 		cameraPoint.Y/depth*g.pipeline.Projection[1][1] <= 1+projectedRadius
+	return visible, projectedRadius * float64(g.pipeline.Height) * 0.5
 }
 
 func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboard appearance.Billboard) bool {
@@ -3571,12 +3697,7 @@ func (g *Game) renderWorldJobs(jobs []worldRenderJob) []worldRenderResult {
 		if g.pipeline.Stats != nil {
 			pipeline.Stats = &results[index].stats
 		}
-		if job.depth != nil {
-			owner := job.owner
-			results[index].lines = pipeline.RenderWithDepthPolicy(job.mesh, job.world, job.depth, owner, job.selfOcclusion)
-		} else {
-			results[index].lines = pipeline.Render(job.mesh, job.world)
-		}
+		results[index].lines = pipeline.RenderPrepared(job.geometry, job.depth, job.owner, job.selfOcclusion)
 		results[index].objectID = job.objectID
 		results[index].color = job.color
 		results[index].lineWidth = job.lineWidth
@@ -3608,6 +3729,9 @@ func (g *Game) renderWorldJobs(jobs []worldRenderJob) []worldRenderResult {
 }
 
 func addRenderStats(total *render.Stats, part render.Stats) {
+	total.GeometryPreparations += part.GeometryPreparations
+	total.FacesClassified += part.FacesClassified
+	total.PreparedTriangles += part.PreparedTriangles
 	total.InputVertices += part.InputVertices
 	total.TransformedVertices += part.TransformedVertices
 	total.InputEdges += part.InputEdges
@@ -3640,6 +3764,38 @@ func (g *Game) objectDetailTier(object scene.Object) scene.DetailTier {
 	}
 	projectedRadius := object.VisualRadius / depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
 	current := g.detailLevels[object.ID]
+	current = detailTierForProjectedRadius(current, thresholds, projectedRadius)
+	g.detailLevels[object.ID] = current
+	return current
+}
+
+func (g *Game) environmentFeatureDetailTier(runtime *localEnvironment, featureID string, projectedRadius float64) scene.DetailTier {
+	thresholds := runtime.bound.Definition.DetailThresholds
+	if thresholds.MediumPixels <= 0 || thresholds.NearPixels <= 0 {
+		return scene.DetailNear
+	}
+	if runtime.detailLevels == nil {
+		runtime.detailLevels = make(map[string]scene.DetailTier)
+	}
+	current := detailTierForProjectedRadius(runtime.detailLevels[featureID], thresholds, projectedRadius)
+	runtime.detailLevels[featureID] = current
+	return current
+}
+
+func (g *Game) environmentTileDetailTier(runtime *localEnvironment, coordinate environment.TileCoordinate, projectedRadius float64) scene.DetailTier {
+	thresholds := runtime.bound.Definition.DetailThresholds
+	if thresholds.MediumPixels <= 0 || thresholds.NearPixels <= 0 {
+		return scene.DetailNear
+	}
+	if runtime.tileDetailLevels == nil {
+		runtime.tileDetailLevels = make(map[environment.TileCoordinate]scene.DetailTier)
+	}
+	current := detailTierForProjectedRadius(runtime.tileDetailLevels[coordinate], thresholds, projectedRadius)
+	runtime.tileDetailLevels[coordinate] = current
+	return current
+}
+
+func detailTierForProjectedRadius(current scene.DetailTier, thresholds scene.DetailThresholds, projectedRadius float64) scene.DetailTier {
 	const leaveRatio = 0.88
 	switch current {
 	case scene.DetailNear:
@@ -3658,7 +3814,6 @@ func (g *Game) objectDetailTier(object scene.Object) scene.DetailTier {
 			current = scene.DetailMedium
 		}
 	}
-	g.detailLevels[object.ID] = current
 	return current
 }
 
@@ -3785,9 +3940,7 @@ func (g *Game) buildStarOccluders(prepared *preparedFrame) {
 		if !candidate.pointOccluder {
 			continue
 		}
-		for _, triangle := range g.pipeline.ProjectSolidOccluders(candidate.mesh, candidate.world) {
-			g.starOccluders.Add(triangle)
-		}
+		g.starOccluders.AddPreparedGeometry(candidate.geometry)
 	}
 	if g.pipeline.Stats != nil {
 		for _, occluder := range g.starOccluders.Items {
@@ -3897,9 +4050,9 @@ func (g *Game) hudText() string {
 			"Render objects: %d in, %d visible, %d culled | Vertices: %d input, %d transformed\n"+
 			"Faces: %d input | Edges: %d input, %d output | Rejected: backface %d, policy %d, depth %d, tiny %d\n"+
 			"Clipped edges: %d | Vectors: %d jobs, %d world batches\n"+
-			"Prepared: %d candidates | Depth: %d candidate objects, %d candidate parts, %d writing, %d testing, %d domains | enabled profile %t self %t\n"+
+			"Prepared: %d candidates, %d geometries, %d faces classified, %d surface triangles | Depth: %d candidate objects, %d candidate parts, %d writing, %d testing, %d domains | enabled profile %t self %t\n"+
 			"Depth work: %d faces, %d triangles, %d pixels tested, %d written, %d line samples\n"+
-			"Environment: %d active tiles | rejected %d parts, %d features\n"+
+			"Environment: %d/%d tiles active/input, %d tile bounds rejected | features %d in, %d prepared, rejected %d bounds, %d LOD | parts rejected %d bounds, %d LOD\n"+
 			"Billboards: %d objects, %d lines, %d batches | Star occlusion: %d analytic, %d geometry | Stars: %d considered, %d rejected, %d submitted\n"+
 			"Timing ms: depth %.2f | geometry %.2f | vector submit %.2f\n"+
 			"Profile: %s\n"+
@@ -3940,6 +4093,9 @@ func (g *Game) hudText() string {
 		g.renderStats.RenderJobs,
 		g.renderStats.WorldBatches,
 		g.renderStats.CandidatesPrepared,
+		g.renderStats.GeometryPreparations,
+		g.renderStats.FacesClassified,
+		g.renderStats.PreparedTriangles,
 		g.renderStats.DepthCandidateObjects,
 		g.renderStats.DepthCandidateParts,
 		g.renderStats.DepthWritingCandidates,
@@ -3953,8 +4109,14 @@ func (g *Game) hudText() string {
 		g.renderStats.DepthPixelsWritten,
 		g.renderStats.LineDepthSamples,
 		g.renderStats.ActiveEnvironmentTiles,
-		g.renderStats.EnvironmentPartsBoundsRejected,
+		g.renderStats.EnvironmentTilesInput,
+		g.renderStats.EnvironmentTilesBoundsRejected,
+		g.renderStats.EnvironmentFeaturesInput,
+		g.renderStats.EnvironmentInstancesPrepared,
 		g.renderStats.EnvironmentFeaturesBoundsRejected,
+		g.renderStats.EnvironmentFeaturesLODRejected,
+		g.renderStats.EnvironmentPartsBoundsRejected,
+		g.renderStats.EnvironmentPartsLODRejected,
 		g.renderStats.BillboardObjects,
 		g.renderStats.BillboardLines,
 		g.renderStats.BillboardBatches,
