@@ -18,6 +18,7 @@ type Part struct {
 	Mesh             model.Model
 	Color            color.RGBA
 	LineWidth        float32
+	Surface          SurfaceMaterial
 	VisibleInCockpit bool
 	CockpitOnly      bool
 	// SelfOccluding makes this part test its lines against its own depth
@@ -30,6 +31,40 @@ type Part struct {
 	// concave part needs every edge tested.
 	SelfOcclusion SelfOcclusionPolicy
 	Detail        DetailTier
+}
+
+// SurfaceMode controls visible polygon submission independently from vector
+// edge styling and physical visibility topology. The zero value preserves the
+// project's wireframe presentation.
+type SurfaceMode uint8
+
+const (
+	SurfaceNone SurfaceMode = iota
+	SurfaceFlatOpaque
+)
+
+// SurfaceMaterial is the first deliberately small filled-surface contract.
+// Texture identifiers and translucent sorting belong to later extensions,
+// not to the baseline opaque triangle path.
+type SurfaceMaterial struct {
+	Mode  SurfaceMode
+	Color color.RGBA
+}
+
+func (material SurfaceMaterial) Opaque() bool {
+	return material.Mode == SurfaceFlatOpaque
+}
+
+// Validate checks presentation invariants that apply wherever a Part is used,
+// including catalog objects, streamed tiles, and registered rooms.
+func (part Part) Validate() error {
+	if err := part.Mesh.Validate(); err != nil {
+		return err
+	}
+	if part.LineWidth <= 0 {
+		return fmt.Errorf("line width must be positive")
+	}
+	return validateSurfaceMaterial(part.Surface, part.Mesh)
 }
 
 type SelfOcclusionPolicy uint8
@@ -142,12 +177,26 @@ func (o Object) Validate() error {
 		return fmt.Errorf("scene object %q has invalid detail thresholds", o.Name)
 	}
 	for index, part := range o.Parts {
-		if err := part.Mesh.Validate(); err != nil {
+		if err := part.Validate(); err != nil {
 			return fmt.Errorf("scene object %q part %d: %w", o.Name, index, err)
-		}
-		if part.LineWidth <= 0 {
-			return fmt.Errorf("scene object %q part %d: line width must be positive", o.Name, index)
 		}
 	}
 	return nil
+}
+
+func validateSurfaceMaterial(material SurfaceMaterial, mesh model.Model) error {
+	switch material.Mode {
+	case SurfaceNone:
+		return nil
+	case SurfaceFlatOpaque:
+		if material.Color.A != 255 {
+			return fmt.Errorf("flat opaque surface requires alpha 255")
+		}
+		if len(mesh.Faces) == 0 {
+			return fmt.Errorf("flat opaque surface requires polygon faces")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown surface material mode %d", material.Mode)
+	}
 }

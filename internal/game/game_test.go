@@ -19,6 +19,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
 	"github.com/edwardwillis/starwars-vector-game/internal/view"
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
@@ -202,6 +203,7 @@ func TestRegisteredRoomGeometryUsesPreparedCandidatePipeline(t *testing.T) {
 		Parts: []scene.Part{{
 			Name: "shell", Mesh: roomMesh, Color: color.RGBA{G: 255, A: 255}, LineWidth: 1,
 			SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll,
+			Surface: scene.SurfaceMaterial{Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 8, G: 12, B: 16, A: 255}},
 		}},
 	}); err != nil {
 		t.Fatalf("register room: %v", err)
@@ -210,12 +212,22 @@ func TestRegisteredRoomGeometryUsesPreparedCandidatePipeline(t *testing.T) {
 	if len(prepared.candidates) != 1 || prepared.candidates[0].geometry == nil {
 		t.Fatalf("room candidates=%+v", prepared.candidates)
 	}
+	if len(prepared.candidates[0].geometry.Triangles) == 0 || prepared.candidates[0].pointOccluder {
+		t.Fatalf("opaque room did not prepare fill triangles or retained redundant star occlusion: %+v", prepared.candidates[0])
+	}
 	if prepared.candidates[0].group != environmentDepthGroup(0) || len(prepared.domains) != 1 {
 		t.Fatalf("room depth group=%+v domains=%+v", prepared.candidates[0].group, prepared.domains)
 	}
 	registered, _ := g.environmentRegistry.Room(frame)
 	if !registered.Bounds.Valid() || registered.Parts[0].Mesh.Topology == nil {
 		t.Fatalf("room was not prepared at registration: %+v", registered)
+	}
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+	screen := ebiten.NewImage(g.pipeline.Width, g.pipeline.Height)
+	g.drawPreparedOpaqueSurfaces(screen, prepared)
+	if stats.OpaqueSurfaceCandidates != 1 || stats.OpaqueTriangles == 0 || stats.OpaqueBatches != 1 {
+		t.Fatalf("opaque submission stats=%+v", stats)
 	}
 }
 

@@ -113,6 +113,7 @@ type preparedCandidate struct {
 	objectID       scene.ObjectID
 	color          color.Color
 	lineWidth      float32
+	surface        scene.SurfaceMaterial
 	selfOcclusion  render.SelfOcclusionMode
 	group          depthDomainID
 	domain         depthDomainID
@@ -245,7 +246,7 @@ func (g *Game) prepareCandidateGeometry(prepared *preparedFrame) {
 			continue
 		}
 		geometry := &prepared.geometries[geometryIndex]
-		g.pipeline.PrepareGeometryInto(geometry, candidate.mesh, candidate.world, candidate.writesDepth || candidate.pointOccluder)
+		g.pipeline.PrepareGeometryInto(geometry, candidate.mesh, candidate.world, candidate.writesDepth || candidate.pointOccluder || candidate.surface.Opaque())
 		candidate.geometry = geometry
 		geometryIndex++
 	}
@@ -381,9 +382,10 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 			}
 			prepared.candidates = append(prepared.candidates, preparedCandidate{
 				mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID,
-				color: part.Color, lineWidth: part.LineWidth, group: group,
+				color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
 				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
-				writesDepth:   depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !(hasAppearance && definition.PointOccluder == "sphere"),
+				writesDepth:   depthWriteCandidate(part), testsDepth: depthTestCandidate(part),
+				pointOccluder: pointOcclusionCandidate(part) && !part.Surface.Opaque() && !(hasAppearance && definition.PointOccluder == "sphere"),
 			})
 		}
 		if hasAppearance && definition.PointOccluder == "sphere" {
@@ -444,9 +446,9 @@ func (g *Game) appendRoomCandidates(prepared *preparedFrame) {
 		prepared.candidates = append(prepared.candidates, preparedCandidate{
 			mesh: part.Mesh, world: world,
 			owner: environmentPartOwner(0, environment.TileCoordinate{}, "room/"+string(room.Frame), partIndex),
-			color: part.Color, lineWidth: part.LineWidth, group: group,
+			color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
 			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
-			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !part.Surface.Opaque(),
 		})
 	}
 }
@@ -491,9 +493,9 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 		prepared.candidates = append(prepared.candidates, preparedCandidate{
 			mesh: part.Mesh, world: frameWorld,
 			owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex),
-			color: part.Color, lineWidth: part.LineWidth, group: group,
+			color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
 			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
-			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !part.Surface.Opaque(),
 		})
 	}
 	for _, feature := range tile.Features {
@@ -541,9 +543,9 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 			prepared.candidates = append(prepared.candidates, preparedCandidate{
 				mesh: part.Mesh, world: world,
 				owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, feature.ID, partIndex),
-				color: part.Color, lineWidth: part.LineWidth, group: group,
+				color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
 				selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
-				testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+				testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !part.Surface.Opaque(),
 			})
 		}
 		if !visible && lodEligible && g.pipeline.Stats != nil {
@@ -589,7 +591,7 @@ func (g *Game) prepareShowcaseFrame() *preparedFrame {
 		}
 		world := object.WorldMatrix()
 		for partIndex, part := range object.Parts {
-			prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID, color: part.Color, lineWidth: part.LineWidth, group: objectDepthGroup(object.ID), selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part)})
+			prepared.candidates = append(prepared.candidates, preparedCandidate{mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID, color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: objectDepthGroup(object.ID), selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part) && !part.Surface.Opaque()})
 		}
 	}
 	g.prepareCandidateGeometry(prepared)
@@ -676,9 +678,12 @@ type Game struct {
 	prepared                 preparedFrame
 	viewContext              view.Context
 	visibleObjectIDs         map[scene.ObjectID]bool
-	starPixel                *ebiten.Image
+	whitePixel               *ebiten.Image
 	starVertices             []ebiten.Vertex
 	starIndices              []uint16
+	opaqueTriangles          []render.FlatTriangle
+	opaqueVertices           []ebiten.Vertex
+	opaqueIndices            []uint16
 	starPoints               []starfield.Point
 	starOccluders            render.PointOccluderSet
 	showcaseStarPoints       []starfield.Point
@@ -3258,6 +3263,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	for objectID := range g.visibleObjectIDs {
 		delete(g.visibleObjectIDs, objectID)
 	}
+	g.drawPreparedOpaqueSurfaces(screen, prepared)
 	geometryStart := time.Now()
 	depth := g.depthBufferForPrepared(prepared)
 	for _, candidate := range prepared.candidates {
@@ -3360,6 +3366,7 @@ func (g *Game) drawHyperspaceArrival(screen *ebiten.Image) {
 }
 
 func (g *Game) drawShowcase(screen *ebiten.Image, prepared *preparedFrame) {
+	g.drawPreparedOpaqueSurfaces(screen, prepared)
 	depth := g.depthBufferForPrepared(prepared)
 	drawCandidates := func(indexes []int, domainDepth *render.DepthBuffer) {
 		for _, candidateIndex := range indexes {
@@ -3722,6 +3729,85 @@ func (g *Game) flushWorldBatch(screen *ebiten.Image) int {
 	return drawVectorLineBatches(screen, g.worldBatches)
 }
 
+// drawPreparedOpaqueSurfaces submits only explicitly opted-in flat surfaces.
+// Triangles are already transformed, face-classified and near/far clipped by
+// frame preparation. A stable far-to-near order supplies correct opaque
+// composition for the ordinary non-intersecting surfaces used by rooms and
+// models without introducing a full visible raster pipeline.
+func (g *Game) drawPreparedOpaqueSurfaces(screen *ebiten.Image, prepared *preparedFrame) {
+	start := time.Now()
+	g.opaqueTriangles = g.opaqueTriangles[:0]
+	for index := range prepared.candidates {
+		candidate := &prepared.candidates[index]
+		if !candidate.surface.Opaque() || candidate.geometry == nil {
+			continue
+		}
+		before := len(g.opaqueTriangles)
+		g.opaqueTriangles = render.AppendFlatTriangles(g.opaqueTriangles, candidate.geometry, candidate.surface.Color)
+		if len(g.opaqueTriangles) > before && g.pipeline.Stats != nil {
+			g.pipeline.Stats.OpaqueSurfaceCandidates++
+		}
+	}
+	if len(g.opaqueTriangles) == 0 {
+		return
+	}
+	render.SortFlatTriangles(g.opaqueTriangles)
+	g.ensureWhitePixel()
+
+	const maxTrianglesPerBatch = (1<<16 - 1) / 3
+	for first := 0; first < len(g.opaqueTriangles); first += maxTrianglesPerBatch {
+		end := min(first+maxTrianglesPerBatch, len(g.opaqueTriangles))
+		count := end - first
+		g.opaqueVertices = resizeEbitenVertices(g.opaqueVertices, count*3)
+		g.opaqueIndices = resizeUint16(g.opaqueIndices, count*3)
+		for local, triangle := range g.opaqueTriangles[first:end] {
+			vertex := local * 3
+			red := float32(triangle.Color.R) / 255
+			green := float32(triangle.Color.G) / 255
+			blue := float32(triangle.Color.B) / 255
+			alpha := float32(triangle.Color.A) / 255
+			points := [...]render.Point{triangle.A, triangle.B, triangle.C}
+			for corner, point := range points {
+				g.opaqueVertices[vertex+corner] = ebiten.Vertex{
+					DstX: float32(point.X), DstY: float32(point.Y), SrcX: 0.5, SrcY: 0.5,
+					ColorR: red, ColorG: green, ColorB: blue, ColorA: alpha,
+				}
+				g.opaqueIndices[vertex+corner] = uint16(vertex + corner)
+			}
+		}
+		screen.DrawTriangles(g.opaqueVertices, g.opaqueIndices, g.whitePixel, &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest})
+		if g.pipeline.Stats != nil {
+			g.pipeline.Stats.OpaqueBatches++
+		}
+	}
+	if g.pipeline.Stats != nil {
+		g.pipeline.Stats.OpaqueTriangles += len(g.opaqueTriangles)
+		g.pipeline.Stats.OpaqueSubmitMS += time.Since(start).Seconds() * 1000
+	}
+}
+
+func resizeEbitenVertices(vertices []ebiten.Vertex, length int) []ebiten.Vertex {
+	if cap(vertices) < length {
+		return make([]ebiten.Vertex, length)
+	}
+	return vertices[:length]
+}
+
+func resizeUint16(indices []uint16, length int) []uint16 {
+	if cap(indices) < length {
+		return make([]uint16, length)
+	}
+	return indices[:length]
+}
+
+func (g *Game) ensureWhitePixel() {
+	if g.whitePixel != nil {
+		return
+	}
+	g.whitePixel = ebiten.NewImage(1, 1)
+	g.whitePixel.WritePixels([]byte{255, 255, 255, 255})
+}
+
 // renderWorldJobs parallelizes pure CPU line generation after depth has been
 // rasterized. Workers only read the shared depth buffer; all Ebiten submission
 // remains ordered on the calling/render thread.
@@ -4067,10 +4153,7 @@ func (g *Game) drawStarPoints(screen *ebiten.Image, points []starfield.Point) {
 	if len(points) == 0 {
 		return
 	}
-	if g.starPixel == nil {
-		g.starPixel = ebiten.NewImage(1, 1)
-		g.starPixel.WritePixels([]byte{255, 255, 255, 255})
-	}
+	g.ensureWhitePixel()
 	g.starVertices = g.starVertices[:0]
 	g.starIndices = g.starIndices[:0]
 	if cap(g.starVertices) < len(points)*4 {
@@ -4093,7 +4176,7 @@ func (g *Game) drawStarPoints(screen *ebiten.Image, points []starfield.Point) {
 		g.starIndices = append(g.starIndices, base, base+1, base+2, base, base+2, base+3)
 	}
 	op := &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest}
-	screen.DrawTriangles(g.starVertices, g.starIndices, g.starPixel, op)
+	screen.DrawTriangles(g.starVertices, g.starIndices, g.whitePixel, op)
 }
 
 func (g *Game) drawMouseReticle(screen *ebiten.Image) {
@@ -4133,9 +4216,10 @@ func (g *Game) hudText() string {
 			"Clipped edges: %d | Vectors: %d jobs, %d world batches\n"+
 			"Prepared: %d candidates, %d geometries, %d faces classified, %d surface triangles | Depth: %d candidate objects, %d candidate parts, %d writing, %d testing, %d domains | enabled profile %t self %t\n"+
 			"Depth work: %d faces, %d triangles, %d pixels tested, %d written, %d line samples\n"+
+			"Opaque surfaces: %d candidates, %d triangles, %d batches\n"+
 			"Environment: %d/%d tiles active/input, %d tile bounds rejected | features %d in, %d prepared, rejected %d bounds, %d LOD | parts rejected %d bounds, %d LOD\n"+
 			"Billboards: %d objects, %d lines, %d batches | Star occlusion: %d analytic, %d geometry | Stars: %d considered, %d rejected, %d submitted\n"+
-			"Timing ms: depth %.2f | geometry %.2f | vector submit %.2f\n"+
+			"Timing ms: depth %.2f | geometry %.2f | opaque submit %.2f | vector submit %.2f\n"+
 			"Profile: %s\n"+
 			"W/S throttle  Mouse/arrows yaw/pitch  Q/E roll  Space stop\nF/left-click fire  G mouse  M mode  V view  P pause  R reset  +/- or wheel zoom",
 		g.profile.Name,
@@ -4189,6 +4273,9 @@ func (g *Game) hudText() string {
 		g.renderStats.DepthPixelsTested,
 		g.renderStats.DepthPixelsWritten,
 		g.renderStats.LineDepthSamples,
+		g.renderStats.OpaqueSurfaceCandidates,
+		g.renderStats.OpaqueTriangles,
+		g.renderStats.OpaqueBatches,
 		g.renderStats.ActiveEnvironmentTiles,
 		g.renderStats.EnvironmentTilesInput,
 		g.renderStats.EnvironmentTilesBoundsRejected,
@@ -4208,6 +4295,7 @@ func (g *Game) hudText() string {
 		g.renderStats.StarsSubmitted,
 		g.renderStats.DepthRasterMS,
 		g.renderStats.GeometryMS,
+		g.renderStats.OpaqueSubmitMS,
 		g.renderStats.VectorSubmitMS,
 		g.profile.Name,
 	)

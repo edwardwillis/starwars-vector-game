@@ -64,9 +64,10 @@ type Stats struct {
 	EnvironmentPartsBoundsRejected, EnvironmentPartsLODRejected       int
 	EnvironmentFeaturesBoundsRejected, EnvironmentFeaturesLODRejected int
 	DepthEnabledByProfile, DepthEnabledBySelfOcclusion                bool
-	WorldBatches                                                      int
+	WorldBatches, OpaqueSurfaceCandidates                             int
+	OpaqueTriangles, OpaqueBatches                                    int
 	DepthRasterMS, GeometryMS                                         float64
-	VectorSubmitMS                                                    float64
+	OpaqueSubmitMS, VectorSubmitMS                                    float64
 }
 
 // Ray describes a world-space half-line produced by a screen-space aim point.

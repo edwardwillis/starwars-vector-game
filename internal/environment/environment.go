@@ -240,11 +240,8 @@ func (room Room) Validate() error {
 		return fmt.Errorf("room %q: %w", room.Name, err)
 	}
 	for index, part := range room.Parts {
-		if err := part.Mesh.Validate(); err != nil {
+		if err := part.Validate(); err != nil {
 			return fmt.Errorf("room %q part %d: %w", room.Name, index, err)
-		}
-		if part.LineWidth <= 0 {
-			return fmt.Errorf("room %q part %d requires positive line width", room.Name, index)
 		}
 	}
 	seen := make(map[string]bool, len(room.Portals))

@@ -1761,6 +1761,19 @@ renderer. Portal destination rendering and aperture-constrained background
 projection remain a later consumer of this metadata, to be introduced with the
 first concrete interior rather than speculated into the core pipeline.
 
-Item 7 is next: add batched flat opaque triangle materials while retaining
-vector outlines, then layer textured and sorted translucent materials only
-after the flat opaque path is measured and stable.
+Item 7 is in progress. Its first and foundational increment is complete:
+`scene.Part` may opt into a validated flat opaque surface material while the
+zero value remains vector-only. Filled surfaces reuse the prepared,
+camera-facing, near/far-clipped triangles; only opted-in triangles incur a
+stable back-to-front sort and they are submitted in bounded reusable Ebitengine
+batches before luminous vector outlines. Because a real opaque fill covers the
+prebatched background naturally, those candidates skip redundant sparse-star
+geometry tests while retaining ordinary physical depth participation. HUD
+diagnostics report opaque candidates, triangles, batches and submission time.
+
+No existing model opts into fill yet, preserving the current visual output.
+The first concrete interior or surface-artifact workload should select where
+flat fill materially improves the scene and supply before/after measurements.
+Texture asset identifiers and batching are the next Item 7 increment; sorted
+translucent/glass materials remain last and must not complicate the proven
+opaque path.

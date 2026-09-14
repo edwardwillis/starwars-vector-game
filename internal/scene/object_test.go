@@ -43,3 +43,22 @@ func TestObjectValidation(t *testing.T) {
 		t.Fatal("object with zero line width was accepted")
 	}
 }
+
+func TestFlatOpaqueSurfaceValidation(t *testing.T) {
+	part := Part{
+		Mesh: model.Cube(1), Color: color.RGBA{G: 255, A: 255}, LineWidth: 1,
+		Surface: SurfaceMaterial{Mode: SurfaceFlatOpaque, Color: color.RGBA{R: 8, G: 16, B: 24, A: 255}},
+	}
+	if err := part.Validate(); err != nil {
+		t.Fatalf("valid flat opaque part: %v", err)
+	}
+	part.Surface.Color.A = 128
+	if err := part.Validate(); err == nil {
+		t.Fatal("translucent color accepted by opaque material")
+	}
+	part.Surface = SurfaceMaterial{Mode: SurfaceFlatOpaque, Color: color.RGBA{A: 255}}
+	part.Mesh = model.Model{Verts: []math3d.Vec3{{}, {X: 1}}, Edges: []model.Edge{{A: 0, B: 1}}}
+	if err := part.Validate(); err == nil {
+		t.Fatal("line-only mesh accepted as a filled surface")
+	}
+}
