@@ -17,6 +17,8 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
+	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
+	"github.com/edwardwillis/starwars-vector-game/internal/view"
 )
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
@@ -149,6 +151,71 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	g.realismLevel = 0
 	if len(g.prepareGameplayFrame().domains) == 0 {
 		t.Fatal("opaque surface features did not request a depth pass at low realism")
+	}
+}
+
+func TestViewContextSelectsFrameCameraAndBackground(t *testing.T) {
+	g := New()
+	g.refreshViewContext()
+	if g.viewContext.FrameID != scene.ExteriorFrame || g.viewContext.Background.Kind != view.BackgroundSkyfield || g.pipeline.View != g.viewContext.ViewMatrix {
+		t.Fatalf("default view context=%+v pipeline view=%v", g.viewContext, g.pipeline.View)
+	}
+
+	roomFrame := scene.FrameID("test/falcon-interior")
+	if err := g.environmentRegistry.RegisterRoom(environment.Room{
+		Name: "Falcon interior", Frame: roomFrame,
+		Background: view.Background{Kind: view.BackgroundNone},
+	}); err != nil {
+		t.Fatalf("register room: %v", err)
+	}
+	fighter := g.objectByID(fighterID)
+	fighter.Frame = roomFrame
+	g.viewCamera.Mode = camera.Cockpit
+	g.refreshViewContext()
+	if g.viewContext.FrameID != roomFrame || g.viewContext.Background.Kind != view.BackgroundNone {
+		t.Fatalf("room view context=%+v", g.viewContext)
+	}
+	prepared := g.prepareGameplayFrame()
+	if prepared.frame != roomFrame || prepared.view != g.viewContext {
+		t.Fatalf("prepared frame did not retain context: %+v", prepared)
+	}
+	points := []starfield.Point{{X: 1, Y: 1}}
+	if got := g.drawBackground(nil, prepared, g.starField, points); len(got) != 0 {
+		t.Fatalf("room without background submitted %d stars", len(got))
+	}
+
+	g.showcaseActive = true
+	g.refreshViewContext()
+	if g.viewContext.FrameID != scene.ExteriorFrame || g.viewContext.ViewMatrix != math3d.Identity() || g.viewContext.Background.Kind != view.BackgroundSkyfield {
+		t.Fatalf("showcase context=%+v", g.viewContext)
+	}
+}
+
+func TestRegisteredRoomGeometryUsesPreparedCandidatePipeline(t *testing.T) {
+	frame := scene.FrameID("test/room")
+	g := newDepthRequirementTestGame()
+	g.viewContext.FrameID = frame
+	roomMesh := model.Transform(model.Cube(1), math3d.Translation(0, 0, -5))
+	if err := g.environmentRegistry.RegisterRoom(environment.Room{
+		Name: "test room", Frame: frame,
+		Background: view.Background{Kind: view.BackgroundNone},
+		Parts: []scene.Part{{
+			Name: "shell", Mesh: roomMesh, Color: color.RGBA{G: 255, A: 255}, LineWidth: 1,
+			SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll,
+		}},
+	}); err != nil {
+		t.Fatalf("register room: %v", err)
+	}
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.candidates) != 1 || prepared.candidates[0].geometry == nil {
+		t.Fatalf("room candidates=%+v", prepared.candidates)
+	}
+	if prepared.candidates[0].group != environmentDepthGroup(0) || len(prepared.domains) != 1 {
+		t.Fatalf("room depth group=%+v domains=%+v", prepared.candidates[0].group, prepared.domains)
+	}
+	registered, _ := g.environmentRegistry.Room(frame)
+	if !registered.Bounds.Valid() || registered.Parts[0].Mesh.Topology == nil {
+		t.Fatalf("room was not prepared at registration: %+v", registered)
 	}
 }
 
@@ -491,10 +558,16 @@ func TestPreparedShowcaseRejectsOffscreenObjects(t *testing.T) {
 
 func newDepthRequirementTestGame(objects ...scene.Object) *Game {
 	viewCamera := camera.New(1)
+	pipeline := render.NewPipeline(100, 100, math.Pi/2, 0.1, 100)
 	return &Game{
-		objects:      objects,
-		viewCamera:   viewCamera,
-		pipeline:     render.NewPipeline(100, 100, math.Pi/2, 0.1, 100),
+		objects:             objects,
+		viewCamera:          viewCamera,
+		pipeline:            pipeline,
+		environmentRegistry: environment.NewRegistry(),
+		viewContext: view.Context{
+			FrameID: scene.ExteriorFrame, ViewMatrix: pipeline.View,
+			Background: view.Background{Kind: view.BackgroundSkyfield},
+		},
 		detailLevels: make(map[scene.ObjectID]scene.DetailTier),
 	}
 }

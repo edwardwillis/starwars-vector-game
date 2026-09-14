@@ -26,6 +26,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
+	"github.com/edwardwillis/starwars-vector-game/internal/view"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -147,6 +148,7 @@ type preparedDepthDomain struct {
 }
 
 type preparedFrame struct {
+	view         view.Context
 	frame        scene.FrameID
 	candidates   []preparedCandidate
 	geometries   []render.PreparedGeometry
@@ -204,6 +206,7 @@ func environmentDepthGroup(id scene.ObjectID) depthDomainID {
 
 func (g *Game) resetPreparedFrame(frame scene.FrameID) *preparedFrame {
 	prepared := &g.prepared
+	prepared.view = g.viewContext
 	prepared.frame = frame
 	prepared.candidates = prepared.candidates[:0]
 	prepared.geometries = prepared.geometries[:0]
@@ -338,7 +341,7 @@ func (g *Game) assignPreparedDepth(prepared *preparedFrame) {
 }
 
 func (g *Game) prepareGameplayFrame() *preparedFrame {
-	prepared := g.resetPreparedFrame(g.activeViewFrame())
+	prepared := g.resetPreparedFrame(g.viewContext.FrameID)
 	for _, object := range g.objects {
 		if !g.swarmLaunched {
 			if _, autonomous := g.controllers[object.ID]; autonomous {
@@ -404,6 +407,7 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity())
 		}
 	}
+	g.appendRoomCandidates(prepared)
 	g.appendTransitionEnvironmentCandidates(prepared)
 	g.prepareCandidateGeometry(prepared)
 	g.assignPreparedDepth(prepared)
@@ -411,6 +415,40 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
 	}
 	return prepared
+}
+
+// appendRoomCandidates gives enclosed environments the same immutable,
+// visibility-first preparation path as every other physical scene surface.
+// Portal apertures remain metadata until destination-view clipping is added;
+// room authors model wall geometry around openings rather than drawing masks.
+func (g *Game) appendRoomCandidates(prepared *preparedFrame) {
+	room, ok := g.environmentRegistry.Room(prepared.frame)
+	if !ok {
+		return
+	}
+	world := math3d.Identity()
+	if room.Bounds.Valid() {
+		visible, _ := g.renderBoundsInView(room.Bounds, world)
+		if !visible {
+			return
+		}
+	}
+	group := environmentDepthGroup(0)
+	for partIndex, part := range room.Parts {
+		if !g.meshInView(part.Mesh, world) {
+			if g.pipeline.Stats != nil {
+				g.pipeline.Stats.EnvironmentPartsBoundsRejected++
+			}
+			continue
+		}
+		prepared.candidates = append(prepared.candidates, preparedCandidate{
+			mesh: part.Mesh, world: world,
+			owner: environmentPartOwner(0, environment.TileCoordinate{}, "room/"+string(room.Frame), partIndex),
+			color: part.Color, lineWidth: part.LineWidth, group: group,
+			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
+			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
+		})
+	}
 }
 
 // appendEnvironmentTileCandidates is the common preparation boundary for
@@ -544,7 +582,7 @@ func (g *Game) appendTransitionEnvironmentCandidates(prepared *preparedFrame) {
 }
 
 func (g *Game) prepareShowcaseFrame() *preparedFrame {
-	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
+	prepared := g.resetPreparedFrame(g.viewContext.FrameID)
 	for _, object := range g.showcaseObjects {
 		if !g.objectInView(object) {
 			continue
@@ -636,6 +674,7 @@ type Game struct {
 	worldBatches             []vectorLineBatch
 	worldJobs                []worldRenderJob
 	prepared                 preparedFrame
+	viewContext              view.Context
 	visibleObjectIDs         map[scene.ObjectID]bool
 	starPixel                *ebiten.Image
 	starVertices             []ebiten.Vertex
@@ -805,7 +844,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	}
 	game.pipeline.MinLinePixels = realismLineThreshold(game.realismLevel)
 	game.pipeline.Stats = &game.renderStats
-	game.pipeline.View = game.viewCamera.View(game.objects)
+	game.refreshViewContext()
 	return game, nil
 }
 
@@ -900,13 +939,13 @@ func (g *Game) Update() error {
 			g.quitPrompt = false
 			g.paused = false
 		}
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 	if !g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
 		g.paused = true
 		g.quitPrompt = true
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 	if g.showcaseActive {
@@ -961,7 +1000,7 @@ func (g *Game) Update() error {
 			g.showcaseObjects[index].Pose.Position = math3d.Vec3{X: offset * 28, Z: -g.showcaseDistance - math.Abs(offset)*18}
 			g.showcaseObjects[index].Pose.Orientation = math3d.QuaternionFromYawPitchRoll(angle+offset*0.25+yaw, 0.12+pitch, 0)
 		}
-		g.pipeline.View = math3d.Identity()
+		g.refreshViewContext()
 		return nil
 	}
 	g.updateControls(seconds)
@@ -980,7 +1019,7 @@ func (g *Game) Update() error {
 				g.beginHyperspaceArrival(fighter.Pose)
 			}
 		}
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
@@ -1021,7 +1060,7 @@ func (g *Game) Update() error {
 		if !g.paused {
 			g.advanceHyperspaceArrival(seconds)
 		}
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 	if g.mode == modeAutopilot && navigationInputPressed() {
@@ -1048,7 +1087,7 @@ func (g *Game) Update() error {
 			g.advanceEnvironmentTransitions(seconds, inpututil.IsKeyJustPressed(ebiten.KeyEscape))
 		}
 		g.refreshTransitionEnvironmentTiles()
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 
@@ -1060,7 +1099,7 @@ func (g *Game) Update() error {
 		}
 	}
 	if g.paused {
-		g.pipeline.View = g.viewCamera.View(g.objects)
+		g.refreshViewContext()
 		return nil
 	}
 	g.simulationTime += seconds
@@ -1079,7 +1118,7 @@ func (g *Game) Update() error {
 	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	if ebiten.IsKeyPressed(ebiten.KeyF) || ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		if g.showHUD && g.handleRealismSliderClick() {
-			g.pipeline.View = g.viewCamera.View(g.objects)
+			g.refreshViewContext()
 			return nil
 		}
 		g.launchSwarm()
@@ -1109,7 +1148,7 @@ func (g *Game) Update() error {
 		g.starField.Wrap(*reference)
 	}
 	g.viewCamera.Update(seconds)
-	g.pipeline.View = g.viewCamera.View(g.objects)
+	g.refreshViewContext()
 	return nil
 }
 
@@ -1142,7 +1181,7 @@ func (g *Game) startInSurfaceMode() bool {
 			g.viewCamera.Mode = camera.Cockpit
 			g.hyperspaceArrival = nil
 			g.refreshEnvironmentTiles()
-			g.pipeline.View = g.viewCamera.View(g.objects)
+			g.refreshViewContext()
 			return true
 		}
 	}
@@ -3200,13 +3239,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	} else {
 		g.pipeline.Stats = nil
 	}
+	g.refreshViewContext()
 	if g.showcaseActive {
 		prepared := g.prepareShowcaseFrame()
-		if g.showcaseStarField != nil {
-			g.buildStarOccluders(prepared)
-			g.showcaseStarPoints = g.showcaseStarField.ProjectInto(g.pipeline, g.showcaseStarPoints, &g.starOccluders)
-			g.drawStarPoints(screen, g.showcaseStarPoints)
-		}
+		g.showcaseStarPoints = g.drawBackground(screen, prepared, g.showcaseStarField, g.showcaseStarPoints)
 		g.drawShowcase(screen, prepared)
 		return
 	}
@@ -3752,6 +3788,33 @@ func (g *Game) activeViewFrame() scene.FrameID {
 	return scene.ExteriorFrame
 }
 
+func (g *Game) defaultBackground() view.Background {
+	if g.profile.Starfield.Mode == profile.StarfieldModeWorld {
+		return view.Background{Kind: view.BackgroundWorldStars}
+	}
+	return view.Background{Kind: view.BackgroundSkyfield}
+}
+
+// refreshViewContext is the single boundary between camera/environment state
+// and frame preparation. Showcase uses its presentation camera; gameplay uses
+// the controlled camera and lets a registered room override the default space
+// background for its frame.
+func (g *Game) refreshViewContext() {
+	context := view.Context{
+		FrameID:    g.activeViewFrame(),
+		ViewMatrix: g.viewCamera.View(g.objects),
+		Background: g.defaultBackground(),
+	}
+	if g.showcaseActive {
+		context.FrameID = scene.ExteriorFrame
+		context.ViewMatrix = math3d.Identity()
+	} else if roomContext, ok := g.environmentRegistry.ViewContext(context.FrameID, context.ViewMatrix); ok {
+		context = roomContext
+	}
+	g.viewContext = context
+	g.pipeline.View = context.ViewMatrix
+}
+
 func (g *Game) objectDetailTier(object scene.Object) scene.DetailTier {
 	thresholds := object.DetailThresholds
 	if object.VisualRadius <= 0 || thresholds.MediumPixels <= 0 || thresholds.NearPixels <= 0 {
@@ -3920,9 +3983,27 @@ func (g *Game) toggleControls() {
 }
 
 func (g *Game) drawStarfield(screen *ebiten.Image, prepared *preparedFrame) {
+	g.starPoints = g.drawBackground(screen, prepared, g.starField, g.starPoints)
+}
+
+// drawBackground consumes only the prepared frame's generic background policy.
+// Rooms, Death Stars, and other environment types never enter this path.
+func (g *Game) drawBackground(screen *ebiten.Image, prepared *preparedFrame, field *starfield.Field, points []starfield.Point) []starfield.Point {
+	if field == nil || prepared.view.Background.Kind == view.BackgroundNone {
+		return points[:0]
+	}
+	switch prepared.view.Background.Kind {
+	case view.BackgroundWorldStars:
+		field.SetMode(starfield.ModeWorld, 0)
+	case view.BackgroundSkyfield:
+		field.SetMode(starfield.ModeSkyfield, g.profile.Display.FarPlane*0.85)
+	default:
+		return points[:0]
+	}
 	g.buildStarOccluders(prepared)
-	g.starPoints = g.starField.ProjectInto(g.pipeline, g.starPoints, &g.starOccluders)
-	g.drawStarPoints(screen, g.starPoints)
+	points = field.ProjectInto(g.pipeline, points, &g.starOccluders)
+	g.drawStarPoints(screen, points)
+	return points
 }
 
 // buildStarOccluders prepares only sparse screen-space tests. Analytic

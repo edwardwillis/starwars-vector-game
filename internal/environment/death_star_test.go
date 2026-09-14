@@ -8,6 +8,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
+	"github.com/edwardwillis/starwars-vector-game/internal/view"
 )
 
 func TestDeathStarTrenchTileSharesRenderAndCollisionFeatures(t *testing.T) {
@@ -157,5 +158,53 @@ func TestDeathStarTrenchFrameIsTangentToNearSurface(t *testing.T) {
 	}
 	if got := pose.Orientation.Rotate(math3d.Vec3{Z: 1}); got.Sub(math3d.Vec3{Y: 1}).Length() > 1e-9 {
 		t.Fatalf("local forward maps to %+v, want world +Y", got)
+	}
+}
+
+func TestRegistryProvidesRoomViewContextAndDefensivePortals(t *testing.T) {
+	registry := NewRegistry()
+	frame := scene.FrameID("test/falcon-cockpit")
+	room := Room{
+		Name:       "Falcon cockpit",
+		Frame:      frame,
+		Background: view.Background{Kind: view.BackgroundNone},
+		Portals: []Portal{{
+			Name: "windscreen", Destination: scene.ExteriorFrame,
+			Boundary: []math3d.Vec3{{X: -1, Y: -1}, {X: 1, Y: -1}, {X: 1, Y: 1}, {X: -1, Y: 1}},
+		}},
+	}
+	if err := registry.RegisterRoom(room); err != nil {
+		t.Fatalf("register room: %v", err)
+	}
+	matrix := math3d.Translation(1, 2, 3)
+	context, ok := registry.ViewContext(frame, matrix)
+	if !ok || context.FrameID != frame || context.ViewMatrix != matrix || context.Background.Kind != view.BackgroundNone {
+		t.Fatalf("room context=%+v, found=%v", context, ok)
+	}
+	if _, ok := registry.ViewContext(scene.ExteriorFrame, matrix); ok {
+		t.Fatal("unregistered exterior frame unexpectedly resolved as a room")
+	}
+
+	copyRoom, ok := registry.Room(frame)
+	if !ok {
+		t.Fatal("registered room not found")
+	}
+	copyRoom.Portals[0].Boundary[0].X = 99
+	again, _ := registry.Room(frame)
+	if again.Portals[0].Boundary[0].X == 99 {
+		t.Fatal("caller mutation changed registered portal boundary")
+	}
+}
+
+func TestRoomRejectsInvalidAndDuplicatePortals(t *testing.T) {
+	registry := NewRegistry()
+	portal := Portal{Name: "door", Destination: scene.ExteriorFrame, Boundary: []math3d.Vec3{{}, {X: 1}, {Y: 1}}}
+	room := Room{Name: "room", Frame: "test/room", Background: view.Background{Kind: view.BackgroundNone}, Portals: []Portal{portal, portal}}
+	if err := registry.RegisterRoom(room); err == nil {
+		t.Fatal("room with duplicate portal names passed validation")
+	}
+	room.Portals = []Portal{{Name: "door", Destination: scene.ExteriorFrame}}
+	if err := registry.RegisterRoom(room); err == nil {
+		t.Fatal("room with degenerate portal passed validation")
 	}
 }

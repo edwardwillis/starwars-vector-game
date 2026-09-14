@@ -1724,7 +1724,7 @@ assuming that minimum overdraw always means minimum frame time.
    sorted translucent materials; do not make filled rendering a prerequisite
    for the vector modes.
 
-Status (2026-09-13): items 1–5 are complete. Gameplay, showcase, and the
+Status (2026-09-13): items 1–6 are complete. Gameplay, showcase, and the
 implemented approach-transition cut scene now produce the same prepared
 candidates and use the same bounds, depth-domain, point-occlusion, clipping,
 line-generation, batching, and diagnostics paths. Transition destination tiles
@@ -1743,3 +1743,24 @@ front-face classification, policy-selected edges, and—only when requested—
 near/far-clipped projected surface triangles once. Line generation, CPU depth,
 and sparse background occlusion consume that shared record instead of walking,
 transforming, classifying, clipping, and projecting the model independently.
+
+`internal/view.Context` is now the common presentation input for frame ID,
+camera/view transform and background selection. Gameplay, showcase, surface and
+transition preparation retain that resolved context rather than consulting
+independent global camera and starfield state. Background drawing consumes only
+the generic `none`, distant `skyfield`, or world-space-stars policy. Registered
+enclosed rooms override the normal exterior policy with `none` while
+unregistered exterior and surface frames preserve the configured star mode.
+
+The environment registry now also acts as the initial room/portal provider.
+Rooms contribute immutable prepared local geometry, derived aggregate bounds,
+background policy and ordered planar portal apertures linking simulation
+frames. Room surfaces enter the existing bounds, prepared-geometry, depth,
+point-occlusion and line pipeline; they do not create a separate interior
+renderer. Portal destination rendering and aperture-constrained background
+projection remain a later consumer of this metadata, to be introduced with the
+first concrete interior rather than speculated into the core pipeline.
+
+Item 7 is next: add batched flat opaque triangle materials while retaining
+vector outlines, then layer textured and sorted translucent materials only
+after the flat opaque path is measured and stable.
