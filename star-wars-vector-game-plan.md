@@ -2,6 +2,67 @@
 
 Non-commercial learning project. Homage to 1983 Atari arcade "Star Wars". Wireframe vector style, not photo-realism. All models hand-defined, no copied assets.
 
+## Current strategic priority — playable game first
+
+The immediate project goal is a **complete playable Battle of Yavin vertical
+slice**. The engine and renderer have reached the point where the next proof is
+not another reusable capability in isolation, but one enjoyable end-to-end
+single-player game loop.
+
+The intended longer-term game contains three missions inspired by the original
+film trilogy:
+
+1. Episode IV — Battle of Yavin
+2. Episode V — Battle of Hoth
+3. Episode VI — Battle of Endor
+
+Only Battle of Yavin is currently in active development. Endor and Hoth are future
+consumers of architecture proven by a complete Yavin mission; their anticipated
+requirements must not cause speculative abstractions to be introduced now.
+
+This priority supersedes the former post-Step-20 ordering wherever it placed an
+authoritative server, multiplayer client, external-agent integration, generic
+cut-scene framework, or public extension API ahead of scoring, complete game
+states, mission selection, outcome presentation, sound, and an end-to-end
+single-player mission.
+
+The working architectural rules are:
+
+- `sim.MissionPhase` remains the authoritative gameplay state for an active
+  mission.
+- Application flow such as title, briefing, playing, outcome presentation and
+  result remains outside mission simulation state.
+- Reuse the existing host-bound large-object, local-environment and frame
+  architecture. Do not add parallel `SpaceDomain`, `SurfaceDomain` or
+  `InteriorDomain` abstractions.
+- Preserve the logical Death Star host, its scalable orbital vector
+  presentation, and the established exterior-to-surface transition. Do not
+  replace it with a globally continuous detailed 3D sphere.
+- Preserve the prepared rendering pipeline and all five realism profiles.
+  Gameplay consumes those systems rather than bypassing them.
+- Prefer integration and small focused extensions over rewrites. Do not build
+  a generic mission scripting system merely to express Yavin.
+- Keep stable IDs, teams, frames, commands, snapshots and events where they are
+  already useful, but do not let future multiplayer requirements dictate the
+  immediate single-player implementation.
+
+The shortest intended playable loop is:
+
+```text
+TITLE / MISSION SELECT
+    -> BATTLE OF YAVIN BRIEFING / LAUNCH
+    -> ORBITAL COMBAT AND DEATH STAR APPROACH
+    -> EXISTING SPACE-TO-SURFACE TRANSITION
+    -> SURFACE ASSAULT
+    -> LOCATE AND ENTER THE ATTACK TRENCH
+    -> TRENCH RUN
+    -> EXHAUST-PORT ATTACK
+    -> SURVIVE THE ESCAPE
+    -> DEATH STAR DESTRUCTION
+    -> MISSION RESULT / SCORE
+    -> TITLE
+```
+
 ## Stack
 - Language: Go
 - Rendering: Ebiten (window, input, line drawing)
@@ -614,11 +675,19 @@ The initial transition implementation needs only a fixed camera/actor path, a
 two-second duration, deliberate half-turn roll, input suppression, skip action,
 and final-state transfer. The general registered cut-scene
 timeline, text, branching events, and level-transition system remain in the
-later cut-scene step. Orbital and surface scenes use ordinary catalog objects,
+later post-Yavin cut-scene step. Yavin's concrete launch, transition and outcome
+presentations should first be composed from the focused camera and presentation
+mechanisms that already exist; they do not require the generic timeline schema.
+Orbital and surface scenes use ordinary catalog objects,
 camera transforms, targeting, controllers, and rendering profiles; neither the
 renderer nor HUD may branch on a Death Star type.
 
 ## Live Simulation and Multiplayer Server
+
+**Priority status: deferred until the Battle of Yavin vertical slice has proved
+the single-player game loop.** The contracts below remain useful future design
+guidance, but they are not prerequisites for Yavin and must not force a
+participant/server refactor into the immediate mission work.
 
 A later networked mode will use an authoritative Go server that owns the live
 world model. The server advances simulation ticks and tracks stable object IDs,
@@ -670,17 +739,22 @@ credit resolved through ownership at the authoritative event tick. Object
 spawn/removal, damage, destruction, respawn, and scoring events identify all
 affected stable IDs explicitly.
 
-Local single-player mode is the one-participant case of the same session model.
-Step 20 and later object work must not add new singleton-player assumptions.
-Before the authoritative-server step, migrate existing `fighterID`, shield,
-destruction, respawn, targeting, and controller-role state into participant- and
-object-keyed structures with headless two-player tests.
+Local single-player mode may eventually become the one-participant case of this
+session model. Until multiplayer again becomes a priority, avoid spreading new
+singleton-player assumptions into reusable simulation contracts, but do not
+delay Yavin in order to migrate every existing `fighterID`, shield, destruction,
+respawn, targeting, and controller-role field. Perform that migration as part
+of the future authoritative-server milestone, informed by the completed game
+rather than speculative requirements.
 
 ## Customization and Extension Architecture
 
-The next architectural milestone is to turn the existing extension hooks into
-a coherent customization API before adding major new object classes, network
-transport, or external agents. Contributors should be able to add a behavior,
+**Priority status: foundation substantially established; public API
+stabilization deferred until after Yavin.** The existing registries and
+extension hooks remain the internal architecture used by normal gameplay. A
+later architectural milestone may turn them into a coherent public
+customization API before network transport or external agents. Contributors
+should eventually be able to add a behavior,
 object definition, rendering profile, or complete game profile without editing
 the central game loop. Built-in features use the same registration and
 configuration paths offered to contributors so extension points remain tested
@@ -993,17 +1067,29 @@ controllers remain the baseline for tests and offline play.
 18. Composable rendering profiles — replace the interim culler with optional backface, hidden-line, scene-occlusion, and depth-cue stages plus the interactive realism selector
 19. Simulation extraction — stable IDs and renderer-independent fixed-tick world updates behind snapshot and command APIs; move gameplay tests into this headless layer wherever possible
 20. Death Star and reusable large-object environments — canonical TIE naming; generic bidirectional exterior/local-frame transitions; default scalable arcade billboard with deterministic proximity-revealed detail; optional sparse 3D orbital presentation; configurable approach threshold; per-fighter two-second roll transition; fully flyable tiled tangent-space surface with a finite trench, matched collision floors, walls, structures, towers, cannons, panels, targeting, and distance detail
-21. Generalized camera anchors — cockpit, chase, spectator, and Death Star viewpoints selected independently from control ownership
-22. General cut-scene orchestration — expand the Step 20 approach-transition subset into registered actor, path, camera, text, event, skip, and level-transition timelines
-23. Authoritative server — first-class participant IDs, ownership and control authorization, fixed ticks, autonomous objects, sessions, profiles, snapshots, and headless multi-player tests
-24. Rule-driven intelligence library — patrol, pursuit, evasion, targeting, and formations registered through the controller API
-25. Multiplayer client — control input, interpolation, ownership, view switching
-26. External agent adapter — asynchronous AI/MCP decisions and safe fallback
-27. Score, complete game states, difficulty-selection UI, and sound
-28. Public extension API — stabilize importable controller, catalog, configuration, snapshot, and cinematic contracts
-29. Stretch: prediction/reconciliation, replay, persistence, multiple rooms
-30. Stretch: controller evaluation, tournaments, and strategy hot-loading
-31. Stretch: CRT/vector-glow stages and fixed-point math (period-accurate)
+21. Battle of Yavin Milestone 1 — game shell and clean session lifecycle
+22. Battle of Yavin Milestone 2 — arcade mission structure and fighting approach
+23. Battle of Yavin Milestone 3 — authoritative attack and escape rules
+24. Battle of Yavin Milestone 4 — score and result loop
+25. Battle of Yavin Milestone 5 — outcome presentation and audio
+26. Battle of Yavin Milestone 6 — balance, performance, documentation and release gate
+
+The former post-Step-20 sequence is preserved as future work but no longer
+controls immediate implementation order:
+
+| Former step | Previous scope | Revised position |
+|---|---|---|
+| 21 | Generalized camera anchors | Existing camera/anchor capability is sufficient for Yavin; additional generalization moves after Yavin unless a concrete scene requires it. |
+| 22 | General cut-scene orchestration | Only the concrete Yavin launch, transition and outcome presentations move into the vertical slice. The generic registered timeline remains post-Yavin. |
+| 23 | Authoritative server | Deferred until single-player Yavin is complete and evaluated. |
+| 24 | Rule-driven intelligence library | Reuse current pursuit and surface-combat behavior. Only Yavin phase-aware encounter tuning moves forward; the general library remains post-Yavin. |
+| 25 | Multiplayer client | Deferred with the server work. |
+| 26 | External agent adapter | Deferred until multiplayer/external control is again a priority. |
+| 27 | Score, complete game states, difficulty UI and sound | Split across Yavin Milestones 1, 4 and 5 and brought forward. |
+| 28 | Public extension API | Deferred until the working game reveals which contracts deserve stabilization. |
+| 29 | Prediction, reconciliation, replay, persistence and multiple rooms | Network portions remain deferred; only focused deterministic mission tests are required for Yavin. Existing room/portal capability is retained. |
+| 30 | Controller evaluation, tournaments and hot-loading | Deferred until after game and multiplayer priorities. |
+| 31 | CRT/vector-glow and fixed-point experiments | Optional post-Yavin presentation work. |
 
 ## Notes
 - Step 5 is first visually demonstrable milestone (target early win).
@@ -1301,7 +1387,7 @@ and bolt continuity on both sides. Near-plane clipping of the portal polygon,
 source-side collision ordering for a bolt that traverses a doorway in one tick,
 and target acquisition across a visible opening remain focused follow-ups.
 
-### Mission split — Battle of Yavin first, Battle of Endor deferred
+### Mission direction — Yavin vertical slice, Endor and Hoth later
 
 The current playable mission is explicitly the Battle of Yavin assault on the
 first, completed Death Star. Do not introduce an interior reactor-shaft route
@@ -1309,10 +1395,20 @@ into this mission. The hangar remains an optional flyable location and a useful
 validation of portals/interiors, but its rear wall is closed and it is not a
 path to the station's reactor.
 
+The longer-term selectable missions are:
+
+- Episode IV — Battle of Yavin;
+- Episode V — Battle of Hoth; and
+- Episode VI — Battle of Endor.
+
+Only Yavin is active development. A title/mission-selection screen may show
+Hoth and Endor as unavailable future missions, but it must not instantiate
+their environments, rules or speculative shared abstractions.
+
 The Battle of Yavin mission loop is:
 
-1. arrive from hyperspace in orbital space and survive/engage the defending
-   fighter swarm;
+1. arrive from hyperspace in orbital space and **break through Imperial
+   defences** while physically advancing toward the Death Star;
 2. approach the Death Star and transition into near-surface flight;
 3. cross the surface, attack or evade installations, locate the finite trench,
    and enter it through ordinary continuous flight;
@@ -1320,37 +1416,69 @@ The Battle of Yavin mission loop is:
    walls and authored obstacles;
 5. reach the terminal exhaust port and deliver a proton torpedo into it under
    explicit range, alignment and approach constraints;
-6. escape the trench during a short authoritative countdown;
-7. show the Death Star destruction/outcome cut scene, award success, and enter
+6. survive the reactor-chain-reaction warning, escape the trench and surface,
+   use the existing surface-to-exterior transition, and reach safe distance;
+7. show the Death Star destruction/outcome presentation, award success, and enter
    a clear completed mission state. Destruction, timeout or a missed attack run
    enters a clear failed/retry state without silently resetting mission state.
+
+The orbital phase is not an isolated arena and must not be expressed as a
+visible `DESTROY N TIE FIGHTERS` gate. The intended objective is approximately:
+
+```text
+BREAK THROUGH IMPERIAL DEFENCES
+```
+
+The player continues to make spatial progress toward the Death Star while
+fighting its fighter screen. Mission progression should use an appropriate
+combination of spatial/progress evidence and minimum engagement or survival
+evidence. The exact rule should be selected from implementation and playtest
+evidence; it must not make the Death Star feel artificially unavailable until a
+kill counter reaches an arbitrary number.
+
+After a valid exhaust-port hit, the authoritative and presentation sequence is:
+
+```text
+EXHAUST PORT HIT
+    -> REACTOR CHAIN REACTION / ESCAPE WARNING
+    -> PLAYER ESCAPES TRENCH
+    -> SURFACE ESCAPE
+    -> EXISTING SURFACE-TO-EXTERIOR TRANSITION
+    -> REACH SAFE DISTANCE
+    -> DEATH STAR DESTRUCTION PRESENTATION
+    -> MISSION RESULT / SCORE
+```
+
+The exhaust-port hit begins the escape; it does not complete the mission. The
+player must survive until the declared safe-distance condition is met. Player
+destruction or expiry of the authoritative escape deadline produces a clear
+failure.
 
 Existing foundations already cover orbital combat, approach presentation,
 surface flight, a finite trench and terminal exhaust-port feature, surface
 installations, collisions, pursuit across the orbital/surface boundary, and
-the general cut-scene/camera primitives. The next Yavin slice must supply the
-missing mission mechanics rather than more renderer architecture:
+the focused camera/presentation primitives. The authoritative mission phases,
+proton-torpedo weapon and exhaust-port validation are also implemented. The
+remaining Yavin work must integrate those foundations rather than add more
+renderer architecture:
 
-- a small authoritative mission/objective state machine independent of camera
-  and draw timing;
-- a proton-torpedo weapon distinct from laser bolts, with catalog definition,
-  finite ammunition, player command/cooldown, faction style and deterministic
-  projectile state;
-- an exhaust-port target contract that accepts only a valid torpedo attack and
-  reports why invalid laser, angle, range or direction attempts fail;
-- trench-run checkpoints and an attack-run reset/retry policy that preserves
-  identity, score and multiplayer ownership;
-- an escape countdown and a deterministic station-destruction event consumed
-  by presentation/cut-scene code;
+- an orbital fighting-approach rule based on spatial progress plus appropriate
+  engagement/survival evidence, not a visible kill quota;
+- ordered directional trench-run checkpoints and a clear attack retry/failure
+  policy that preserves mission identity and score;
+- an escape countdown, safe-distance rule and deterministic station-destruction
+  outcome consumed by presentation code;
+- an authoritative score breakdown and source attribution for score-bearing
+  destruction events;
 - HUD cues for current objective, torpedo count, target lock/readiness,
   countdown and success/failure, while keeping targeting state authoritative;
 - tests for objective ordering, invalid shortcuts, torpedo/exhaust-port impact,
-  multiplayer ownership/team rules, escape success, timeout/failure and replay.
+  ownership/team rules, escape success, timeout/failure and deterministic
+  replay of mission decisions. These tests should preserve future multiplayer
+  compatibility without requiring multiplayer implementation now.
 
-Implement this in the cheapest gameplay-first order: mission state and tests;
-torpedo catalog/command; exhaust-port validation; trench checkpoints and HUD;
-escape/destruction outcome; then cinematic polish and balance. Do not require a
-new rendering abstraction for any of these steps.
+Continue in the cheapest gameplay-first order defined by the six approved
+milestones below. Do not require a new rendering abstraction for these rules.
 
 Status: the first two authoritative Yavin slices are implemented in
 the renderer-independent simulation world and snapshots. It enforces the legal
@@ -1385,6 +1513,142 @@ timed escape. It should reuse the generic host-bound frame, room, portal,
 collision, prepared-frame and projectile-transfer contracts, but have its own
 mission profile, environment registrations, objectives and set pieces. Nothing
 specific to Death Star II should be registered or active in the Yavin mission.
+
+Endor is expected eventually to add an unfinished Death Star II orbital vector
+presentation, superstructure entry, linked interior flight spaces, a reactor
+assault, interior escape, surface breakout and exterior escape. Its
+surface-to-interior transitions should build on the existing
+`exterior -> transition -> local environment` pattern. Do not build the
+superstructure graph or a generic interior-domain framework during Yavin.
+
+Hoth is expected to require genuinely different capabilities: planetary or
+natural terrain flight, T-47 snowspeeders, Rebel defensive positions, AT-ST and
+AT-AT ground units, articulated/hierarchical models, and tow-cable attacks.
+Hoth must not be forced into the Death Star large-object abstraction merely
+because both missions contain low-altitude flight. Define its reusable terrain
+architecture only when Hoth supplies concrete requirements.
+
+### Approved Yavin-first implementation roadmap
+
+#### Milestone 1 — Game shell and clean session lifecycle
+
+Add an explicit application-flow state outside `sim.MissionPhase`, covering
+title/mission selection, briefing, playing, outcome presentation and result.
+Keep pause and development diagnostics orthogonal to that flow. Replace the
+current partial reset behavior with a complete Yavin-session construction/reset
+path so retry and return-to-title cannot retain projectiles, feature damage,
+controllers, respawns, transitions, timers, score or mission feedback from the
+previous run.
+
+Use a deliberately small mission-selection descriptor list. Show Yavin as
+playable and Hoth/Endor as future missions. Expose the existing curated
+difficulty profiles without creating a mission scripting or plugin framework.
+Compose the existing hyperspace arrival into Yavin's launch presentation.
+
+Acceptance follows this application path, plus deterministic clean retry and
+return-to-title state:
+
+```text
+title -> select Yavin/difficulty -> briefing -> hyperspace launch -> playing
+```
+
+#### Milestone 2 — Give the mission arcade structure
+
+Turn the implemented mechanics into a directed assault rather than a sandbox.
+The orbital objective is `BREAK THROUGH IMPERIAL DEFENCES`: combat and spatial
+approach happen together. Investigate a small deterministic combination of
+progress toward the station, time under engagement, hostile pressure, and/or
+combat participation. Do not expose a simple kill quota and do not hold the
+Death Star behind an unrelated arena-wave gate.
+
+Add ordered, directional trench checkpoints derived from the authored physical
+trench so reverse entry or appearing near the terminal tile cannot skip the
+attack run. Drive existing orbital fighters, surface reinforcements, cannons and
+trench pursuers from mission phase to produce a clear escalation. Reuse current
+controllers and encounter state; do not first build a generic behavior library.
+
+Acceptance: normal play reliably flows through fighting approach, surface
+assault, trench discovery, legal trench entry and the terminal attack run while
+leaving the player in physical control.
+
+#### Milestone 3 — Complete the authoritative attack and escape rules
+
+Retain the implemented proton-torpedo and exhaust-port validation. Add a
+pre-launch readiness result derived from the same authoritative range,
+alignment, arming and approach rules so the cockpit can guide rather than only
+explain a rejected impact.
+
+A valid hit records the reactor-chain-reaction state and escape deadline. The
+objective then guides the player out of the trench, across/away from the
+surface, through the existing altitude-based exterior transfer and toward a
+safe-distance condition. Success is impossible at the instant of impact.
+Destruction, timeout, or exhausting the permitted attack without success enters
+an explicit failure state rather than silently resetting.
+
+For the first vertical slice, retry may reconstruct a clean mission from the
+result screen. A general save/checkpoint framework and speculative multiplayer
+ownership migration are not prerequisites.
+
+Acceptance: valid attack, safe escape, timeout, destruction and missed-attack
+paths all reach deterministic authoritative outcomes.
+
+#### Milestone 4 — Score and result loop
+
+Add an authoritative mission score and stable breakdown for fighter kills,
+appropriate surface installations, bounded time/accuracy/survival bonuses and
+mission completion. Add source identity to damage/destruction events where it
+is currently missing. Completion of the Death Star objective must dominate the
+scoring model: cap farmable combat points or make the completion award greater
+than the maximum possible combat subtotal.
+
+Add a result screen showing outcome, score breakdown and controls for clean
+mission retry or return to title. Player destruction in an active mission goes
+to this flow instead of the old indefinite sandbox respawn behavior.
+
+Acceptance: farming respawning enemies cannot outscore completing Yavin, and
+success/failure both complete the application loop.
+
+#### Milestone 5 — Outcome presentation and audio
+
+Compose the existing fixed/chase/cockpit cameras, catalog geometry, vector
+effects and mission events into focused Yavin launch, warning and outcome
+presentations. Use a bounded vector Death Star destruction effect; do not feed
+the station into fighter-fragmentation logic and do not require a general
+registered cut-scene timeline.
+
+Add a small event-driven sound layer for UI selection, lasers, proton
+torpedoes, impacts, warnings and the final explosion. Use original/generated or
+appropriately licensed assets and keep audio outside authoritative simulation.
+
+Acceptance: mission success and failure read as deliberate endings rather than
+debug state changes, while skip behavior reaches the same final state.
+
+#### Milestone 6 — Balance, performance, documentation and release gate
+
+Tune mission duration, spatial approach pressure, fighter waves, surface and
+trench speed, cannon density, escape deadline, score balance and all four
+difficulty profiles. Add representative full-Yavin orbital, surface, trench
+and outcome workloads to the existing performance instrumentation. Complete
+only renderer work demonstrated to block correctness or frame budget; do not
+make unrelated migration cleanup a release prerequisite.
+
+Update README, controls and mission documentation. Validate every realism
+profile, the full automated suite under Xvfb, vet/static checks, Windows 11
+build/deployment, and interactive end-to-end runs.
+
+Acceptance: one complete, repeatable and enjoyable Battle of Yavin mission is
+the project's new playable baseline.
+
+### Work deliberately placed after Yavin
+
+- Full registered/data-driven cut-scene orchestration.
+- Authoritative server, first-class participant migration, multiplayer client,
+  prediction/reconciliation and network persistence.
+- External/MCP agent adapters and controller tournaments.
+- Public extension API stabilization and strategy hot-loading.
+- Complete retained-overlay migration or renderer cleanup not justified by a
+  Yavin correctness/performance issue.
+- Battle of Endor and Battle of Hoth content and their new capabilities.
 
 ## Approved renderer migration — model-switch handoff (2026-09-05)
 
