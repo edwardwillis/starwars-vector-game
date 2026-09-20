@@ -9,6 +9,9 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
+	"github.com/edwardwillis/starwars-vector-game/internal/collision"
+	"github.com/edwardwillis/starwars-vector-game/internal/combat"
+	"github.com/edwardwillis/starwars-vector-game/internal/control"
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
@@ -127,6 +130,15 @@ func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
 	}
 }
 
+func deathStarSurfaceRuntime(g *Game) *localEnvironment {
+	for index := range g.environments {
+		if g.environments[index].bound.Definition.Frame == environment.DeathStarTrenchFrame {
+			return &g.environments[index]
+		}
+	}
+	return nil
+}
+
 func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	g := New()
 	if len(g.environments) == 0 {
@@ -139,19 +151,422 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	if fighter == nil {
 		t.Fatal("surface start removed the player fighter")
 	}
-	if normalizedObjectFrame(*fighter) != g.environments[0].bound.FrameID {
-		t.Fatalf("surface start frame=%q, want %q", fighter.Frame, g.environments[0].bound.FrameID)
+	runtime := deathStarSurfaceRuntime(g)
+	if runtime == nil {
+		t.Fatal("game has no Death Star surface environment")
 	}
-	entry := g.environments[0].bound.Definition.Transitions[0].EntryPose
+	if normalizedObjectFrame(*fighter) != runtime.bound.FrameID {
+		t.Fatalf("surface start frame=%q, want %q", fighter.Frame, runtime.bound.FrameID)
+	}
+	if fighter.Motion.Speed != g.profile.Surface.CruiseSpeed {
+		t.Fatalf("surface entry speed=%v, want cruise %v", fighter.Motion.Speed, g.profile.Surface.CruiseSpeed)
+	}
+	if attackers := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team); attackers != g.profile.Surface.InitialAttackers {
+		t.Fatalf("surface start attackers=%d, want %d", attackers, g.profile.Surface.InitialAttackers)
+	}
+	nextWave := runtime.encounter.nextWaveAt
+	g.beginSurfaceEncounter(runtime.bound.FrameID, fighterID)
+	if attackers := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team); attackers != g.profile.Surface.InitialAttackers || runtime.encounter.nextWaveAt != nextWave {
+		t.Fatalf("repeated participant entry restarted encounter: attackers=%d next-wave=%v", attackers, runtime.encounter.nextWaveAt)
+	}
+	entry := runtime.bound.Definition.Transitions[0].EntryPose
 	if fighter.Pose != entry {
 		t.Fatalf("surface start pose=%+v, want %+v", fighter.Pose, entry)
 	}
-	if g.viewCamera.Mode != camera.Cockpit || len(g.environments[0].tiles) == 0 {
-		t.Fatalf("surface start view=%v tiles=%d, want cockpit with streamed tiles", g.viewCamera.Mode, len(g.environments[0].tiles))
+	if g.viewCamera.Mode != camera.Cockpit || len(runtime.tiles) == 0 {
+		t.Fatalf("surface start view=%v tiles=%d, want cockpit with streamed tiles", g.viewCamera.Mode, len(runtime.tiles))
+	}
+	if len(runtime.horizonTiles) <= len(runtime.tiles) {
+		t.Fatalf("surface visual horizon=%d tiles, want more than %d physical tiles", len(runtime.horizonTiles), len(runtime.tiles))
+	}
+	for coordinate, tile := range runtime.horizonTiles {
+		if _, physical := runtime.tiles[coordinate]; physical {
+			t.Fatalf("visual horizon overlaps physical tile %v", coordinate)
+		}
+		if len(tile.Features) != 0 || len(tile.Planes) != 0 || len(tile.Boxes) != 0 {
+			t.Fatalf("visual horizon tile %v retained physical content", coordinate)
+		}
 	}
 	g.realismLevel = 0
-	if len(g.prepareGameplayFrame().domains) == 0 {
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.domains) == 0 {
 		t.Fatal("opaque surface features did not request a depth pass at low realism")
+	}
+	opaque := 0
+	horizonDepthTests := 0
+	for _, candidate := range prepared.candidates {
+		if candidate.mesh.SkipDepth && candidate.mesh.DepthTestOnly {
+			horizonDepthTests++
+			if candidate.writesDepth || !candidate.testsDepth || !candidate.domain.active() {
+				t.Fatalf("horizon candidate depth flags: writes=%t tests=%t domain=%v", candidate.writesDepth, candidate.testsDepth, candidate.domain)
+			}
+		}
+		if !candidate.surface.Opaque() {
+			continue
+		}
+		opaque++
+		if candidate.pointOccluder {
+			t.Fatal("filled Death Star surface retained redundant sparse-star geometry occlusion")
+		}
+		if candidate.geometry == nil || len(candidate.geometry.Triangles) == 0 {
+			t.Fatal("filled Death Star surface did not reuse prepared triangles")
+		}
+	}
+	if opaque == 0 {
+		t.Fatal("surface view prepared no opaque deck or trench candidates")
+	}
+	if horizonDepthTests == 0 {
+		t.Fatal("surface view prepared no depth-test-only visual horizon")
+	}
+}
+
+func TestControllerTargetSelectionUsesStableHostileTeamAndFrame(t *testing.T) {
+	g := New()
+	self := g.objectByID(2)
+	player := g.objectByID(fighterID)
+	if self == nil || player == nil {
+		t.Fatal("missing initial combatants")
+	}
+	self.Pose.Position = math3d.Vec3{}
+	player.Pose.Position = math3d.Vec3{Z: 20}
+	ally, err := g.catalogRegistry.Create(catalog.XWingName, g.nextObjectID, kinematics.Pose{Position: math3d.Vec3{Z: 8}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ally.Team = g.profile.Player.Team
+	g.nextObjectID++
+	g.objects = append(g.objects, ally)
+	self = g.objectByID(2)
+	selected := g.selectControllerTarget(*self)
+	if selected.ID != ally.ID {
+		t.Fatalf("selected target=%d, want nearer allied player %d", selected.ID, ally.ID)
+	}
+	g.controllerTargets[self.ID] = selected.ID
+	g.objectByID(fighterID).Pose.Position = math3d.Vec3{Z: 1}
+	if stable := g.selectControllerTarget(*self); stable.ID != ally.ID {
+		t.Fatalf("valid target changed from %d to %d", ally.ID, stable.ID)
+	}
+	g.objectByID(ally.ID).Frame = scene.FrameID("elsewhere")
+	if replacement := g.selectControllerTarget(*self); replacement.ID != player.ID {
+		t.Fatalf("invalid cross-frame target was retained: got %d want %d", replacement.ID, player.ID)
+	}
+}
+
+func TestSurfaceCannonsFireAtHostileParticipants(t *testing.T) {
+	g := New()
+	g.profile.Surface.CannonTraverseSpeed = 1000 // isolate firing from slew time
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	runtime := deathStarSurfaceRuntime(g)
+	// First update discovers nearby cannons and establishes deterministic
+	// cooldowns; forcing those deadlines to zero isolates the firing behavior.
+	g.updateSurfaceCannons(runtime)
+	for id := range runtime.encounter.cannonReadyAt {
+		runtime.encounter.cannonReadyAt[id] = 0
+	}
+	before := len(g.projectiles)
+	g.updateSurfaceCannons(runtime)
+	if len(g.projectiles) <= before {
+		t.Fatalf("ready surface cannons fired no projectiles: ready=%v aim=%v", runtime.encounter.cannonReadyAt, runtime.encounter.cannonAim)
+	}
+	for id := range g.projectiles {
+		projectile := g.objectByID(id)
+		if projectile != nil && projectile.Team != scene.TeamEmpire {
+			t.Fatalf("surface cannon projectile team=%q", projectile.Team)
+		}
+	}
+	for _, tile := range runtime.tiles {
+		for _, feature := range tile.Features {
+			if feature.Kind == "cannon" {
+				runtime.featureStates[feature.ID] = featureDamageState{Hits: 2, Disabled: true}
+			}
+		}
+	}
+	before = len(g.projectiles)
+	g.updateSurfaceCannons(runtime)
+	if len(g.projectiles) != before {
+		t.Fatal("disabled surface cannon fired again")
+	}
+}
+
+func TestStaticCannonOnlyFiresThroughItsVisibleBarrels(t *testing.T) {
+	feature := environment.Feature{Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}, Muzzles: []math3d.Vec3{{Z: 1}}}
+	front := scene.Object{ID: 2, Team: scene.TeamAlliance, Targetable: true, Frame: scene.ExteriorFrame, Pose: kinematics.Pose{Position: math3d.Vec3{Z: 10}}}
+	behind := scene.Object{ID: 1, Team: scene.TeamAlliance, Targetable: true, Frame: scene.ExteriorFrame, Pose: kinematics.Pose{Position: math3d.Vec3{Z: -2}}}
+	if !cannonTargetInArc(feature, front) || cannonTargetInArc(feature, behind) {
+		t.Fatal("static installation fired into its own body or rejected its forward arc")
+	}
+	g := New()
+	g.objects = []scene.Object{behind, front}
+	if got := g.nearestHostileForCannon(scene.ExteriorFrame, scene.TeamEmpire, feature); got.ID != front.ID {
+		t.Fatalf("selected target %d behind cannon, want visible target %d", got.ID, front.ID)
+	}
+}
+
+func TestSurfaceCannonSlewsBeforeFiringAndBoltFollowsBarrel(t *testing.T) {
+	g := New()
+	g.profile.Surface.CannonAimError = 0
+	g.profile.Surface.CannonTraverseSpeed = 1
+	frame := scene.FrameID("test/surface-cannon")
+	feature := environment.Feature{
+		ID: "test-cannon", Kind: "cannon", Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()},
+		Scale: math3d.Vec3{X: 1, Y: 1, Z: 1}, TurretPart: 1, BarrelPart: 2,
+		TurretPivot: math3d.Vec3{Y: -0.27}, BarrelPivot: math3d.Vec3{Y: 0.2, Z: 0.29},
+		Muzzles: []math3d.Vec3{{X: -0.19, Y: 0.2, Z: 0.91}, {X: 0.19, Y: 0.2, Z: 0.91}},
+	}
+	target := scene.Object{ID: 101, Team: scene.TeamAlliance, Targetable: true, Frame: frame,
+		Pose: kinematics.Pose{Position: math3d.Vec3{X: 20, Y: 3, Z: 40}, Orientation: math3d.IdentityQuaternion()}}
+	g.objects = []scene.Object{target}
+	runtime := &localEnvironment{
+		bound:         environment.Bound{FrameID: frame},
+		tiles:         map[environment.TileCoordinate]environment.Tile{{}: {Features: []environment.Feature{feature}}},
+		featureStates: make(map[string]featureDamageState),
+		encounter:     surfaceEncounterState{cannonReadyAt: map[string]float64{feature.ID: 0}, cannonAim: make(map[string]cannonAimState)},
+	}
+	g.updateSurfaceCannons(runtime)
+	if len(g.projectiles) != 0 {
+		t.Fatal("cannon fired before the turret could traverse")
+	}
+	step := g.profile.Surface.CannonTraverseSpeed * g.profile.Simulation.TickSeconds
+	if got := runtime.encounter.cannonAim[feature.ID].yaw; got <= 0 || got > step+1e-9 {
+		t.Fatalf("first yaw step = %v, want (0, %v]", got, step)
+	}
+	for tick := 0; tick < 200 && len(g.projectiles) == 0; tick++ {
+		g.updateSurfaceCannons(runtime)
+	}
+	if len(g.projectiles) != 1 {
+		t.Fatalf("aligned turret produced %d bolts, want 1", len(g.projectiles))
+	}
+	var bolt scene.Object
+	for id := range g.projectiles {
+		bolt = *g.objectByID(id)
+	}
+	// The firing update increments shots after creating the bolt, so the
+	// projectile came from barrel zero and must follow that barrel's axis.
+	aim := runtime.encounter.cannonAim[feature.ID]
+	aim.shots--
+	if distance := bolt.Pose.Position.Sub(cannonMuzzle(feature, aim, 0)).Length(); distance > 1e-6 {
+		t.Fatalf("bolt did not originate at articulated muzzle: distance=%v", distance)
+	}
+	if dot := bolt.Pose.Forward().Dot(cannonDirection(feature, aim)); dot < 0.999 {
+		t.Fatalf("bolt direction differs from barrel axis: dot=%v", dot)
+	}
+	// Regenerating a visual tile must not reset the authoritative aim.
+	before := runtime.encounter.cannonAim[feature.ID]
+	runtime.tiles[environment.TileCoordinate{}] = environment.Tile{Features: []environment.Feature{feature}}
+	if after := runtime.encounter.cannonAim[feature.ID]; after != before {
+		t.Fatalf("tile regeneration reset cannon aim: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestSurfaceCannonDoesNotFireThroughAnotherInstallation(t *testing.T) {
+	g := New()
+	frame := scene.FrameID("test/cannon-obstruction")
+	feature := environment.Feature{ID: "cannon", Kind: "cannon", Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()},
+		Scale: math3d.Vec3{X: 1, Y: 1, Z: 1}, BarrelPart: 2,
+		Muzzles: []math3d.Vec3{{Z: 0.9}}}
+	target := scene.Object{ID: 201, Team: scene.TeamAlliance, Targetable: true, Frame: frame,
+		Pose: kinematics.Pose{Position: math3d.Vec3{Z: 20}, Orientation: math3d.IdentityQuaternion()}}
+	runtime := &localEnvironment{tiles: map[environment.TileCoordinate]environment.Tile{{}: {
+		Boxes: []collision.OrientedBox{{Center: math3d.Vec3{Z: 10}, HalfExtents: math3d.Vec3{X: 2, Y: 2, Z: 1}, Orientation: math3d.IdentityQuaternion(), FeatureID: "other"}},
+	}}}
+	if g.cannonLineOfFireClear(runtime, feature, cannonAimState{}, target) {
+		t.Fatal("installation did not obstruct cannon line of fire")
+	}
+}
+
+func TestInstallationDamagePersistsAndEmitsBoundedFracture(t *testing.T) {
+	frame := scene.FrameID("test/surface")
+	g := &Game{nextObjectID: 100, surfaceEffects: make(map[scene.ObjectID]surfaceEffect), world: &sim.World{Tick: 7}}
+	runtime := &localEnvironment{bound: environment.Bound{HostID: 50}, featureStates: make(map[string]featureDamageState)}
+	feature := environment.Feature{ID: "test/cannon", Kind: "cannon", Hittable: true, HitPoints: 3, DisableAfter: 2}
+	projectile := scene.Object{ID: 1, Frame: frame, Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}, Motion: kinematics.Motion{Speed: 80}}
+	hit := collision.Hit{Point: math3d.Vec3{Y: 2}, Normal: math3d.Vec3{Y: 1}}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if got := runtime.featureStates[feature.ID]; got.Hits != 1 || got.Disabled || got.Destroyed {
+		t.Fatalf("first hit state=%+v", got)
+	}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if got := runtime.featureStates[feature.ID]; got.Hits != 2 || !got.Disabled || got.Destroyed {
+		t.Fatalf("disabled cannon state=%+v", got)
+	}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if got := runtime.featureStates[feature.ID]; got.Hits != 3 || !got.Destroyed {
+		t.Fatalf("destroyed cannon state=%+v", got)
+	}
+	if len(g.surfaceEffects) != 6 || len(g.objects) != 6 || len(g.world.FeatureEvents) != 3 {
+		t.Fatalf("damage objects=%d effects=%d events=%d, want three sparks and three fragments", len(g.objects), len(g.surfaceEffects), len(g.world.FeatureEvents))
+	}
+	if event := g.world.FeatureEvents[2]; event.Tick != 7 || event.HostID != 50 || event.Frame != frame || event.FeatureID != feature.ID || !event.Disabled || !event.Destroyed {
+		t.Fatalf("final authoritative hit event=%+v", event)
+	}
+	fragments := 0
+	for _, fragment := range g.objects {
+		if fragment.Definition != "builtin/installation-fragment" {
+			continue
+		}
+		fragments++
+		if fragment.Frame != frame || fragment.Motion.Velocity.Length() == 0 || fragment.Pose.Position.Y <= hit.Point.Y {
+			t.Fatalf("fragment did not inherit local impact trajectory: %+v", fragment)
+		}
+	}
+	if fragments != 3 {
+		t.Fatalf("moving fragments=%d, want 3", fragments)
+	}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if runtime.featureStates[feature.ID].Hits != 3 || len(g.objects) != 6 || len(g.world.FeatureEvents) != 3 {
+		t.Fatal("already-destroyed installation accepted another hit")
+	}
+}
+
+func TestDestroyedInstallationUsesWreckAfterTileRegeneration(t *testing.T) {
+	g := newDepthRequirementTestGame()
+	part := scene.Part{Name: "intact", Mesh: model.Cube(1), Color: color.RGBA{G: 255, A: 255}, LineWidth: 1}
+	wreck := scene.Part{Name: "wreck", Mesh: model.Cube(0.25), Color: color.RGBA{R: 255, A: 255}, LineWidth: 1}
+	newTile := func() environment.Tile {
+		return environment.PrepareTile(environment.Tile{Features: []environment.Feature{{
+			ID: "tile/tower", Kind: "tower", Pose: kinematics.Pose{Position: math3d.Vec3{Z: -5}, Orientation: math3d.IdentityQuaternion()},
+			Parts: []scene.Part{part}, WreckParts: []scene.Part{wreck}, Detail: scene.DetailPrimary,
+		}}})
+	}
+	runtime := &localEnvironment{bound: environment.Bound{HostID: 50},
+		featureStates: map[string]featureDamageState{"tile/tower": {Hits: 2, Destroyed: true}}}
+	for attempt := 0; attempt < 2; attempt++ {
+		prepared := g.resetPreparedFrame(scene.ExteriorFrame)
+		g.appendEnvironmentTileCandidates(prepared, runtime, newTile(), math3d.Identity())
+		if len(prepared.candidates) != 1 || prepared.candidates[0].mesh.Topology != wreck.Mesh.Topology {
+			t.Fatalf("regeneration %d did not retain wreck presentation: %+v", attempt, prepared.candidates)
+		}
+	}
+}
+
+func TestDestroyedInstallationNoLongerCollides(t *testing.T) {
+	frame := scene.FrameID("test/surface")
+	projectile := scene.Object{ID: 1, Frame: frame, CollisionRole: scene.CollisionProjectile, CollisionRadius: 0.1,
+		Pose: kinematics.Pose{Position: math3d.Vec3{Z: -3}, Orientation: math3d.IdentityQuaternion()}}
+	g := &Game{objects: []scene.Object{projectile}, environmentContacts: make(map[scene.ObjectID]float64),
+		environments: []localEnvironment{{bound: environment.Bound{FrameID: frame},
+			tiles: map[environment.TileCoordinate]environment.Tile{{}: {Boxes: []collision.OrientedBox{{
+				Center: math3d.Vec3{Z: -5}, HalfExtents: math3d.Vec3{X: 1, Y: 1, Z: 1}, FeatureID: "tile/tower",
+			}}}}, featureStates: map[string]featureDamageState{"tile/tower": {Destroyed: true}}}}}
+	g.resolveEnvironmentCollisions(map[scene.ObjectID]math3d.Vec3{projectile.ID: {Z: -7}})
+	if len(g.objects) != 1 {
+		t.Fatal("destroyed installation retained its intact collider")
+	}
+}
+
+func TestSurfaceGuidanceClimbsBeforeUnsafeTerrain(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	runtime := deathStarSurfaceRuntime(g)
+	fighter := *g.objectByID(2)
+	fighter.Frame = runtime.bound.FrameID
+	fighter.Pose.Position = math3d.Vec3{X: 58, Y: 2, Z: -70}
+	fighter.Pose.Orientation = math3d.IdentityQuaternion()
+	guided := g.applySurfaceGuidance(runtime, fighter, control.Intent{})
+	if guided.Pitch >= 0 {
+		t.Fatalf("low surface fighter pitch intent=%v, want climb command", guided.Pitch)
+	}
+}
+
+func TestSurfaceGuidanceSweepsAheadForInstallations(t *testing.T) {
+	g := New()
+	runtime := &localEnvironment{
+		bound: environment.Bound{Definition: environment.Definition{LevelUp: math3d.Vec3{Y: 1}}},
+		tiles: map[environment.TileCoordinate]environment.Tile{
+			{}: {Boxes: []collision.OrientedBox{{
+				Center: math3d.Vec3{Y: 3, Z: 22}, HalfExtents: math3d.Vec3{X: 3, Y: 3, Z: 3}, FeatureID: "tower-a",
+			}}},
+		},
+		featureStates: make(map[string]featureDamageState),
+	}
+	fighter := catalog.TIEFighter(91, kinematics.Pose{Position: math3d.Vec3{Y: 5.5}})
+	fighter.Motion.Speed = g.profile.Surface.CruiseSpeed
+
+	avoidance, found := g.surfaceObstacleAvoidance(runtime, fighter)
+	if !found {
+		t.Fatal("forward swept volume did not detect tower")
+	}
+	if math.Abs(avoidance.Yaw) != 1 || avoidance.Pitch >= 0 {
+		t.Fatalf("tower avoidance=%+v, want committed turn and climb", avoidance)
+	}
+	if again, _ := g.surfaceObstacleAvoidance(runtime, fighter); again != avoidance {
+		t.Fatalf("centered obstacle chose unstable sides: first=%+v second=%+v", avoidance, again)
+	}
+}
+
+func TestSurfaceGuidanceSweepsAheadForDeck(t *testing.T) {
+	g := New()
+	runtime := &localEnvironment{
+		bound: environment.Bound{Definition: environment.Definition{LevelUp: math3d.Vec3{Y: 1}}},
+		tiles: map[environment.TileCoordinate]environment.Tile{
+			{}: {Planes: []collision.FinitePlane{{
+				Center: math3d.Vec3{}, Normal: math3d.Vec3{Y: 1}, AxisU: math3d.Vec3{X: 1}, HalfU: 100, HalfV: 100, FeatureID: "deck",
+			}}},
+		},
+		featureStates: make(map[string]featureDamageState),
+	}
+	fighter := catalog.TIEFighter(92, kinematics.Pose{
+		Position: math3d.Vec3{Y: 8},
+		// Positive pitch directs the shared +Z forward axis toward the deck.
+		Orientation: math3d.QuaternionFromYawPitchRoll(0, math.Pi/6, 0),
+	})
+	fighter.Motion.Speed = g.profile.Surface.CruiseSpeed
+
+	avoidance, found := g.surfaceObstacleAvoidance(runtime, fighter)
+	if !found || avoidance.Pitch != -1 {
+		t.Fatalf("deck avoidance=%+v found=%t, want full climb", avoidance, found)
+	}
+}
+
+func TestSurfaceImpactEffectsAreCappedAndExpire(t *testing.T) {
+	g := New()
+	for range 30 {
+		g.spawnSurfaceImpact(scene.ExteriorFrame, math3d.Vec3{}, math3d.Vec3{Y: 1})
+	}
+	if len(g.surfaceEffects) != 24 {
+		t.Fatalf("surface effects=%d, want cap 24", len(g.surfaceEffects))
+	}
+	g.updateSurfaceEffects(0.2)
+	if len(g.surfaceEffects) != 0 {
+		t.Fatalf("expired surface effects retained: %d", len(g.surfaceEffects))
+	}
+}
+
+func TestSurfaceAutoLevelCorrectsOnlyUncommandedLocalFlight(t *testing.T) {
+	g := New()
+	if !g.surfaceAutoLevel {
+		t.Fatal("surface auto-level is not enabled by default")
+	}
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	fighter := g.objectByID(fighterID)
+	fighter.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(0.3, -0.1, 0.45)
+	motion := g.applySurfaceAutoLevel(*fighter, control.Intent{}, kinematics.Motion{})
+	if motion.RollRate >= 0 {
+		t.Fatalf("positive surface bank received roll rate %v, want negative correction", motion.RollRate)
+	}
+
+	commanded := kinematics.Motion{RollRate: 0.7}
+	if got := g.applySurfaceAutoLevel(*fighter, control.Intent{Yaw: 1}, commanded); got.RollRate != commanded.RollRate {
+		t.Fatalf("auto-level fought turn command: got %v want %v", got.RollRate, commanded.RollRate)
+	}
+	if got := g.applySurfaceAutoLevel(*fighter, control.Intent{Roll: -1}, commanded); got.RollRate != commanded.RollRate {
+		t.Fatalf("auto-level fought roll command: got %v want %v", got.RollRate, commanded.RollRate)
+	}
+
+	fighter.Frame = scene.ExteriorFrame
+	if got := g.applySurfaceAutoLevel(*fighter, control.Intent{}, commanded); got.RollRate != commanded.RollRate {
+		t.Fatalf("auto-level affected exterior flight: got %v want %v", got.RollRate, commanded.RollRate)
+	}
+	g.surfaceAutoLevel = false
+	fighter.Frame = deathStarSurfaceRuntime(g).bound.FrameID
+	if got := g.applySurfaceAutoLevel(*fighter, control.Intent{}, commanded); got.RollRate != commanded.RollRate {
+		t.Fatalf("disabled auto-level changed roll: got %v want %v", got.RollRate, commanded.RollRate)
 	}
 }
 
@@ -225,9 +640,91 @@ func TestRegisteredRoomGeometryUsesPreparedCandidatePipeline(t *testing.T) {
 	stats := render.Stats{}
 	g.pipeline.Stats = &stats
 	screen := ebiten.NewImage(g.pipeline.Width, g.pipeline.Height)
-	g.drawPreparedOpaqueSurfaces(screen, prepared)
+	g.drawPreparedSurfaces(screen, prepared)
 	if stats.OpaqueSurfaceCandidates != 1 || stats.OpaqueTriangles == 0 || stats.OpaqueBatches != 1 {
 		t.Fatalf("opaque submission stats=%+v", stats)
+	}
+}
+
+func TestOpaqueSurfaceBatchSubmitsRegisteredTexture(t *testing.T) {
+	g := New()
+	if err := g.RegisterSurfaceTexture("test/red-panel", render.Texture{
+		Width: 1, Height: 1, Pixels: []byte{220, 20, 10, 255},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	geometry := &render.PreparedGeometry{
+		Faces: []model.Face{{}},
+		Triangles: []render.PreparedTriangle{{Face: 0,
+			A:   render.Point{X: 4, Y: 4, Depth: 5},
+			B:   render.Point{X: 60, Y: 4, Depth: 5},
+			C:   render.Point{X: 4, Y: 60, Depth: 5},
+			UVs: [3]model.UV{{}, {U: 1}, {V: 1}},
+		}},
+	}
+	prepared := &preparedFrame{candidates: []preparedCandidate{{
+		geometry: geometry,
+		surface: scene.SurfaceMaterial{Mode: scene.SurfaceTexturedOpaque,
+			Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}, TextureID: "test/red-panel"},
+	}}}
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+	screen := ebiten.NewImage(64, 64)
+	g.drawPreparedSurfaces(screen, prepared)
+	if g.textureImages["test/red-panel"] == nil || stats.OpaqueTriangles != 1 || stats.OpaqueBatches != 1 {
+		t.Fatalf("textured source was not submitted: images=%v stats=%+v", g.textureImages, stats)
+	}
+}
+
+func TestTranslucentSurfaceDoesNotWriteDepthOrOccludePoints(t *testing.T) {
+	part := scene.Part{Mesh: model.Cube(1), Surface: scene.SurfaceMaterial{
+		Mode: scene.SurfaceTranslucent, Color: color.RGBA{B: 255, A: 96},
+	}}
+	if depthWriteCandidate(part) || pointOcclusionCandidate(part) {
+		t.Fatal("translucent glass was treated as a solid depth or point occluder")
+	}
+	if !part.Surface.Filled() {
+		t.Fatal("translucent glass did not request prepared triangles")
+	}
+}
+
+func TestSurfacePassOrdersTranslucentAndOpaqueByDepth(t *testing.T) {
+	triangle := func(depth float64) *render.PreparedGeometry {
+		return &render.PreparedGeometry{Faces: []model.Face{{}}, Triangles: []render.PreparedTriangle{{
+			Face: 0,
+			A:    render.Point{X: 2, Y: 2, Depth: depth},
+			B:    render.Point{X: 30, Y: 2, Depth: depth},
+			C:    render.Point{X: 2, Y: 30, Depth: depth},
+		}}}
+	}
+	opaque := scene.SurfaceMaterial{Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 200, A: 255}}
+	glass := scene.SurfaceMaterial{Mode: scene.SurfaceTranslucent, Color: color.RGBA{B: 200, A: 128}}
+	for _, test := range []struct {
+		name           string
+		opaqueDepth    float64
+		glassDepth     float64
+		wantGlassOnTop bool
+	}{
+		{name: "near opaque hides far glass", opaqueDepth: 3, glassDepth: 5},
+		{name: "near glass blends over far opaque", opaqueDepth: 5, glassDepth: 3, wantGlassOnTop: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := &Game{}
+			stats := render.Stats{}
+			g.pipeline.Stats = &stats
+			prepared := &preparedFrame{candidates: []preparedCandidate{
+				{geometry: triangle(test.glassDepth), surface: glass},
+				{geometry: triangle(test.opaqueDepth), surface: opaque},
+			}}
+			screen := ebiten.NewImage(32, 32)
+			g.drawPreparedSurfaces(screen, prepared)
+			if len(g.surfaceTriangles) != 2 || g.surfaceTriangles[1].Translucent != test.wantGlassOnTop {
+				t.Fatalf("surface painter order=%+v, want glass on top=%t", g.surfaceTriangles, test.wantGlassOnTop)
+			}
+			if stats.OpaqueTriangles != 1 || stats.TranslucentTriangles != 1 || stats.OpaqueBatches != 1 || stats.TranslucentBatches != 1 {
+				t.Fatalf("surface counters=%+v", stats)
+			}
+		})
 	}
 }
 
@@ -436,7 +933,7 @@ func TestTransitionEnvironmentUsesPreparedFrame(t *testing.T) {
 				}
 			}},
 		},
-		destroyed: map[string]bool{"destroyed": true},
+		featureStates: map[string]featureDamageState{"destroyed": {Destroyed: true}},
 	}}
 
 	g.refreshTransitionEnvironmentTiles()
@@ -706,6 +1203,68 @@ func TestSwarmControllersContinueAvoidingWhenPlayerIsDestroyed(t *testing.T) {
 		}
 		if fighter.Motion == motion {
 			t.Fatalf("swarm controller %d stopped updating without a player target", id)
+		}
+	}
+}
+
+func TestDisintegrationFragmentsUseOwnPivotAndInheritFlightPath(t *testing.T) {
+	g := New()
+	player := *g.objectByID(fighterID)
+	player.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(0.35, -0.18, 0.12)
+	player.Motion = kinematics.Motion{Speed: 5.2, Velocity: math3d.Vec3{X: 0.3, Y: 0.1, Z: -0.2}}
+	inherited := player.Pose.Forward().Scale(player.Motion.Speed).Add(player.Motion.Velocity)
+
+	g.spawnDisintegration(player)
+	if len(g.debris) != 3 {
+		t.Fatalf("spawned %d fragments, want 3", len(g.debris))
+	}
+	offCentreSource := false
+	for id, transient := range g.debris {
+		fragment := g.objectByID(id)
+		if fragment == nil {
+			t.Fatalf("fragment %d is missing", id)
+		}
+		center, ok := objectGeometryBoundsCenter(*fragment)
+		if !ok || center.Length() > 1e-9 {
+			t.Fatalf("fragment %d rotates around local centre %+v", id, center)
+		}
+		alignment := fragment.Motion.Velocity.Normalize().Dot(inherited.Normalize())
+		if alignment < 0.98 {
+			t.Fatalf("fragment %d velocity=%+v alignment=%v, want inherited trajectory", id, fragment.Motion.Velocity, alignment)
+		}
+		offCentreSource = offCentreSource || transient.sourceOrigin != (math3d.Vec3{})
+	}
+	if !offCentreSource {
+		t.Fatal("all component fragments lost their catalog source origins")
+	}
+}
+
+func TestRecenteringFragmentPreservesWorldGeometry(t *testing.T) {
+	object := scene.Object{
+		Pose: kinematics.Pose{
+			Position:    math3d.Vec3{X: 11, Y: -3, Z: 7},
+			Orientation: math3d.QuaternionFromYawPitchRoll(0.4, -0.2, 0.3),
+		},
+		Parts: []scene.Part{{Mesh: model.Transform(model.Cube(2), math3d.Translation(4, -2, 3))}},
+	}
+	before := make([]math3d.Vec3, len(object.Parts[0].Mesh.Verts))
+	world := object.WorldMatrix()
+	for index, vertex := range object.Parts[0].Mesh.Verts {
+		before[index] = world.TransformPoint(vertex)
+	}
+
+	if _, ok := recenterObjectGeometry(&object, math3d.Vec3{}); !ok {
+		t.Fatal("failed to recenter fragment geometry")
+	}
+	center, _ := objectGeometryBoundsCenter(object)
+	if center.Length() > 1e-9 {
+		t.Fatalf("recentered local bounds centre=%+v", center)
+	}
+	world = object.WorldMatrix()
+	for index, vertex := range object.Parts[0].Mesh.Verts {
+		got := world.TransformPoint(vertex)
+		if got.Sub(before[index]).Length() > 1e-9 {
+			t.Fatalf("vertex %d moved during rebase: got %+v want %+v", index, got, before[index])
 		}
 	}
 }
@@ -1184,9 +1743,25 @@ func TestResetRespawnsDestroyedPlayerAndRestoresView(t *testing.T) {
 	g := New()
 	g.viewCamera.Mode = camera.Cockpit
 	player := *g.objectByID(fighterID)
-	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: player}, nil)
-	if !g.playerDestroyed || g.viewCamera.Mode != camera.Orbit || g.destructionViewRemaining != g.profile.Simulation.PlayerDestructionViewTime {
-		t.Fatal("destroying player did not enter the three-second external destruction view")
+	var attacker scene.ObjectID
+	for id := range g.controllers {
+		if candidate := g.objectByID(id); candidate != nil && candidate.Team != player.Team && sameFrame(*candidate, player) {
+			attacker = id
+			break
+		}
+	}
+	if attacker == 0 {
+		t.Fatal("no hostile fighter available for destruction follow view")
+	}
+	g.destroyAndDisintegrateWithAttacker(map[scene.ObjectID]scene.Object{fighterID: player}, nil, attacker)
+	if !g.playerDestroyed || g.viewCamera.Mode != camera.Chase || g.viewCamera.TargetID != attacker ||
+		g.destructionViewRemaining != g.profile.Simulation.PlayerDestructionViewTime {
+		t.Fatal("destroying player did not immediately follow the hostile attacker")
+	}
+	before := g.viewCamera.View(g.objects)
+	g.objectByID(attacker).Pose.Position = g.objectByID(attacker).Pose.Position.Add(math3d.Vec3{X: 20, Y: 10, Z: 30})
+	if after := g.viewCamera.View(g.objects); after == before {
+		t.Fatal("destruction camera failed to follow its moving attacker")
 	}
 	g.resetFighter()
 	if g.playerDestroyed || g.objectByID(fighterID) == nil {
@@ -1197,6 +1772,451 @@ func TestResetRespawnsDestroyedPlayerAndRestoresView(t *testing.T) {
 	}
 	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Motion.Speed != g.profile.Player.Flight.MaxForward {
 		t.Fatalf("respawn speed is not maximum: %+v", fighter)
+	}
+}
+
+func TestFixedDestructionViewRetainsSurfaceFrame(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	player := *g.objectByID(fighterID)
+	wantFrame := normalizedObjectFrame(player)
+	g.controllers = nil // no eligible enemy: retain the fixed wreck view
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: player}, nil)
+	g.refreshViewContext()
+	if g.viewCamera.Mode != camera.Fixed || g.viewContext.FrameID != wantFrame {
+		t.Fatalf("destruction view mode=%v frame=%q, want fixed frame %q", g.viewCamera.Mode, g.viewContext.FrameID, wantFrame)
+	}
+}
+
+func TestDeathStarHangarDoorTransfersBothWaysWithoutChangingHeading(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not start near the Death Star surface")
+	}
+	player := g.objectByID(fighterID)
+	surfaceFrame := player.Frame
+	player.Pose.Position = math3d.Vec3{X: 63, Y: 8, Z: -36}
+	player.Pose.Orientation = math3d.IdentityQuaternion()
+	player.Motion.Speed = 18
+	g.world.Objects = g.objects
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	player = g.objectByID(fighterID)
+	var hangarFrame scene.FrameID
+	for _, runtime := range g.environments {
+		if runtime.bound.Definition.Name == environment.DeathStarHangarName {
+			hangarFrame = runtime.bound.FrameID
+		}
+	}
+	if player.Frame != hangarFrame || math.Abs(player.Pose.Position.X-3) > 1e-6 || player.Pose.Position.Z >= -24 ||
+		player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) < 0.99 || player.Motion.Speed != 18 {
+		t.Fatalf("hangar entry changed flight unexpectedly: frame=%q pose=%+v motion=%+v", player.Frame, player.Pose, player.Motion)
+	}
+	player.Pose.Position = math3d.Vec3{X: 3, Y: 8}
+	player.Pose.Orientation = math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, math.Pi)
+	g.refreshViewContext()
+	if g.viewContext.Background.Kind != view.BackgroundSkyfield {
+		t.Fatalf("hangar background=%q, want sky visible through open doorway", g.viewContext.Background.Kind)
+	}
+	g.refreshEnvironmentTiles()
+	var portalDeckTopology *model.Topology
+	for _, runtime := range g.environments {
+		if runtime.bound.FrameID == surfaceFrame {
+			if tile, ok := runtime.tiles[environment.TileCoordinate{X: 1, Z: 0}]; !ok || len(tile.PortalParts) != 1 {
+				t.Fatal("surface geometry was not retained for the open hangar doorway")
+			} else {
+				portalDeckTopology = tile.PortalParts[0].Mesh.Topology
+			}
+		}
+	}
+	prepared := g.prepareGameplayFrame()
+	portalDeckVisible := false
+	for _, candidate := range prepared.candidates {
+		if candidate.mesh.Topology == portalDeckTopology {
+			portalDeckVisible = true
+			if len(candidate.portalClip) != 4 {
+				t.Fatalf("portal deck has no projected doorway clip: %+v", candidate.portalClip)
+			}
+		}
+	}
+	if !portalDeckVisible {
+		t.Fatal("surface deck did not enter the prepared frame through the hangar portal")
+	}
+	g.world.Objects = g.objects
+	if err := g.updateEnvironmentTransitions(); err != nil || g.objectByID(fighterID).Frame != hangarFrame {
+		t.Fatalf("entry immediately bounced back through portal: err=%v frame=%q", err, g.objectByID(fighterID).Frame)
+	}
+	// Turn around at the opening and fly back out, retaining the lateral
+	// offset rather than snapping to the middle of the portal.
+	player.Pose.Position = math3d.Vec3{X: 3, Y: 8, Z: -32}
+	player.Pose.Orientation = math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, math.Pi)
+	g.world.Objects = g.objects
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	player = g.objectByID(fighterID)
+	if player.Frame != surfaceFrame || math.Abs(player.Pose.Position.X-63) > 1e-6 || player.Pose.Position.Z >= -39 ||
+		player.Pose.Forward().Dot(math3d.Vec3{Z: -1}) < 0.99 {
+		t.Fatalf("hangar exit changed flight unexpectedly: frame=%q pose=%+v", player.Frame, player.Pose)
+	}
+	g.world.Objects = g.objects
+	if err := g.updateEnvironmentTransitions(); err != nil || g.objectByID(fighterID).Frame != surfaceFrame {
+		t.Fatalf("exit immediately bounced back into hangar: err=%v frame=%q", err, g.objectByID(fighterID).Frame)
+	}
+}
+
+func TestYavinMissionTracksExistingFlightProgression(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionOrbitalBattle {
+		t.Fatalf("launch phase=%s", g.world.Mission.Phase)
+	}
+	var surfaceFrame scene.FrameID
+	for _, runtime := range g.environments {
+		if runtime.bound.Definition.Name == environment.DeathStarTrenchName {
+			surfaceFrame = runtime.bound.FrameID
+		}
+	}
+	g.transitions[fighterID] = environmentTransition{objectID: fighterID, destination: surfaceFrame}
+	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionApproach {
+		t.Fatalf("approach progression: phase=%s err=%v", g.world.Mission.Phase, err)
+	}
+	delete(g.transitions, fighterID)
+	player := g.objectByID(fighterID)
+	player.Frame = surfaceFrame
+	player.Pose.Position = math3d.Vec3{X: 58, Y: 10, Z: -70}
+	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionSurfaceAssault {
+		t.Fatalf("surface progression: phase=%s err=%v", g.world.Mission.Phase, err)
+	}
+	player.Pose.Position = math3d.Vec3{Y: -4, Z: -60}
+	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionTrenchRun {
+		t.Fatalf("trench progression: phase=%s err=%v", g.world.Mission.Phase, err)
+	}
+	player.Pose.Position = math3d.Vec3{Y: -8, Z: 130}
+	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionExhaustPortAttack {
+		t.Fatalf("attack progression: phase=%s err=%v", g.world.Mission.Phase, err)
+	}
+	snapshot := g.Snapshot()
+	if snapshot.Mission.Phase != sim.MissionExhaustPortAttack || snapshot.Mission.PlayerID != fighterID || snapshot.Mission.HostID == 0 {
+		t.Fatalf("snapshot mission=%+v", snapshot.Mission)
+	}
+}
+
+func TestExhaustPortAttackRequiresValidTorpedoEnvelope(t *testing.T) {
+	config := combat.DefaultTorpedoConfig()
+	mission := sim.MissionState{Phase: sim.MissionExhaustPortAttack, PlayerID: fighterID}
+	port := environment.DeathStarExhaustPortPoint()
+	hit := collision.Hit{Point: port}
+	valid := catalog.ProtonTorpedo(90, kinematics.Pose{
+		Position:    port,
+		Orientation: math3d.QuaternionFromYawPitchRoll(0, math.Asin(0.2), 0),
+	})
+	valid.Team = scene.TeamAlliance
+	valid.ProjectileTravel = 30
+	if reason := validateExhaustPortAttack(valid, fighterID, mission, hit, config); reason != "" {
+		t.Fatalf("valid attack rejected: %s", reason)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*scene.Object, *collision.Hit)
+		want string
+	}{
+		{"laser", func(p *scene.Object, _ *collision.Hit) { p.ProjectileKind = scene.ProjectileLaser }, exhaustAttackWrongWeapon},
+		{"unarmed", func(p *scene.Object, _ *collision.Hit) { p.ProjectileTravel = 1 }, exhaustAttackTooClose},
+		{"out of range", func(p *scene.Object, _ *collision.Hit) { p.ProjectileTravel = 100 }, exhaustAttackTooFar},
+		{"off center", func(_ *scene.Object, h *collision.Hit) { h.Point.X += 2 }, exhaustAttackOffCenter},
+		{"wrong course", func(p *scene.Object, _ *collision.Hit) { p.Pose.Orientation = math3d.IdentityQuaternion() }, exhaustAttackWrongCourse},
+	}
+	for _, test := range tests {
+		projectile, impact := valid, hit
+		test.edit(&projectile, &impact)
+		if reason := validateExhaustPortAttack(projectile, fighterID, mission, impact, config); reason != test.want {
+			t.Errorf("%s reason=%q, want %q", test.name, reason, test.want)
+		}
+	}
+}
+
+func TestValidExhaustPortImpactAdvancesMissionToEscape(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []sim.MissionPhase{sim.MissionApproach, sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	port := environment.DeathStarExhaustPortPoint()
+	torpedo := catalog.ProtonTorpedo(90, kinematics.Pose{
+		Position:    port,
+		Orientation: math3d.QuaternionFromYawPitchRoll(0, math.Asin(0.2), 0),
+	})
+	torpedo.Team = scene.TeamAlliance
+	torpedo.Frame = g.objectByID(fighterID).Frame
+	torpedo.ProjectileTravel = 30
+	g.owners[torpedo.ID] = fighterID
+	g.resolveExhaustPortAttack(torpedo, collision.Hit{Point: port, Normal: math3d.Vec3{Y: 1}})
+	if g.world.Mission.Phase != sim.MissionEscape || g.world.Mission.Reason != "exhaust-port-hit" {
+		t.Fatalf("mission=%+v", g.world.Mission)
+	}
+}
+
+func TestInvalidExhaustPortImpactReportsFeedbackWithoutAdvancing(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []sim.MissionPhase{sim.MissionApproach, sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	port := environment.DeathStarExhaustPortPoint()
+	laser := catalog.LaserBolt(91, kinematics.Pose{Position: port, Orientation: math3d.IdentityQuaternion()})
+	laser.Team = scene.TeamAlliance
+	g.owners[laser.ID] = fighterID
+	g.resolveExhaustPortAttack(laser, collision.Hit{Point: port, Normal: math3d.Vec3{Y: 1}})
+	if g.world.Mission.Phase != sim.MissionExhaustPortAttack || g.world.Mission.Reason != exhaustAttackWrongWeapon {
+		t.Fatalf("mission=%+v", g.world.Mission)
+	}
+}
+
+func TestYavinMissionFailsOnPlayerDestructionAndRestarts(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	victim := *g.objectByID(fighterID)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: victim}, nil)
+	if g.world.Mission.Phase != sim.MissionFailed || g.world.Mission.Reason != "fighter-destroyed" {
+		t.Fatalf("destroyed mission=%+v", g.world.Mission)
+	}
+	g.resetFighter()
+	if g.world.Mission.Phase != sim.MissionOrbitalBattle || g.world.Mission.Reason != "restart" {
+		t.Fatalf("restarted mission=%+v", g.world.Mission)
+	}
+}
+
+func TestSurfaceDevelopmentStartBeginsAtSurfaceObjective(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not start surface mode")
+	}
+	if err := g.startYavinMission(true); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionSurfaceAssault {
+		t.Fatalf("surface development mission=%+v", g.world.Mission)
+	}
+}
+
+func TestCockpitMissionTargetTracksAuthoritativeObjective(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	target, ok := g.missionObjectiveTarget()
+	if !ok {
+		t.Fatal("orbital objective has no Death Star direction")
+	}
+	hostPose, err := g.world.PoseInFrame(g.world.Mission.HostID, scene.ExteriorFrame)
+	if err != nil || target.Sub(hostPose.Position).Length() > 1e-9 {
+		t.Fatalf("orbital target=%+v host=%+v err=%v", target, hostPose, err)
+	}
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	if err := g.world.Apply(
+		sim.AdvanceMission{To: sim.MissionApproach, Reason: "test"},
+		sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "test"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	player := g.objectByID(fighterID)
+	target, ok = g.missionObjectiveTarget()
+	if !ok || target != environment.DeathStarTrenchGuidePoint(player.Pose.Position) {
+		t.Fatalf("surface objective target=%+v, ok=%v", target, ok)
+	}
+	if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionTrenchRun, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	target, ok = g.missionObjectiveTarget()
+	if !ok || target != environment.DeathStarExhaustPortPoint() {
+		t.Fatalf("trench target=%+v, ok=%v", target, ok)
+	}
+}
+
+func TestObjectiveArrowDirectionHandlesAheadSidesAndBehind(t *testing.T) {
+	tests := []struct {
+		name string
+		at   math3d.Vec3
+		x, y func(float64) bool
+	}{
+		{"ahead", math3d.Vec3{Z: -10}, func(x float64) bool { return math.Abs(x) < 1e-9 }, func(y float64) bool { return y < 0 }},
+		{"right", math3d.Vec3{X: 4, Z: -10}, func(x float64) bool { return x > 0 }, func(y float64) bool { return math.Abs(y) < 1e-9 }},
+		{"above", math3d.Vec3{Y: 4, Z: -10}, func(x float64) bool { return math.Abs(x) < 1e-9 }, func(y float64) bool { return y < 0 }},
+		{"behind", math3d.Vec3{Z: 10}, func(x float64) bool { return math.Abs(x) < 1e-9 }, func(y float64) bool { return y > 0 }},
+	}
+	for _, test := range tests {
+		x, y := objectiveArrowDirection(test.at)
+		if !test.x(x) || !test.y(y) || math.Abs(math.Hypot(x, y)-1) > 1e-9 {
+			t.Errorf("%s direction=(%v,%v)", test.name, x, y)
+		}
+	}
+}
+
+func TestHangarPortalPreparesFightersFromBothSides(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	player := g.objectByID(fighterID)
+	surfaceFrame := player.Frame
+	var hangarFrame scene.FrameID
+	for _, runtime := range g.environments {
+		if runtime.bound.Definition.Name == environment.DeathStarHangarName {
+			hangarFrame = runtime.bound.FrameID
+		}
+	}
+	if hangarFrame == "" {
+		t.Fatal("hangar frame not registered")
+	}
+	g.swarmLaunched = true
+	g.viewCamera.Mode = camera.Cockpit
+	inside := depthTestObject(990, hangarFrame, math3d.Vec3{Y: 8, Z: -25}, true)
+	g.objects = append(g.objects, inside)
+	g.world.Objects = g.objects
+	player = g.objectByID(fighterID)
+	player.Pose.Position = math3d.Vec3{X: 60, Y: 8, Z: -50}
+	player.Pose.Orientation = math3d.IdentityQuaternion()
+	g.refreshViewContext()
+	prepared := g.prepareGameplayFrame()
+	found := false
+	for _, candidate := range prepared.candidates {
+		if candidate.objectID == inside.ID && len(candidate.portalClip) == 4 && candidate.geometry != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("fighter inside hangar was invisible through exterior doorway")
+	}
+
+	outside := depthTestObject(991, surfaceFrame, math3d.Vec3{X: 60, Y: 8, Z: -45}, true)
+	g.objects = append(g.objects, outside)
+	g.world.Objects = g.objects
+	player = g.objectByID(fighterID)
+	player.Frame = hangarFrame
+	player.Pose.Position = math3d.Vec3{Y: 8, Z: -20}
+	player.Pose.Orientation = math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, math.Pi)
+	g.refreshViewContext()
+	g.refreshEnvironmentTiles()
+	prepared = g.prepareGameplayFrame()
+	found = false
+	for _, candidate := range prepared.candidates {
+		if candidate.objectID == outside.ID && len(candidate.portalClip) == 4 && candidate.geometry != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("fighter outside hangar was invisible from interior doorway")
+	}
+}
+
+func TestHangarPortalTransfersProjectilesOnlyThroughOpening(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	surfaceFrame := g.objectByID(fighterID).Frame
+	var hangarFrame scene.FrameID
+	for _, runtime := range g.environments {
+		if runtime.bound.Definition.Name == environment.DeathStarHangarName {
+			hangarFrame = runtime.bound.FrameID
+		}
+	}
+	bolt := depthTestObject(992, surfaceFrame, math3d.Vec3{X: 60, Y: 8, Z: -30}, false)
+	bolt.CollisionRole = scene.CollisionProjectile
+	bolt.Physical = false
+	bolt.Motion.Velocity = math3d.Vec3{Z: 10}
+	g.objects = append(g.objects, bolt)
+	g.world.Objects = g.objects
+	previous := map[scene.ObjectID]math3d.Vec3{bolt.ID: {X: 60, Y: 8, Z: -40}}
+	if err := g.transferPortalProjectiles(previous); err != nil {
+		t.Fatal(err)
+	}
+	if object := g.objectByID(bolt.ID); object.Frame != hangarFrame || math.Abs(object.Pose.Position.X) > 1e-6 || math.Abs(previous[bolt.ID].Z+34) > 1e-6 {
+		t.Fatalf("incoming bolt did not preserve its crossing: %+v previous=%+v", object, previous[bolt.ID])
+	}
+	boltInRoom := g.objectByID(bolt.ID)
+	boltInRoom.Pose.Position.Z = -40
+	previous[bolt.ID] = math3d.Vec3{Y: 8, Z: -30}
+	if err := g.transferPortalProjectiles(previous); err != nil {
+		t.Fatal(err)
+	}
+	if object := g.objectByID(bolt.ID); object.Frame != surfaceFrame || math.Abs(object.Pose.Position.X-60) > 1e-6 {
+		t.Fatalf("outgoing bolt did not return to surface frame: %+v", object)
+	}
+	blocked := depthTestObject(993, surfaceFrame, math3d.Vec3{X: 90, Y: 8, Z: -30}, false)
+	blocked.CollisionRole = scene.CollisionProjectile
+	g.objects = append(g.objects, blocked)
+	g.world.Objects = g.objects
+	previous[blocked.ID] = math3d.Vec3{X: 90, Y: 8, Z: -40}
+	if err := g.transferPortalProjectiles(previous); err != nil {
+		t.Fatal(err)
+	}
+	if object := g.objectByID(blocked.ID); object.Frame != surfaceFrame {
+		t.Fatal("bolt outside doorway crossed environments")
+	}
+}
+
+func TestDestructionFollowRejectsAttackerInAnotherFrame(t *testing.T) {
+	g := New()
+	victim := *g.objectByID(fighterID)
+	var otherFrameID, localID scene.ObjectID
+	for id := range g.controllers {
+		candidate := g.objectByID(id)
+		if candidate == nil || candidate.Team == victim.Team || !sameFrame(*candidate, victim) {
+			continue
+		}
+		if otherFrameID == 0 {
+			otherFrameID = id
+		} else {
+			localID = id
+			break
+		}
+	}
+	if otherFrameID == 0 || localID == 0 {
+		t.Fatal("need two hostile fighters to verify frame-aware follow selection")
+	}
+	g.objectByID(otherFrameID).Frame = scene.FrameID("another/environment")
+	if !g.switchToEnemyDestructionFollowView(victim, otherFrameID) {
+		t.Fatal("same-frame fallback fighter was not selected")
+	}
+	if g.viewCamera.Mode != camera.Chase || g.viewCamera.TargetID == otherFrameID ||
+		!sameFrame(*g.objectByID(g.viewCamera.TargetID), victim) {
+		t.Fatalf("destruction follow selected cross-frame fighter %d", g.viewCamera.TargetID)
+	}
+}
+
+func TestDestructionFollowRetargetsWhenItsFighterDisappears(t *testing.T) {
+	g := New()
+	victim := *g.objectByID(fighterID)
+	if !g.switchToEnemyDestructionFollowView(victim, 0) {
+		t.Fatal("no hostile fighter available for initial follow view")
+	}
+	first := g.viewCamera.TargetID
+	g.removeObjects(map[scene.ObjectID]bool{first: true})
+	if !g.switchToEnemyDestructionFollowView(victim, 0) {
+		t.Fatal("no replacement hostile fighter available")
+	}
+	if second := g.viewCamera.TargetID; second == first || g.viewCamera.Mode != camera.Chase {
+		t.Fatalf("follow view did not retarget: first=%d second=%d mode=%v", first, second, g.viewCamera.Mode)
 	}
 }
 

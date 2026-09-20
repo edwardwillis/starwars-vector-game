@@ -16,6 +16,12 @@ var (
 	vectorRed   = color.RGBA{R: 255, G: 48, B: 32, A: 255}
 	vectorGreen = color.RGBA{R: 64, G: 255, B: 96, A: 255}
 	windowAmber = color.RGBA{R: 255, G: 192, B: 48, A: 255}
+	windowGlass = scene.SurfaceMaterial{Mode: scene.SurfaceTranslucent, Color: color.RGBA{R: 255, G: 192, B: 48, A: 80}}
+	// Fighter faces are physically opaque even though their visible identity is
+	// luminous line art. A dark surface backing lets the shared far-to-near
+	// opaque pass hide filled scenery behind a fighter; line-on-line visibility
+	// remains the responsibility of the shared CPU depth pass.
+	fighterSurface = scene.SurfaceMaterial{Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{A: 255}}
 
 	tieFighterGeometry            = model.TIEFighterGeometryData()
 	tieFighterCore                = model.Transform(tieFighterGeometry.Core, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
@@ -29,6 +35,7 @@ var (
 	xWingDebris                   = xWingGeometry.Fragments
 	laserBoltRays                 = model.LaserBoltRays()
 	laserBoltTips                 = model.LaserBoltBranches()
+	protonTorpedoGeometry         = model.ProtonTorpedo()
 	tieFighterPolygonShards       = buildTIEFighterPolygonShards()
 	tieInterceptorGeometry        = model.TIEInterceptorGeometryData()
 	tieInterceptorCockpit         = model.Transform(tieInterceptorGeometry.Cockpit, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
@@ -69,13 +76,24 @@ const (
 	XWingName                   = "builtin/x-wing"
 	MillenniumFalconName        = "builtin/millennium-falcon"
 	LaserBoltName               = "builtin/laser-bolt"
+	ProtonTorpedoName           = "builtin/proton-torpedo"
 	DeathStarName               = "builtin/death-star"
 	TIEInterceptorAppearance    = "builtin/tie-interceptor-model"
 	RebelLaserBoltAppearance    = "builtin/laser-bolt-rebel"
 	ImperialLaserBoltAppearance = "builtin/laser-bolt-imperial"
+	ProtonTorpedoAppearance     = "builtin/proton-torpedo-rebel"
 )
 
 const standardLineWidth float32 = 2
+
+func withFighterSurface(parts []scene.Part) []scene.Part {
+	for index := range parts {
+		if len(parts[index].Mesh.Faces) > 0 && !parts[index].Surface.Filled() {
+			parts[index].Surface = fighterSurface
+		}
+	}
+	return parts
+}
 
 // Specification is the compact technical data shown by the fighter showcase.
 type Specification struct {
@@ -227,10 +245,10 @@ func XWing(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			parts = append(parts, scene.Part{Name: assembly.Name + " " + component.name, Mesh: component.mesh, Color: vectorGreen, LineWidth: standardLineWidth})
 		}
 	}
-	parts = append(parts, scene.Part{Name: "cockpit window", Mesh: xWingWindow, Color: windowAmber, LineWidth: standardLineWidth})
+	parts = append(parts, scene.Part{Name: "cockpit window", Mesh: xWingWindow, Color: windowAmber, LineWidth: standardLineWidth, Surface: windowGlass})
 	return scene.Object{
-		ID: id, Name: "X-Wing", Definition: XWingName, Pose: pose,
-		Parts:         parts,
+		ID: id, Name: "X-Wing", Definition: XWingName, Team: scene.TeamAlliance, Pose: pose,
+		Parts:         withFighterSurface(parts),
 		Anchors:       xWingAnchors(xWingFoilAssemblies),
 		CollisionRole: scene.CollisionSolid, CollisionRadius: 2.4,
 		Physical: true, Hittable: true, Targetable: true, Destructible: true,
@@ -364,37 +382,40 @@ func TIEFighterPolygon(id scene.ObjectID, component, polygon int, pose kinematic
 // TIEFighter returns the complete multipart fighter with its contrasting
 // cockpit window.
 func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
-	return scene.Object{
-		ID:         id,
-		Name:       "TIE fighter",
-		Definition: TIEFighterName,
-		Pose:       pose,
-		Parts: []scene.Part{
-			{
-				Name:      "cockpit and pylons",
-				Mesh:      tieFighterCore,
-				Color:     vectorGreen,
-				LineWidth: standardLineWidth,
-			},
-			{
-				Name:      "left solar-panel foil",
-				Mesh:      tieFighterLeftFoil,
-				Color:     vectorGreen,
-				LineWidth: standardLineWidth,
-			},
-			{
-				Name:      "right solar-panel foil",
-				Mesh:      tieFighterRightFoil,
-				Color:     vectorGreen,
-				LineWidth: standardLineWidth,
-			},
-			{
-				Name:      "windscreen",
-				Mesh:      tieFighterWindow,
-				Color:     windowAmber,
-				LineWidth: standardLineWidth,
-			},
+	parts := []scene.Part{
+		{
+			Name:      "cockpit and pylons",
+			Mesh:      tieFighterCore,
+			Color:     vectorGreen,
+			LineWidth: standardLineWidth,
 		},
+		{
+			Name:      "left solar-panel foil",
+			Mesh:      tieFighterLeftFoil,
+			Color:     vectorGreen,
+			LineWidth: standardLineWidth,
+		},
+		{
+			Name:      "right solar-panel foil",
+			Mesh:      tieFighterRightFoil,
+			Color:     vectorGreen,
+			LineWidth: standardLineWidth,
+		},
+		{
+			Name:      "windscreen",
+			Mesh:      tieFighterWindow,
+			Color:     windowAmber,
+			LineWidth: standardLineWidth,
+			Surface:   windowGlass,
+		},
+	}
+	return scene.Object{
+		ID:               id,
+		Name:             "TIE fighter",
+		Definition:       TIEFighterName,
+		Team:             scene.TeamEmpire,
+		Pose:             pose,
+		Parts:            withFighterSurface(parts),
 		Anchors:          tieFighterAnchors(),
 		CollisionRole:    scene.CollisionSolid,
 		CollisionRadius:  1.3,
@@ -424,10 +445,10 @@ func TIEInterceptor(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			scene.Part{Name: fmt.Sprintf("laser cannon %d", index+1), Mesh: tieInterceptorCannons[index], Color: vectorGreen, LineWidth: standardLineWidth, Detail: scene.DetailMedium},
 		)
 	}
-	parts = append(parts, scene.Part{Name: "cockpit window", Mesh: tieInterceptorWindow, Color: windowAmber, LineWidth: standardLineWidth})
+	parts = append(parts, scene.Part{Name: "cockpit window", Mesh: tieInterceptorWindow, Color: windowAmber, LineWidth: standardLineWidth, Surface: windowGlass})
 	return scene.Object{
-		ID: id, Name: "TIE Interceptor", Definition: TIEInterceptorName, Appearance: TIEInterceptorAppearance, Pose: pose,
-		Parts: parts, Anchors: tieInterceptorAnchors(),
+		ID: id, Name: "TIE Interceptor", Definition: TIEInterceptorName, Appearance: TIEInterceptorAppearance, Team: scene.TeamEmpire, Pose: pose,
+		Parts: withFighterSurface(parts), Anchors: tieInterceptorAnchors(),
 		// The interceptor's elongated panel tips and wing cannons extend well
 		// beyond the cockpit; keep the hit sphere aligned with that silhouette
 		// so visible wing hits are not ignored by swept laser collision tests.
@@ -486,8 +507,8 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 // and sensor dish.
 func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	return scene.Object{
-		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Pose: pose,
-		Parts: []scene.Part{
+		ID: id, Name: "Millennium Falcon", Definition: MillenniumFalconName, Team: scene.TeamAlliance, Pose: pose,
+		Parts: withFighterSurface([]scene.Part{
 			// The render layers share the welded authored boundaries from the
 			// composite model, but use distinct depth owners and policies. This
 			// preserves hull detail while making the extensions opaque.
@@ -499,8 +520,8 @@ func MillenniumFalcon(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			{Name: "quad laser turrets", Mesh: millenniumFalconTurrets, Color: vectorGreen, LineWidth: standardLineWidth},
 			{Name: "hyperdrive segments", Mesh: millenniumFalconHyperdrive, Color: windowAmber, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
 			{Name: "sensor dish and hull details", Mesh: millenniumFalconDetails, Color: vectorGreen, LineWidth: standardLineWidth, Detail: scene.DetailMedium},
-			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth},
-		},
+			{Name: "cockpit windscreen", Mesh: millenniumFalconWindow, Color: windowAmber, LineWidth: standardLineWidth, Surface: windowGlass},
+		}),
 		Anchors: map[string]kinematics.Pose{
 			"center":             {Orientation: math3d.IdentityQuaternion()},
 			"cockpit":            {Position: millenniumFalconStations.CockpitCenter, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
@@ -643,6 +664,23 @@ func LaserBoltWithStyle(id scene.ObjectID, pose kinematics.Pose, style Projectil
 		},
 		CollisionRole:   scene.CollisionProjectile,
 		CollisionRadius: 0.12,
+		ProjectileKind:  scene.ProjectileLaser,
+	}
+}
+
+// ProtonTorpedo returns the Alliance attack-run payload. It is visually
+// distinct from either faction's laser bolts and remains ordinary catalogued
+// scene geometry throughout its lifetime.
+func ProtonTorpedo(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	return scene.Object{
+		ID: id, Name: "proton torpedo", Definition: ProtonTorpedoName,
+		Appearance: ProtonTorpedoAppearance, Pose: pose,
+		Parts: []scene.Part{
+			{Name: "energy envelope", Mesh: protonTorpedoGeometry, Color: color.RGBA{R: 255, G: 112, B: 32, A: 255}, LineWidth: 2.4},
+		},
+		Anchors:       map[string]kinematics.Pose{"center": {Orientation: math3d.IdentityQuaternion()}},
+		CollisionRole: scene.CollisionProjectile, CollisionRadius: 0.18,
+		ProjectileKind: scene.ProjectileProtonTorpedo,
 	}
 }
 
@@ -651,7 +689,7 @@ func LaserBoltWithStyle(id scene.ObjectID, pose kinematics.Pose, style Projectil
 func DeathStar(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	const radius = 300.0
 	return scene.Object{
-		ID: id, Name: "Death Star", Definition: DeathStarName, Pose: pose,
+		ID: id, Name: "Death Star", Definition: DeathStarName, Team: scene.TeamEmpire, Pose: pose,
 		Parts: []scene.Part{
 			{Name: "sphere", Mesh: deathStarGeometry.Sphere, Color: vectorGreen, LineWidth: 1.5, Detail: scene.DetailPrimary},
 			{Name: "superlaser dish", Mesh: deathStarGeometry.Dish, Color: vectorGreen, LineWidth: 2, Detail: scene.DetailMedium},

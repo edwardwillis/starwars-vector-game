@@ -105,6 +105,7 @@ func DefaultRegistry() *Registry {
 	_ = r.Register(Definition{Name: XWingName, Create: XWing, CreateFragment: XWingFragment, PolygonCount: XWingPolygonCount, CreatePolygon: XWingPolygon})
 	_ = r.Register(Definition{Name: MillenniumFalconName, Create: MillenniumFalcon, CreateFragment: MillenniumFalconFragment, PolygonCount: MillenniumFalconPolygonCount, CreatePolygon: MillenniumFalconPolygon})
 	_ = r.Register(Definition{Name: LaserBoltName, Create: LaserBolt})
+	_ = r.Register(Definition{Name: ProtonTorpedoName, Create: ProtonTorpedo})
 	_ = r.Register(Definition{Name: DeathStarName, Create: DeathStar})
 	return r
 }

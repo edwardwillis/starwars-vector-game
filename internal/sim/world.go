@@ -52,11 +52,14 @@ func (c Add) Apply(w *World) error {
 }
 
 type World struct {
-	Tick        uint64
-	Time        float64
-	Objects     []scene.Object
-	Frames      map[scene.FrameID]Frame
-	Transitions []TransitionEvent
+	Tick          uint64
+	Time          float64
+	Objects       []scene.Object
+	Frames        map[scene.FrameID]Frame
+	Transitions   []TransitionEvent
+	FeatureEvents []FeatureDamageEvent
+	Mission       MissionState
+	MissionEvents []MissionEvent
 }
 
 func New(objects []scene.Object) (*World, error) {
@@ -88,8 +91,17 @@ func (w *World) Step(seconds float64) error {
 	if seconds <= 0 {
 		return fmt.Errorf("simulation step must be positive")
 	}
+	w.FeatureEvents = w.FeatureEvents[:0]
+	w.MissionEvents = w.MissionEvents[:0]
 	for i := range w.Objects {
+		before := w.Objects[i].Pose.Position
 		w.Objects[i].Pose = kinematics.Integrate(w.Objects[i].Pose, w.Objects[i].Motion, seconds)
+		// Only range-gated payloads need accumulated travel. Ordinary laser
+		// bolts already expire by lifetime, so avoid adding square-root work for
+		// every cannon bolt in a dense surface battle.
+		if w.Objects[i].ProjectileKind == scene.ProjectileProtonTorpedo {
+			w.Objects[i].ProjectileTravel += w.Objects[i].Pose.Position.Sub(before).Length()
+		}
 	}
 	w.Tick++
 	w.Time += seconds
@@ -101,15 +113,20 @@ func (w *World) Snapshot() Snapshot {
 	for id, frame := range w.Frames {
 		frames[id] = frame
 	}
-	return Snapshot{Tick: w.Tick, Time: w.Time, Objects: cloneObjects(w.Objects), Frames: frames, Transitions: append([]TransitionEvent(nil), w.Transitions...)}
+	return Snapshot{Tick: w.Tick, Time: w.Time, Objects: cloneObjects(w.Objects), Frames: frames,
+		Transitions: append([]TransitionEvent(nil), w.Transitions...), FeatureEvents: append([]FeatureDamageEvent(nil), w.FeatureEvents...),
+		Mission: w.Mission, MissionEvents: append([]MissionEvent(nil), w.MissionEvents...)}
 }
 
 type Snapshot struct {
-	Tick        uint64
-	Time        float64
-	Objects     []scene.Object
-	Frames      map[scene.FrameID]Frame
-	Transitions []TransitionEvent
+	Tick          uint64
+	Time          float64
+	Objects       []scene.Object
+	Frames        map[scene.FrameID]Frame
+	Transitions   []TransitionEvent
+	FeatureEvents []FeatureDamageEvent
+	Mission       MissionState
+	MissionEvents []MissionEvent
 }
 
 func (w *World) byID(id scene.ObjectID) (*scene.Object, bool) {

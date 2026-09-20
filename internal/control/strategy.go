@@ -41,6 +41,12 @@ type PursuitFollower interface {
 	PursuesTarget() bool
 }
 
+// EngagementStarter lets encounter orchestration request an immediate attack
+// opportunity without depending on a concrete controller implementation.
+type EngagementStarter interface {
+	EngageNow()
+}
+
 type PursuitConfig struct {
 	PreferredDistance   float64
 	MinSpeed            float64
@@ -175,6 +181,18 @@ func (p *Pursuit) PursuesTarget() bool { return true }
 // AttackIntent reports whether the most recent Step selected a firing moment.
 func (p *Pursuit) AttackIntent() bool {
 	return p.attackFire
+}
+
+// EngageNow preserves the controller's normal attack-run behavior but removes
+// its initial idle gap. The next decision begins a deterministic attack arc.
+func (p *Pursuit) EngageNow() {
+	p.attacking = true
+	p.excursion = false
+	p.attackTime = p.randomRange(p.config.AttackMinTime, p.config.AttackMaxTime)
+	p.attackRadius = p.randomRange(p.config.AttackMinRadius, p.config.AttackMaxRadius)
+	p.attackAngle = p.randomRange(0, 2*math.Pi)
+	p.attackDirection = signOrRandom(p.randomSigned(), 1)
+	p.attackFireGap = 0
 }
 
 // Decide returns an atomic flight, aim, and fire decision. Step remains below

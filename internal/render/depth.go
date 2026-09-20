@@ -12,18 +12,41 @@ import (
 // Owners lets compound objects avoid erasing their own structural edges.
 type DepthBuffer struct {
 	Width, Height int
-	Values        []float64
-	Owners        []uint64
-	touched       []int
+	// ViewWidth/ViewHeight retain the full-resolution coordinate system used by
+	// projected lines and triangles. Width/Height may be smaller for the
+	// invisible CPU visibility surface.
+	ViewWidth, ViewHeight int
+	Values                []float64
+	Owners                []uint64
+	touched               []int
 }
 
 func NewDepthBuffer(width, height int) *DepthBuffer {
+	return NewScaledDepthBuffer(width, height, 1)
+}
+
+// NewScaledDepthBuffer creates an invisible visibility surface at a fraction
+// of display resolution while retaining full-resolution sampling coordinates.
+func NewScaledDepthBuffer(viewWidth, viewHeight int, scale float64) *DepthBuffer {
+	if scale <= 0 || scale > 1 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		scale = 1
+	}
+	width := maxInt(1, int(math.Ceil(float64(maxInt(0, viewWidth))*scale)))
+	height := maxInt(1, int(math.Ceil(float64(maxInt(0, viewHeight))*scale)))
 	size := maxInt(0, width*height)
-	buffer := &DepthBuffer{Width: width, Height: height, Values: make([]float64, size), Owners: make([]uint64, size)}
+	buffer := &DepthBuffer{Width: width, Height: height, ViewWidth: viewWidth, ViewHeight: viewHeight, Values: make([]float64, size), Owners: make([]uint64, size)}
 	for index := range buffer.Values {
 		buffer.Values[index] = math.Inf(1)
 	}
 	return buffer
+}
+
+func (buffer *DepthBuffer) screenToBuffer(x, y int) (int, int) {
+	if buffer == nil || buffer.ViewWidth <= 0 || buffer.ViewHeight <= 0 {
+		return x, y
+	}
+	return int(math.Floor(float64(x) * float64(buffer.Width) / float64(buffer.ViewWidth))),
+		int(math.Floor(float64(y) * float64(buffer.Height) / float64(buffer.ViewHeight)))
 }
 
 func (buffer *DepthBuffer) Clear() {
@@ -38,6 +61,11 @@ func (buffer *DepthBuffer) Clear() {
 }
 
 func (buffer *DepthBuffer) depthAt(x, y int) float64 {
+	x, y = buffer.screenToBuffer(x, y)
+	return buffer.depthAtPixel(x, y)
+}
+
+func (buffer *DepthBuffer) depthAtPixel(x, y int) float64 {
 	if buffer == nil || x < 0 || y < 0 || x >= buffer.Width || y >= buffer.Height {
 		return math.Inf(1)
 	}
@@ -48,10 +76,12 @@ func (buffer *DepthBuffer) depthAt(x, y int) float64 {
 // edges frequently lie exactly on polygon boundaries, where a single-pixel
 // depth raster can otherwise leave alternating holes as the camera moves.
 func (buffer *DepthBuffer) nearestAt(x, y, radius int) float64 {
+	x, y = buffer.screenToBuffer(x, y)
+	radius = buffer.screenRadiusToBuffer(radius)
 	nearest := math.Inf(1)
 	for offsetY := -radius; offsetY <= radius; offsetY++ {
 		for offsetX := -radius; offsetX <= radius; offsetX++ {
-			value := buffer.depthAt(x+offsetX, y+offsetY)
+			value := buffer.depthAtPixel(x+offsetX, y+offsetY)
 			if value < nearest {
 				nearest = value
 			}
@@ -61,6 +91,8 @@ func (buffer *DepthBuffer) nearestAt(x, y, radius int) float64 {
 }
 
 func (buffer *DepthBuffer) nearestOtherAt(x, y, radius int, owner uint64) float64 {
+	x, y = buffer.screenToBuffer(x, y)
+	radius = buffer.screenRadiusToBuffer(radius)
 	nearest := math.Inf(1)
 	for offsetY := -radius; offsetY <= radius; offsetY++ {
 		for offsetX := -radius; offsetX <= radius; offsetX++ {
@@ -78,6 +110,14 @@ func (buffer *DepthBuffer) nearestOtherAt(x, y, radius int, owner uint64) float6
 		}
 	}
 	return nearest
+}
+
+func (buffer *DepthBuffer) screenRadiusToBuffer(radius int) int {
+	if buffer == nil || radius <= 0 || buffer.ViewWidth <= 0 || buffer.ViewHeight <= 0 {
+		return maxInt(0, radius)
+	}
+	scale := math.Max(float64(buffer.Width)/float64(buffer.ViewWidth), float64(buffer.Height)/float64(buffer.ViewHeight))
+	return maxInt(1, int(math.Ceil(float64(radius)*scale)))
 }
 
 func (buffer *DepthBuffer) write(x, y int, depth float64) {
@@ -173,6 +213,13 @@ func (p Pipeline) rasterizeTriangle(a, b, c math3d.Vec3, buffer *DepthBuffer, ow
 }
 
 func (p Pipeline) rasterizePreparedTriangle(a, b, c Point, buffer *DepthBuffer, owner uint64) {
+	if buffer.ViewWidth > 0 && buffer.ViewHeight > 0 {
+		scaleX := float64(buffer.Width) / float64(buffer.ViewWidth)
+		scaleY := float64(buffer.Height) / float64(buffer.ViewHeight)
+		a.X, a.Y = a.X*scaleX, a.Y*scaleY
+		b.X, b.Y = b.X*scaleX, b.Y*scaleY
+		c.X, c.Y = c.X*scaleX, c.Y*scaleY
+	}
 	ax, ay := a.X, a.Y
 	bx, by := b.X, b.Y
 	cx, cy := c.X, c.Y

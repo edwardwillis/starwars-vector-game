@@ -40,3 +40,35 @@ func TestFlatTrianglesDoNotDrawOccluderOnlyFaces(t *testing.T) {
 		t.Fatalf("drew %d triangles, want only the visible material face", len(triangles))
 	}
 }
+
+func TestOpaqueTrianglesRetainTextureAndUV(t *testing.T) {
+	uvs := [3]model.UV{{U: 0, V: 0}, {U: 1, V: 0}, {U: 0, V: 1}}
+	geometry := PreparedGeometry{
+		Faces:     []model.Face{{}},
+		Triangles: []PreparedTriangle{{Face: 0, UVs: uvs}},
+	}
+	got := AppendOpaqueTriangles(nil, &geometry, color.RGBA{A: 255}, "test/panel")
+	if len(got) != 1 || got[0].TextureID != "test/panel" || got[0].UVs != uvs {
+		t.Fatalf("textured surface lost material coordinates: %+v", got)
+	}
+}
+
+func TestTranslucentTrianglesReusePreparedGeometryAndPainterOrder(t *testing.T) {
+	uvs := [3]model.UV{{}, {U: 1}, {V: 1}}
+	geometry := PreparedGeometry{Faces: []model.Face{{}, {OccluderOnly: true}}, Triangles: []PreparedTriangle{
+		{Face: 0, A: Point{Depth: 3}, B: Point{Depth: 3}, C: Point{Depth: 3}, UVs: uvs},
+		{Face: 1, A: Point{Depth: 9}, B: Point{Depth: 9}, C: Point{Depth: 9}},
+	}}
+	triangles := AppendTranslucentTriangles(nil, &geometry, color.RGBA{B: 255, A: 96}, "test/glass")
+	if len(triangles) != 1 || !triangles[0].Translucent || triangles[0].TextureID != "test/glass" || triangles[0].UVs != uvs {
+		t.Fatalf("translucent triangles=%+v", triangles)
+	}
+	triangles = append(triangles, FlatTriangle{A: Point{Depth: 5}, B: Point{Depth: 5}, C: Point{Depth: 5}})
+	SortFlatTriangles(triangles)
+	if triangles[0].Translucent || !triangles[1].Translucent {
+		t.Fatalf("near glass should follow far opaque surface: %+v", triangles)
+	}
+	if got := AppendTranslucentTriangles(nil, &geometry, color.RGBA{A: 255}, ""); len(got) != 0 {
+		t.Fatalf("accepted opaque material in translucent path: %+v", got)
+	}
+}

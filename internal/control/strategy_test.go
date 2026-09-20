@@ -134,6 +134,19 @@ func TestPursuitAttackRunSelectsRadiusAndRequestsFire(t *testing.T) {
 	}
 }
 
+func TestPursuitCanBePrimedForImmediateEncounterAttack(t *testing.T) {
+	config := DefaultPursuitConfig()
+	config.AttackAimDot = -1
+	controller := NewPursuit(17, config)
+	controller.EngageNow()
+	self := scene.Object{Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}}
+	target := scene.Object{Pose: kinematics.Pose{Position: math3d.Vec3{Z: 10}}}
+	decision := controller.Decide(Context{Self: self, Target: target, Seconds: 1.0 / 60})
+	if !decision.Fire {
+		t.Fatal("primed pursuit did not request an immediate aligned attack")
+	}
+}
+
 func TestPursuitAttackCanFireWhileFlyingAnArc(t *testing.T) {
 	config := DefaultPursuitConfig()
 	config.AttackMinGap = 0

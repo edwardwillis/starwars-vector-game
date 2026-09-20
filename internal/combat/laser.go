@@ -79,6 +79,7 @@ func FireLaserTowardWithConfig(shooter scene.Object, id scene.ObjectID, muzzle s
 	pose.Orientation = math3d.QuaternionFromYawPitchRoll(yaw, pitch, 0)
 	bolt := catalog.LaserBoltForShooter(id, pose, shooter.Definition)
 	bolt.Frame = shooter.Frame
+	bolt.Team = shooter.Team
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,
 		RollRate: config.SpinRate,
@@ -104,6 +105,7 @@ func FireLaserWithConfig(shooter scene.Object, id scene.ObjectID, muzzle string,
 	}
 	bolt := catalog.LaserBoltForShooter(id, pose, shooter.Definition)
 	bolt.Frame = shooter.Frame
+	bolt.Team = shooter.Team
 	bolt.Motion = kinematics.Motion{
 		Speed:    shooter.Motion.Speed + config.Speed,
 		RollRate: config.SpinRate,

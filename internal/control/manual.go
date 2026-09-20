@@ -1,7 +1,12 @@
 // Package control converts user or autonomous decisions into kinematic motion.
 package control
 
-import "github.com/edwardwillis/starwars-vector-game/internal/kinematics"
+import (
+	"math"
+
+	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+)
 
 // Intent contains normalized flight controls in the range [-1, 1]. Stop takes
 // precedence over throttle. Controllers produce intentions, never poses.
@@ -20,6 +25,17 @@ type ManualConfig struct {
 	MaxYawRate   float64
 	MaxPitchRate float64
 	MaxRollRate  float64
+}
+
+// AutoLevelConfig describes optional horizon assistance. It is kept separate
+// from ordinary flight limits because environments decide whether they expose
+// a meaningful local level reference.
+type AutoLevelConfig struct {
+	Enabled        bool
+	CorrectionGain float64
+	MaxRollRate    float64
+	AngleDeadzone  float64
+	TurnDeadzone   float64
 }
 
 // Limits are the movement constraints applied to any controller decision.
@@ -90,6 +106,31 @@ func ApplyWithLimits(motion kinematics.Motion, intent Intent, limits Limits, sec
 		motion.RollRate = desiredRoll
 	}
 	return motion
+}
+
+// AutoLevelRollRate returns the shortest local-roll correction that aligns the
+// craft's up vector with referenceUp while preserving its current heading and
+// pitch. A vertical craft has no defined horizon roll and receives no command.
+func AutoLevelRollRate(orientation math3d.Quaternion, referenceUp math3d.Vec3, config AutoLevelConfig) float64 {
+	if !config.Enabled || config.CorrectionGain <= 0 || config.MaxRollRate <= 0 {
+		return 0
+	}
+	orientation = orientation.Normalize()
+	forward := orientation.Rotate(kinematics.LocalForward).Normalize()
+	currentUp := orientation.Rotate(math3d.Vec3{Y: 1}).Normalize()
+	referenceUp = referenceUp.Normalize()
+	if forward == (math3d.Vec3{}) || currentUp == (math3d.Vec3{}) || referenceUp == (math3d.Vec3{}) {
+		return 0
+	}
+	desiredUp := referenceUp.Sub(forward.Scale(referenceUp.Dot(forward))).Normalize()
+	if desiredUp == (math3d.Vec3{}) {
+		return 0
+	}
+	angle := math.Atan2(forward.Dot(currentUp.Cross(desiredUp)), currentUp.Dot(desiredUp))
+	if math.Abs(angle) <= config.AngleDeadzone {
+		return 0
+	}
+	return clamp(angle*config.CorrectionGain, -config.MaxRollRate, config.MaxRollRate)
 }
 
 func clamp(value, minimum, maximum float64) float64 {

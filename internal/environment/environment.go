@@ -35,6 +35,13 @@ type Transition struct {
 	Trigger             Volume
 	Duration            float64
 	EntryPose, ExitPose kinematics.Pose
+	// Local doorway transfers may keep the craft's heading and lateral
+	// position. EntryOffset nudges it clear of the opposite trigger.
+	PreservePose bool
+	EntryOffset  math3d.Vec3
+	// ApproachDirection is expressed in Source coordinates; zero accepts
+	// either direction, while a nonzero vector gates a one-way opening.
+	ApproachDirection math3d.Vec3
 }
 
 type TileCoordinate struct{ X, Z int }
@@ -52,10 +59,14 @@ func (bounds RenderBounds) Valid() bool { return bounds.Radius > 0 }
 type Tile struct {
 	Coordinate TileCoordinate
 	Parts      []scene.Part
-	Features   []Feature
-	Planes     []collision.FinitePlane
-	Boxes      []collision.OrientedBox
-	Bounds     RenderBounds
+	// PortalParts optionally excludes geometry duplicated by a neighboring
+	// room shell when this tile is viewed through that room's open portal.
+	// Nil means all ordinary Parts are eligible.
+	PortalParts []scene.Part
+	Features    []Feature
+	Planes      []collision.FinitePlane
+	Boxes       []collision.OrientedBox
+	Bounds      RenderBounds
 }
 
 // Feature describes an addressable installation generated with a tile. The
@@ -64,17 +75,36 @@ type Tile struct {
 type Feature struct {
 	ID   string
 	Kind string
+	Team scene.TeamID
 	Pose kinematics.Pose
 	// Scale turns shared immutable prototype meshes into differently sized
 	// feature instances without baking a fresh mesh for every streamed tile.
 	// The zero value means unit scale for compatibility with existing features.
-	Scale      math3d.Vec3
-	Parts      []scene.Part
+	Scale math3d.Vec3
+	Parts []scene.Part
+	// Muzzles are immutable feature-local emitter anchors transformed with
+	// the same pose/scale as the visible installation geometry.
+	Muzzles []math3d.Vec3
+	// TurretPart is the index of an articulated part, or zero for a fixed
+	// installation. TurretPivot is in feature-local coordinates. The simulation
+	// supplies its yaw/pitch; neither target acquisition nor articulation is
+	// driven by rendering or tile visibility.
+	TurretPart  int
+	TurretPivot math3d.Vec3
+	BarrelPart  int
+	BarrelPivot math3d.Vec3
+	// WreckParts replace Parts after destruction. A visual-only remnant may
+	// persist without retaining the intact installation's collision boxes.
+	WreckParts []scene.Part
 	Boxes      []collision.OrientedBox
 	Bounds     RenderBounds
 	Detail     scene.DetailTier
 	Targetable bool
 	Hittable   bool
+	HitPoints  int
+	// DisableAfter is the number of hits that stops an active emplacement
+	// before final destruction. Zero means it remains active until destroyed.
+	DisableAfter int
 }
 
 // Matrix returns the feature-local transform used by every visual pass.
@@ -86,18 +116,47 @@ func (feature Feature) Matrix() math3d.Mat4 {
 	return feature.Pose.Matrix().Mul(math3d.Scaling(scale.X, scale.Y, scale.Z))
 }
 
+// TurretMatrix articulates a feature-local part about its mounting pivot.
+// The same transform is used for the visible turret and its muzzle anchors.
+func (feature Feature) TurretMatrix(yaw, pitch float64) math3d.Mat4 {
+	pivot := feature.TurretPivot
+	yawMatrix := math3d.Translation(pivot.X, pivot.Y, pivot.Z).
+		Mul(math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, yaw).Matrix()).
+		Mul(math3d.Translation(-pivot.X, -pivot.Y, -pivot.Z))
+	if pitch == 0 {
+		return yawMatrix
+	}
+	barrel := feature.BarrelPivot
+	return yawMatrix.Mul(math3d.Translation(barrel.X, barrel.Y, barrel.Z)).
+		Mul(math3d.QuaternionFromAxisAngle(math3d.Vec3{X: 1}, pitch).Matrix()).
+		Mul(math3d.Translation(-barrel.X, -barrel.Y, -barrel.Z))
+}
+
 type Definition struct {
-	Name             string
-	Frame            scene.FrameID
-	HostDefinition   string
-	LocalPose        kinematics.Pose
-	Bounds           Volume
-	ExitVolume       Volume
-	TileSize         float64
-	TileRadius       int
-	DetailThresholds scene.DetailThresholds
-	Transitions      []Transition
-	Tile             func(TileCoordinate) Tile
+	Name           string
+	Frame          scene.FrameID
+	HostDefinition string
+	// LinkedFrames are other host-bound local environments reachable from this
+	// definition. Unlisted frame IDs remain absolute (e.g. shared/static rooms).
+	LinkedFrames []scene.FrameID
+	LocalPose    kinematics.Pose
+	Bounds       Volume
+	ExitVolume   Volume
+	TileSize     float64
+	TileRadius   int
+	// HorizonTileRadius optionally extends presentation-only terrain beyond the
+	// physical tile stream. HorizonTile must return geometry without collision
+	// or addressable features; this keeps a distant surface cheap while nearby
+	// Tile geometry remains authoritative.
+	HorizonTileRadius int
+	HorizonTile       func(TileCoordinate) Tile
+	DetailThresholds  scene.DetailThresholds
+	// LevelUp is the local horizon reference for optional manual-flight
+	// assistance. Zero deliberately disables leveling for interiors and other
+	// environments without a meaningful open-surface horizon.
+	LevelUp     math3d.Vec3
+	Transitions []Transition
+	Tile        func(TileCoordinate) Tile
 }
 
 // PrepareTile compiles immutable model topology and aggregate render bounds
@@ -110,12 +169,38 @@ func PrepareTile(source Tile) Tile {
 		tile.Parts[index].Mesh = model.Prepare(tile.Parts[index].Mesh)
 		tileBounds = mergeRenderBounds(tileBounds, modelRenderBounds(tile.Parts[index].Mesh, math3d.Identity()))
 	}
+	for index := range tile.PortalParts {
+		tile.PortalParts[index].Mesh = model.Prepare(tile.PortalParts[index].Mesh)
+	}
 	for featureIndex := range tile.Features {
 		feature := &tile.Features[featureIndex]
 		var featureBounds RenderBounds
 		for partIndex := range feature.Parts {
 			feature.Parts[partIndex].Mesh = model.Prepare(feature.Parts[partIndex].Mesh)
 			featureBounds = mergeRenderBounds(featureBounds, modelRenderBounds(feature.Parts[partIndex].Mesh, math3d.Identity()))
+		}
+		for partIndex := range feature.WreckParts {
+			feature.WreckParts[partIndex].Mesh = model.Prepare(feature.WreckParts[partIndex].Mesh)
+			featureBounds = mergeRenderBounds(featureBounds, modelRenderBounds(feature.WreckParts[partIndex].Mesh, math3d.Identity()))
+		}
+		if feature.TurretPart > 0 && feature.TurretPart < len(feature.Parts) {
+			// The turret can point anywhere in its allowed arc. A pivot-centred
+			// sphere conservatively bounds every orientation without per-frame
+			// tile-bound recomputation.
+			part := feature.Parts[feature.TurretPart].Mesh
+			pivotRadius := 0.0
+			for _, vertex := range part.Verts {
+				pivotRadius = max(pivotRadius, vertex.Sub(feature.TurretPivot).Length())
+			}
+			featureBounds = mergeRenderBounds(featureBounds, RenderBounds{Center: feature.TurretPivot, Radius: pivotRadius})
+		}
+		if feature.BarrelPart > 0 && feature.BarrelPart < len(feature.Parts) {
+			part := feature.Parts[feature.BarrelPart].Mesh
+			pivotRadius := 0.0
+			for _, vertex := range part.Verts {
+				pivotRadius = max(pivotRadius, vertex.Sub(feature.TurretPivot).Length())
+			}
+			featureBounds = mergeRenderBounds(featureBounds, RenderBounds{Center: feature.TurretPivot, Radius: pivotRadius})
 		}
 		feature.Bounds = featureBounds
 		tileBounds = mergeRenderBounds(tileBounds, transformRenderBounds(featureBounds, feature.Matrix()))
@@ -177,13 +262,50 @@ type Bound struct {
 }
 
 // Portal is a local-space opening from one room frame into another. Boundary
-// is the ordered planar aperture used by later portal clipping; merely
+// is the ordered planar aperture used for destination-view clipping; merely
 // registering a portal does not make the containing room's background opaque
 // or visible outside that aperture.
 type Portal struct {
 	Name        string
 	Destination scene.FrameID
 	Boundary    []math3d.Vec3
+}
+
+// CrossingPoint reports where a segment actually passes through a convex
+// portal. It is direction-independent, so the same opening can transfer
+// projectiles between either pair of linked flight environments.
+func CrossingPoint(boundary []math3d.Vec3, from, to math3d.Vec3) (math3d.Vec3, bool) {
+	if len(boundary) < 3 {
+		return math3d.Vec3{}, false
+	}
+	origin := boundary[0]
+	var normal math3d.Vec3
+	for index := 2; index < len(boundary); index++ {
+		normal = boundary[index-1].Sub(origin).Cross(boundary[index].Sub(origin))
+		if normal.Length() > 1e-9 {
+			break
+		}
+	}
+	if normal.Length() <= 1e-9 {
+		return math3d.Vec3{}, false
+	}
+	normal = normal.Normalize()
+	first, last := normal.Dot(from.Sub(origin)), normal.Dot(to.Sub(origin))
+	if math.Abs(last) < 1e-8 || first*last > 0 || (math.Abs(first) < 1e-8 && math.Abs(last) < 1e-8) {
+		return math3d.Vec3{}, false
+	}
+	fraction := first / (first - last)
+	if fraction < 0 || fraction >= 1 {
+		return math3d.Vec3{}, false
+	}
+	hit := from.Add(to.Sub(from).Scale(fraction))
+	for index, a := range boundary {
+		b := boundary[(index+1)%len(boundary)]
+		if b.Sub(a).Cross(hit.Sub(a)).Dot(normal) < -1e-7 {
+			return math3d.Vec3{}, false
+		}
+	}
+	return hit, true
 }
 
 func (portal Portal) Validate() error {
@@ -213,6 +335,13 @@ func (portal Portal) Validate() error {
 	for _, point := range portal.Boundary[1:] {
 		if math.Abs(normal.Dot(point.Sub(origin))) > 1e-7 {
 			return fmt.Errorf("portal %q boundary is not planar", portal.Name)
+		}
+	}
+	for index, current := range portal.Boundary {
+		previous := portal.Boundary[(index+len(portal.Boundary)-1)%len(portal.Boundary)]
+		next := portal.Boundary[(index+1)%len(portal.Boundary)]
+		if previous.Sub(current).Cross(next.Sub(current)).Dot(normal) > 1e-7 {
+			return fmt.Errorf("portal %q boundary must be convex", portal.Name)
 		}
 	}
 	return nil
@@ -281,6 +410,11 @@ func (bound Bound) ResolveFrame(frame scene.FrameID) scene.FrameID {
 	if frame == bound.Definition.Frame {
 		return bound.FrameID
 	}
+	for _, linked := range bound.Definition.LinkedFrames {
+		if frame == linked {
+			return scene.FrameID(string(frame) + "/" + strconv.FormatUint(uint64(bound.HostID), 10))
+		}
+	}
 	return frame
 }
 
@@ -305,9 +439,21 @@ func (registry *Registry) Register(def Definition) error {
 	if def.TileSize <= 0 || def.TileRadius < 0 {
 		return fmt.Errorf("environment %q requires a positive tile size and non-negative tile radius", def.Name)
 	}
+	if def.HorizonTileRadius < 0 || (def.HorizonTileRadius > 0 && def.HorizonTile == nil) {
+		return fmt.Errorf("environment %q has an invalid horizon tile configuration", def.Name)
+	}
+	if def.HorizonTileRadius > 0 && def.HorizonTileRadius <= def.TileRadius {
+		return fmt.Errorf("environment %q horizon tile radius must exceed its physical tile radius", def.Name)
+	}
 	if def.DetailThresholds.MediumPixels < 0 || def.DetailThresholds.NearPixels < 0 ||
 		(def.DetailThresholds.NearPixels > 0 && def.DetailThresholds.NearPixels < def.DetailThresholds.MediumPixels) {
 		return fmt.Errorf("environment %q has invalid detail thresholds", def.Name)
+	}
+	if def.LevelUp != (math3d.Vec3{}) {
+		if math.IsNaN(def.LevelUp.X) || math.IsInf(def.LevelUp.X, 0) || math.IsNaN(def.LevelUp.Y) || math.IsInf(def.LevelUp.Y, 0) || math.IsNaN(def.LevelUp.Z) || math.IsInf(def.LevelUp.Z, 0) {
+			return fmt.Errorf("environment %q has a non-finite level-up vector", def.Name)
+		}
+		def.LevelUp = def.LevelUp.Normalize()
 	}
 	if err := def.Bounds.Validate(); err != nil {
 		return fmt.Errorf("environment %q bounds: %w", def.Name, err)
@@ -324,6 +470,15 @@ func (registry *Registry) Register(def Definition) error {
 		}
 		if transition.Duration < 0 {
 			return fmt.Errorf("environment %q transition %q has negative duration", def.Name, transition.Name)
+		}
+		if transition.PreservePose && transition.Duration > 0 {
+			return fmt.Errorf("environment %q transition %q cannot combine pose-preserving portal transfer with a timed cinematic", def.Name, transition.Name)
+		}
+		for _, component := range []float64{transition.ApproachDirection.X, transition.ApproachDirection.Y, transition.ApproachDirection.Z,
+			transition.EntryOffset.X, transition.EntryOffset.Y, transition.EntryOffset.Z} {
+			if math.IsNaN(component) || math.IsInf(component, 0) {
+				return fmt.Errorf("environment %q transition %q has a non-finite portal direction or offset", def.Name, transition.Name)
+			}
 		}
 		if err := transition.Trigger.Validate(); err != nil {
 			return fmt.Errorf("environment %q transition %q: %w", def.Name, transition.Name, err)

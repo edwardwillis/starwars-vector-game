@@ -1,6 +1,7 @@
 package camera
 
 import (
+	"math"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
@@ -52,5 +53,24 @@ func TestZoomIsStoredPerMode(t *testing.T) {
 	camera.Mode = Fixed
 	if camera.Zoom() != 1 {
 		t.Fatalf("fixed zoom changed to %v, want 1", camera.Zoom())
+	}
+}
+
+func TestFixedPoseDoesNotFollowMovingTarget(t *testing.T) {
+	object := catalog.TIEFighter(1, kinematics.Pose{})
+	camera := New(object.ID)
+	pose := kinematics.Pose{
+		Position:    math3d.Vec3{X: 3, Y: 2, Z: -8},
+		Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0),
+	}
+	camera.FixAt(pose)
+	want := pose.ViewMatrix()
+	object.Pose.Position = math3d.Vec3{X: 100, Y: 50, Z: 20}
+	if got := camera.View([]scene.Object{object}); got != want || camera.Mode != Fixed {
+		t.Fatalf("fixed camera moved with target: got=%+v want=%+v mode=%v", got, want, camera.Mode)
+	}
+	camera.ClearFixedView()
+	if got := camera.View(nil); got != math3d.Identity() {
+		t.Fatalf("cleared fixed camera retained view %+v", got)
 	}
 }

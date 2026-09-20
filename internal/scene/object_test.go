@@ -62,3 +62,40 @@ func TestFlatOpaqueSurfaceValidation(t *testing.T) {
 		t.Fatal("line-only mesh accepted as a filled surface")
 	}
 }
+
+func TestTexturedOpaqueSurfaceRequiresMappedFaces(t *testing.T) {
+	part := Part{
+		Mesh: model.Model{
+			Verts: []math3d.Vec3{{}, {X: 1}, {Y: 1}},
+			Faces: []model.Face{{Vertices: []int{0, 1, 2}, UVs: []model.UV{{}, {U: 1}, {V: 1}}}},
+		},
+		Color: color.RGBA{G: 255, A: 255}, LineWidth: 1,
+		Surface: SurfaceMaterial{Mode: SurfaceTexturedOpaque, Color: color.RGBA{A: 255}, TextureID: "test/panel"},
+	}
+	if err := part.Validate(); err != nil {
+		t.Fatalf("mapped textured face rejected: %v", err)
+	}
+	part.Mesh.Faces[0].UVs = nil
+	if err := part.Validate(); err == nil {
+		t.Fatal("textured face without UVs was accepted")
+	}
+}
+
+func TestTranslucentSurfaceValidation(t *testing.T) {
+	part := Part{Mesh: model.Cube(1), LineWidth: 1,
+		Surface: SurfaceMaterial{Mode: SurfaceTranslucent, Color: color.RGBA{R: 80, A: 96}}}
+	if err := part.Validate(); err != nil {
+		t.Fatalf("valid translucent surface: %v", err)
+	}
+	for _, alpha := range []uint8{0, 255} {
+		part.Surface.Color.A = alpha
+		if err := part.Validate(); err == nil {
+			t.Fatalf("accepted translucent alpha %d", alpha)
+		}
+	}
+	part.Surface.Color.A = 96
+	part.Surface.TextureID = "test/glass"
+	if err := part.Validate(); err == nil {
+		t.Fatal("accepted textured glass without face UVs")
+	}
+}

@@ -74,6 +74,40 @@ func TestTIEInterceptorReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
+func TestIntactFightersProvideBackingForFilledScenery(t *testing.T) {
+	fighters := []struct {
+		object scene.Object
+		window string
+	}{
+		{XWing(1, kinematics.Pose{}), "cockpit window"},
+		{TIEFighter(2, kinematics.Pose{}), "windscreen"},
+		{TIEInterceptor(3, kinematics.Pose{}), "cockpit window"},
+		{MillenniumFalcon(4, kinematics.Pose{}), "cockpit windscreen"},
+	}
+	for _, fighter := range fighters {
+		if err := fighter.object.Validate(); err != nil {
+			t.Errorf("%s: %v", fighter.object.Name, err)
+		}
+		foundWindow := false
+		for _, part := range fighter.object.Parts {
+			if len(part.Mesh.Faces) == 0 {
+				continue
+			}
+			if part.Name == fighter.window {
+				foundWindow = true
+				if !part.Surface.Translucent() || part.Surface.Color != windowGlass.Color {
+					t.Errorf("%s window is not translucent glass: %+v", fighter.object.Name, part.Surface)
+				}
+			} else if !part.Surface.Opaque() {
+				t.Errorf("%s part %q lost its opaque backing", fighter.object.Name, part.Name)
+			}
+		}
+		if !foundWindow {
+			t.Errorf("%s has no %q glass part", fighter.object.Name, fighter.window)
+		}
+	}
+}
+
 func TestMillenniumFalconReturnsValidMultipartObject(t *testing.T) {
 	fighter := MillenniumFalcon(1, kinematics.Pose{})
 	if err := fighter.Validate(); err != nil {
@@ -245,8 +279,22 @@ func TestLaserBoltReturnsValidMultipartObject(t *testing.T) {
 	if bolt.Parts[0].Color == bolt.Parts[1].Color {
 		t.Fatal("laser rays and branches use the same color")
 	}
-	if bolt.CollisionRole != scene.CollisionProjectile || bolt.CollisionRadius <= 0 {
+	if bolt.CollisionRole != scene.CollisionProjectile || bolt.CollisionRadius <= 0 || bolt.ProjectileKind != scene.ProjectileLaser {
 		t.Fatal("laser bolt has incorrect collision metadata")
+	}
+}
+
+func TestProtonTorpedoHasDistinctAuthoritativePayload(t *testing.T) {
+	torpedo := ProtonTorpedo(7, kinematics.Pose{})
+	if err := torpedo.Validate(); err != nil {
+		t.Fatalf("ProtonTorpedo returned an invalid object: %v", err)
+	}
+	if torpedo.Definition != ProtonTorpedoName || torpedo.Appearance != ProtonTorpedoAppearance ||
+		torpedo.ProjectileKind != scene.ProjectileProtonTorpedo || torpedo.CollisionRole != scene.CollisionProjectile {
+		t.Fatalf("incorrect torpedo identity: %+v", torpedo)
+	}
+	if _, err := DefaultRegistry().Lookup(ProtonTorpedoName); err != nil {
+		t.Fatalf("torpedo is absent from default catalog: %v", err)
 	}
 }
 

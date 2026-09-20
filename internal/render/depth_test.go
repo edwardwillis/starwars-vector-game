@@ -68,6 +68,37 @@ func TestDepthBufferClearOnlyResetsWrittenPixels(t *testing.T) {
 	}
 }
 
+func TestScaledDepthBufferSamplesInScreenCoordinates(t *testing.T) {
+	buffer := NewScaledDepthBuffer(100, 80, 0.5)
+	if buffer.Width != 50 || buffer.Height != 40 || buffer.ViewWidth != 100 || buffer.ViewHeight != 80 {
+		t.Fatalf("scaled dimensions=%dx%d view=%dx%d", buffer.Width, buffer.Height, buffer.ViewWidth, buffer.ViewHeight)
+	}
+	if !buffer.writeOwned(25, 20, 7, 9) {
+		t.Fatal("could not write scaled depth sample")
+	}
+	if got := buffer.depthAt(50, 40); got != 7 {
+		t.Fatalf("screen-coordinate depth=%v, want 7", got)
+	}
+	if got := buffer.depthAt(-1, 40); !math.IsInf(got, 1) {
+		t.Fatalf("off-screen scaled sample=%v", got)
+	}
+	if got := buffer.nearestOtherAt(50, 40, 1, 8); got != 7 {
+		t.Fatalf("screen-coordinate owner sample=%v, want 7", got)
+	}
+	if got := buffer.nearestOtherAt(50, 40, 1, 9); !math.IsInf(got, 1) {
+		t.Fatalf("owner exclusion returned %v", got)
+	}
+}
+
+func TestScaledDepthRasterUsesFullResolutionProjection(t *testing.T) {
+	pipeline := NewPipeline(100, 80, math.Pi/3, 0.1, 100)
+	buffer := NewScaledDepthBuffer(100, 80, 0.5)
+	pipeline.RasterizeDepth(model.Cube(2), math3d.Translation(0, 0, -5), buffer)
+	if math.IsInf(buffer.depthAt(50, 40), 1) {
+		t.Fatal("scaled raster missed the full-resolution screen centre")
+	}
+}
+
 func TestRenderWithDepthRejectsLineBehindSurface(t *testing.T) {
 	pipeline := NewPipeline(100, 100, math.Pi/2, 0.1, 100)
 	buffer := NewDepthBuffer(100, 100)

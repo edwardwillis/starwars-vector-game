@@ -37,6 +37,8 @@ type Camera struct {
 	TargetID   scene.ObjectID
 	orbitAngle float64
 	zoom       [modeCount]float64
+	fixedView  math3d.Mat4
+	hasFixed   bool
 }
 
 func New(targetID scene.ObjectID) *Camera {
@@ -45,6 +47,9 @@ func New(targetID scene.ObjectID) *Camera {
 
 func (c *Camera) Cycle() {
 	c.Mode = (c.Mode + 1) % modeCount
+	if c.Mode == Fixed {
+		c.ClearFixedView()
+	}
 }
 
 func (c *Camera) Update(seconds float64) {
@@ -61,6 +66,19 @@ func (c *Camera) Zoom() float64 {
 	return c.zoom[c.Mode]
 }
 
+// FixAt freezes a world-space camera pose until ClearFixedView is called.
+// Unlike a chase/orbit camera, subsequent target motion cannot alter the view.
+func (c *Camera) FixAt(pose kinematics.Pose) {
+	c.fixedView = pose.ViewMatrix()
+	c.hasFixed = true
+	c.Mode = Fixed
+}
+
+func (c *Camera) ClearFixedView() {
+	c.fixedView = math3d.Mat4{}
+	c.hasFixed = false
+}
+
 // PullBack increases the orbit camera's distance without affecting the
 // player's normal zoom controls. It is used for short destruction cinematics.
 func (c *Camera) PullBack(amount float64) {
@@ -73,6 +91,9 @@ func (c *Camera) PullBack(amount float64) {
 // longer present, it safely switches to the fixed view.
 func (c *Camera) View(objects []scene.Object) math3d.Mat4 {
 	if c.Mode == Fixed {
+		if c.hasFixed {
+			return c.fixedView
+		}
 		return math3d.Translation(0, 0, c.zoom[Fixed])
 	}
 	target, ok := findObject(objects, c.TargetID)
@@ -109,6 +130,7 @@ func (c *Camera) anchorView(target scene.Object, name string, zoom float64) math
 
 func (c *Camera) fallbackView() math3d.Mat4 {
 	c.Mode = Fixed
+	c.ClearFixedView()
 	return math3d.Translation(0, 0, c.zoom[Fixed])
 }
 

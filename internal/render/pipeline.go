@@ -37,37 +37,39 @@ const (
 // submission timings. A pointer can be attached to Pipeline during
 // development; nil keeps the hot path lightweight.
 type Stats struct {
-	InputVertices, TransformedVertices                                int
-	InputEdges, OutputEdges                                           int
-	TinyEdges                                                         int
-	InputFaces                                                        int
-	BackfaceRejected, PolicyRejected                                  int
-	DepthRejected, ClippedEdges                                       int
-	ObjectsInput, ObjectsCulled                                       int
-	ObjectsVisible                                                    int
-	BillboardObjects, BillboardLines                                  int
-	BillboardBatches                                                  int
-	StarsConsidered, StarsAnalyticRejected                            int
-	StarsGeometryRejected, StarsSubmitted                             int
-	ActiveAnalyticOccluders, ActiveGeometryOccluders                  int
-	DepthCandidateObjects, DepthCandidateParts                        int
-	CandidatesPrepared, ObjectsBoundsRejected                         int
-	GeometryPreparations, FacesClassified, PreparedTriangles          int
-	DepthWritingCandidates, DepthTestingCandidates                    int
-	ActiveDepthDomains                                                int
-	DepthFacesSubmitted, DepthTrianglesRasterized                     int
-	DepthPixelsTested, DepthPixelsWritten                             int
-	LineDepthSamples                                                  int
-	RenderJobs, ActiveEnvironmentTiles                                int
-	EnvironmentTilesInput, EnvironmentTilesBoundsRejected             int
-	EnvironmentFeaturesInput, EnvironmentInstancesPrepared            int
-	EnvironmentPartsBoundsRejected, EnvironmentPartsLODRejected       int
-	EnvironmentFeaturesBoundsRejected, EnvironmentFeaturesLODRejected int
-	DepthEnabledByProfile, DepthEnabledBySelfOcclusion                bool
-	WorldBatches, OpaqueSurfaceCandidates                             int
-	OpaqueTriangles, OpaqueBatches                                    int
-	DepthRasterMS, GeometryMS                                         float64
-	OpaqueSubmitMS, VectorSubmitMS                                    float64
+	InputVertices, TransformedVertices                                     int
+	InputEdges, OutputEdges                                                int
+	TinyEdges                                                              int
+	InputFaces                                                             int
+	BackfaceRejected, PolicyRejected                                       int
+	DepthRejected, ClippedEdges                                            int
+	ObjectsInput, ObjectsCulled                                            int
+	ObjectsVisible                                                         int
+	BillboardObjects, BillboardLines                                       int
+	BillboardBatches                                                       int
+	StarsConsidered, StarsAnalyticRejected                                 int
+	StarsGeometryRejected, StarsSubmitted                                  int
+	ActiveAnalyticOccluders, ActiveGeometryOccluders                       int
+	DepthCandidateObjects, DepthCandidateParts                             int
+	CandidatesPrepared, ObjectsBoundsRejected                              int
+	GeometryPreparations, FacesClassified, PreparedTriangles               int
+	DepthWritingCandidates, DepthTestingCandidates                         int
+	ActiveDepthDomains                                                     int
+	DepthFacesSubmitted, DepthTrianglesRasterized                          int
+	DepthPixelsTested, DepthPixelsWritten                                  int
+	LineDepthSamples                                                       int
+	RenderJobs, ActiveEnvironmentTiles                                     int
+	EnvironmentTilesInput, EnvironmentTilesBoundsRejected                  int
+	EnvironmentFeaturesInput, EnvironmentInstancesPrepared                 int
+	EnvironmentPartsBoundsRejected, EnvironmentPartsLODRejected            int
+	EnvironmentFeaturesBoundsRejected, EnvironmentFeaturesLODRejected      int
+	DepthEnabledByProfile, DepthEnabledBySelfOcclusion                     bool
+	WorldBatches, OpaqueSurfaceCandidates                                  int
+	OpaqueTriangles, OpaqueBatches                                         int
+	TexturedTriangles, TexturedBatches                                     int
+	TranslucentSurfaceCandidates, TranslucentTriangles, TranslucentBatches int
+	DepthRasterMS, GeometryMS                                              float64
+	OpaqueSubmitMS, TranslucentSubmitMS, VectorSubmitMS                    float64
 }
 
 // Ray describes a world-space half-line produced by a screen-space aim point.
@@ -270,14 +272,20 @@ func (p Pipeline) RenderPrepared(geometry *PreparedGeometry, depth *DepthBuffer,
 			X2: (b.X + 1) * 0.5 * float64(p.Width),
 			Y2: (1 - b.Y) * 0.5 * float64(p.Height),
 		}
-		if clipped, ok := clipScreen(line, float64(p.Width), float64(p.Height)); ok {
+		if clipped, clipStart, clipEnd, ok := clipScreenInterval(line, float64(p.Width), float64(p.Height)); ok {
+			// Viewport clipping changes the endpoints of the projected line. Carry
+			// the same interval into reciprocal depth; retaining the original
+			// off-screen endpoint depths can make a distant line appear in front
+			// of a nearer solid near the edge of the viewport.
+			clippedDepthA := perspectiveDepth(depthA, depthB, clipStart)
+			clippedDepthB := perspectiveDepth(depthA, depthB, clipEnd)
 			segments := []Line{clipped}
 			if useDepth {
 				stats := (*Stats)(nil)
 				if p.FineStats {
 					stats = p.Stats
 				}
-				segments = visibleDepthSegments(clipped, depthA, depthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge, stats)
+				segments = visibleDepthSegments(clipped, clippedDepthA, clippedDepthB, depth, owner, p.DepthBias, selfOcclusion, stageMesh, verts, edge, stats)
 				if len(segments) == 0 && p.Stats != nil {
 					p.Stats.DepthRejected++
 				}
@@ -339,7 +347,7 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 		// Perspective-correct interpolation matches the reciprocal-depth
 		// interpolation used by RasterizeDepth. Linear world-depth interpolation
 		// would make oblique edges appear artificially behind their own surfaces.
-		lineDepth := 1 / ((1/depthA)*(1-t) + (1/depthB)*t)
+		lineDepth := perspectiveDepth(depthA, depthB, t)
 		// Use a small relative bias: the line is normally coplanar with the
 		// surface that produced the depth sample, and numerical/raster coverage
 		// error should not make that structural edge sparkle or disappear.
@@ -531,69 +539,52 @@ func clipNear(a, b math3d.Vec3, near float64) (math3d.Vec3, math3d.Vec3, bool) {
 	return a, b, true
 }
 
-const (
-	clipLeft = 1 << iota
-	clipRight
-	clipTop
-	clipBottom
-)
-
 func clipScreen(line Line, width, height float64) (Line, bool) {
-	for {
-		code1 := clipCode(line.X1, line.Y1, width, height)
-		code2 := clipCode(line.X2, line.Y2, width, height)
-		if code1|code2 == 0 {
-			return line, true
-		}
-		if code1&code2 != 0 {
-			return Line{}, false
-		}
+	clipped, _, _, ok := clipScreenInterval(line, width, height)
+	return clipped, ok
+}
 
-		code := code1
-		if code == 0 {
-			code = code2
+// clipScreenInterval applies Liang-Barsky viewport clipping and also returns
+// the retained parameter interval on the original projected segment. The
+// interval is required to keep perspective depth aligned with clipped lines.
+func clipScreenInterval(line Line, width, height float64) (Line, float64, float64, bool) {
+	dx, dy := line.X2-line.X1, line.Y2-line.Y1
+	start, end := 0.0, 1.0
+	clip := func(p, q float64) bool {
+		if math.Abs(p) < 1e-12 {
+			return q >= 0
 		}
-		x, y := 0.0, 0.0
-		switch {
-		case code&clipTop != 0:
-			y = 0
-			x = line.X1 + (line.X2-line.X1)*(y-line.Y1)/(line.Y2-line.Y1)
-		case code&clipBottom != 0:
-			y = height
-			x = line.X1 + (line.X2-line.X1)*(y-line.Y1)/(line.Y2-line.Y1)
-		case code&clipRight != 0:
-			x = width
-			y = line.Y1 + (line.Y2-line.Y1)*(x-line.X1)/(line.X2-line.X1)
-		case code&clipLeft != 0:
-			x = 0
-			y = line.Y1 + (line.Y2-line.Y1)*(x-line.X1)/(line.X2-line.X1)
+		ratio := q / p
+		if p < 0 {
+			if ratio > end {
+				return false
+			}
+			if ratio > start {
+				start = ratio
+			}
+			return true
 		}
-
-		if code == code1 {
-			line.X1, line.Y1 = x, y
-		} else {
-			line.X2, line.Y2 = x, y
+		if ratio < start {
+			return false
 		}
+		if ratio < end {
+			end = ratio
+		}
+		return true
 	}
+	if !clip(-dx, line.X1) || !clip(dx, width-line.X1) ||
+		!clip(-dy, line.Y1) || !clip(dy, height-line.Y1) {
+		return Line{}, 0, 0, false
+	}
+	return interpolateLine(line, start, end), start, end, true
+}
+
+func perspectiveDepth(a, b, t float64) float64 {
+	return 1 / ((1/a)*(1-t) + (1/b)*t)
 }
 
 // ClipLineToViewport exposes the renderer's viewport clipping for camera-facing
 // vector artwork that is projected outside the normal mesh pipeline.
 func ClipLineToViewport(line Line, width, height float64) (Line, bool) {
 	return clipScreen(line, width, height)
-}
-
-func clipCode(x, y, width, height float64) int {
-	code := 0
-	if x < 0 {
-		code |= clipLeft
-	} else if x > width {
-		code |= clipRight
-	}
-	if y < 0 {
-		code |= clipTop
-	} else if y > height {
-		code |= clipBottom
-	}
-	return code
 }

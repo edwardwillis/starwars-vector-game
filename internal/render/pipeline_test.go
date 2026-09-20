@@ -271,6 +271,35 @@ func TestClipScreen(t *testing.T) {
 	}
 }
 
+func TestClipScreenRetainsSourceInterval(t *testing.T) {
+	line := Line{X1: -100, Y1: 50, X2: 300, Y2: 50}
+	clipped, start, end, ok := clipScreenInterval(line, 100, 100)
+	if !ok {
+		t.Fatal("clipScreenInterval rejected a crossing line")
+	}
+	if clipped != (Line{X1: 0, Y1: 50, X2: 100, Y2: 50}) || start != 0.25 || end != 0.5 {
+		t.Fatalf("clipped=%+v interval=[%v,%v], want [0.25,0.5]", clipped, start, end)
+	}
+}
+
+func TestViewportClippingKeepsLineDepthAligned(t *testing.T) {
+	pipeline := NewPipeline(100, 100, math.Pi/2, 0.1, 100)
+	// This oblique line projects from x=-100 to x=100. Its visible half starts
+	// at reciprocal depth 10/3, behind the depth-3 surface. Reusing its original
+	// off-screen depth of 2 would incorrectly leak a segment through that surface.
+	line := model.Model{
+		Verts: []math3d.Vec3{{X: -6, Z: -2}, {X: 10, Z: -10}},
+		Edges: []model.Edge{{A: 0, B: 1, Kind: model.EdgeDecorative}},
+	}
+	depth := NewDepthBuffer(100, 100)
+	for index := range depth.Values {
+		depth.Values[index] = 3
+	}
+	if got := pipeline.RenderWithDepth(line, math3d.Identity(), depth); len(got) != 0 {
+		t.Fatalf("viewport-clipped line leaked through nearer surface: %+v", got)
+	}
+}
+
 func TestProjectPoint(t *testing.T) {
 	pipeline := NewPipeline(800, 600, math.Pi/2, 0.1, 100)
 	point, visible := pipeline.ProjectPoint(math3d.Vec3{Z: -2})
@@ -285,6 +314,39 @@ func TestProjectPoint(t *testing.T) {
 	}
 	if _, visible := pipeline.ProjectPoint(math3d.Vec3{X: 10, Z: -1}); visible {
 		t.Fatal("ProjectPoint accepted a point outside the screen")
+	}
+}
+
+func TestTexturedFaceUVSurvivesNearPlaneClipping(t *testing.T) {
+	pipeline := NewPipeline(100, 100, math.Pi/2, 1, 100)
+	mesh := model.Model{
+		Verts: []math3d.Vec3{
+			{X: -1, Y: -1, Z: -2}, {X: 1, Y: -1, Z: -2}, {X: 1, Y: 1, Z: -0.5}, {X: -1, Y: 1, Z: -0.5},
+		},
+		Faces: []model.Face{{Vertices: []int{0, 1, 2, 3}, DoubleSided: true,
+			UVs: []model.UV{{U: 0, V: 0}, {U: 1, V: 0}, {U: 1, V: 1}, {U: 0, V: 1}}}},
+	}
+	geometry := pipeline.PrepareGeometry(mesh, math3d.Identity(), true)
+	if len(geometry.Triangles) == 0 {
+		t.Fatal("clipped textured face produced no triangles")
+	}
+	interpolated := false
+	for _, triangle := range geometry.Triangles {
+		for index, point := range [...]Point{triangle.A, triangle.B, triangle.C} {
+			if point.Depth < 1-1e-9 {
+				t.Fatalf("triangle escaped near clip: %+v", point)
+			}
+			uv := triangle.UVs[index]
+			if uv.V > 0 && uv.V < 1 {
+				interpolated = true
+				if math.Abs(uv.V-2.0/3.0) > 1e-9 {
+					t.Fatalf("clipped UV=%+v, want V=2/3", uv)
+				}
+			}
+		}
+	}
+	if !interpolated {
+		t.Fatal("near-plane clipping did not interpolate UV")
 	}
 }
 

@@ -28,6 +28,21 @@ func TestWorldStepAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestWorldAccumulatesAuthoritativeProjectileTravel(t *testing.T) {
+	projectile := catalog.ProtonTorpedo(8, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	projectile.Motion.Speed = 12
+	world, err := New([]scene.Object{projectile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Step(0.25); err != nil {
+		t.Fatal(err)
+	}
+	if got := world.Objects[0].ProjectileTravel; got != 3 {
+		t.Fatalf("projectile travel=%v, want 3", got)
+	}
+}
+
 func TestWorldCommandsAreValidatedAndOrdered(t *testing.T) {
 	a := catalog.TIEFighter(3, kinematics.Pose{})
 	b := catalog.TIEFighter(1, kinematics.Pose{})
@@ -43,5 +58,29 @@ func TestWorldCommandsAreValidatedAndOrdered(t *testing.T) {
 	}
 	if err := w.Apply(Remove{ID: 99}); err == nil {
 		t.Fatal("missing removal accepted")
+	}
+}
+
+func TestFeatureDamageEventsAreSnapshotSafeAndTickScoped(t *testing.T) {
+	world, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	world.FeatureEvents = append(world.FeatureEvents, FeatureDamageEvent{
+		Tick: world.Tick, HostID: 4, Frame: "test/surface", FeatureID: "tile/cannon", Hits: 2, Disabled: true,
+	})
+	snapshot := world.Snapshot()
+	if len(snapshot.FeatureEvents) != 1 || !snapshot.FeatureEvents[0].Disabled {
+		t.Fatalf("snapshot events=%+v", snapshot.FeatureEvents)
+	}
+	snapshot.FeatureEvents[0].Hits = 99
+	if world.FeatureEvents[0].Hits != 2 {
+		t.Fatal("snapshot aliases authoritative feature events")
+	}
+	if err := world.Step(0.1); err != nil {
+		t.Fatal(err)
+	}
+	if len(world.FeatureEvents) != 0 {
+		t.Fatal("previous-tick damage events persisted into the next tick")
 	}
 }

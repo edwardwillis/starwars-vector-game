@@ -33,6 +33,9 @@ func TestFireLaserUsesMuzzlePoseAndInheritedSpeed(t *testing.T) {
 	if spawn.OwnerID != shooter.ID || spawn.Lifetime != LaserLifetime {
 		t.Fatalf("unexpected spawn metadata: %+v", spawn)
 	}
+	if spawn.Object.Team != shooter.Team {
+		t.Fatalf("bolt team=%q, want shooter team %q", spawn.Object.Team, shooter.Team)
+	}
 }
 
 func TestFireLaserRejectsMissingMuzzle(t *testing.T) {

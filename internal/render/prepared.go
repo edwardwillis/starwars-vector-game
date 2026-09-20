@@ -10,6 +10,7 @@ import (
 type PreparedTriangle struct {
 	Face    int
 	A, B, C Point
+	UVs     [3]model.UV
 }
 
 // PreparedGeometry owns the camera-relative results shared by every visual
@@ -22,6 +23,7 @@ type PreparedGeometry struct {
 	FaceFront   []bool
 	Edges       []model.Edge
 	Triangles   []PreparedTriangle
+	clipScratch []PreparedTriangle
 	edgeScratch []model.Edge
 }
 
@@ -186,24 +188,40 @@ func (p Pipeline) prepareSurfaceTriangles(geometry *PreparedGeometry) {
 				inside = false
 			}
 		}
-		if inside && topology != nil && faceIndex+1 < len(topology.FaceTriangleOffsets) {
-			start, end := topology.FaceTriangleOffsets[faceIndex], topology.FaceTriangleOffsets[faceIndex+1]
-			for _, triangle := range topology.FaceTriangles[start:end] {
-				p.appendPreparedTriangle(geometry, faceIndex, geometry.Vertices[triangle.A], geometry.Vertices[triangle.B], geometry.Vertices[triangle.C])
+		if inside && len(face.UVs) == len(face.Vertices) && len(face.UVs) > 0 {
+			for index := 1; index+1 < len(face.Vertices); index++ {
+				p.appendPreparedTriangle(geometry, faceIndex,
+					surfaceVertex{position: geometry.Vertices[face.Vertices[0]], uv: face.UVs[0]},
+					surfaceVertex{position: geometry.Vertices[face.Vertices[index]], uv: face.UVs[index]},
+					surfaceVertex{position: geometry.Vertices[face.Vertices[index+1]], uv: face.UVs[index+1]})
 			}
 			continue
 		}
-		polygon := make([]math3d.Vec3, 0, len(face.Vertices)+2)
-		for _, index := range face.Vertices {
-			if index < 0 || index >= len(geometry.Vertices) {
+		if inside && topology != nil && faceIndex+1 < len(topology.FaceTriangleOffsets) {
+			start, end := topology.FaceTriangleOffsets[faceIndex], topology.FaceTriangleOffsets[faceIndex+1]
+			for _, triangle := range topology.FaceTriangles[start:end] {
+				p.appendPreparedTriangle(geometry, faceIndex,
+					surfaceVertex{position: geometry.Vertices[triangle.A]},
+					surfaceVertex{position: geometry.Vertices[triangle.B]},
+					surfaceVertex{position: geometry.Vertices[triangle.C]})
+			}
+			continue
+		}
+		polygon := make([]surfaceVertex, 0, len(face.Vertices)+2)
+		for corner, vertexIndex := range face.Vertices {
+			if vertexIndex < 0 || vertexIndex >= len(geometry.Vertices) {
 				polygon = nil
 				break
 			}
-			polygon = append(polygon, geometry.Vertices[index])
+			vertex := surfaceVertex{position: geometry.Vertices[vertexIndex]}
+			if len(face.UVs) == len(face.Vertices) {
+				vertex.uv = face.UVs[corner]
+			}
+			polygon = append(polygon, vertex)
 		}
-		polygon = clipPolygonZ(polygon, -p.Near, true)
+		polygon = clipSurfacePolygonZ(polygon, -p.Near, true)
 		if p.Far > p.Near {
-			polygon = clipPolygonZ(polygon, -p.Far, false)
+			polygon = clipSurfacePolygonZ(polygon, -p.Far, false)
 		}
 		for index := 1; index+1 < len(polygon); index++ {
 			p.appendPreparedTriangle(geometry, faceIndex, polygon[0], polygon[index], polygon[index+1])
@@ -211,14 +229,54 @@ func (p Pipeline) prepareSurfaceTriangles(geometry *PreparedGeometry) {
 	}
 }
 
-func (p Pipeline) appendPreparedTriangle(geometry *PreparedGeometry, face int, a, b, c math3d.Vec3) {
+type surfaceVertex struct {
+	position math3d.Vec3
+	uv       model.UV
+}
+
+func clipSurfacePolygonZ(polygon []surfaceVertex, plane float64, keepBelow bool) []surfaceVertex {
+	if len(polygon) == 0 {
+		return nil
+	}
+	inside := func(vertex surfaceVertex) bool {
+		if keepBelow {
+			return vertex.position.Z <= plane
+		}
+		return vertex.position.Z >= plane
+	}
+	out := make([]surfaceVertex, 0, len(polygon)+1)
+	previous := polygon[len(polygon)-1]
+	previousInside := inside(previous)
+	for _, current := range polygon {
+		currentInside := inside(current)
+		if currentInside != previousInside {
+			t := (plane - previous.position.Z) / (current.position.Z - previous.position.Z)
+			out = append(out, surfaceVertex{
+				position: previous.position.Add(current.position.Sub(previous.position).Scale(t)),
+				uv: model.UV{
+					U: previous.uv.U + (current.uv.U-previous.uv.U)*t,
+					V: previous.uv.V + (current.uv.V-previous.uv.V)*t,
+				},
+			})
+		}
+		if currentInside {
+			out = append(out, current)
+		}
+		previous, previousInside = current, currentInside
+	}
+	return out
+}
+
+func (p Pipeline) appendPreparedTriangle(geometry *PreparedGeometry, face int, a, b, c surfaceVertex) {
 	project := func(vertex math3d.Vec3) Point {
 		projected := p.Projection.TransformPoint(vertex)
 		return Point{
 			X: (projected.X + 1) * 0.5 * float64(p.Width), Y: (1 - projected.Y) * 0.5 * float64(p.Height), Depth: -vertex.Z,
 		}
 	}
-	geometry.Triangles = append(geometry.Triangles, PreparedTriangle{Face: face, A: project(a), B: project(b), C: project(c)})
+	geometry.Triangles = append(geometry.Triangles, PreparedTriangle{Face: face,
+		A: project(a.position), B: project(b.position), C: project(c.position),
+		UVs: [3]model.UV{a.uv, b.uv, c.uv}})
 }
 
 func resizeVec3(values []math3d.Vec3, length int) []math3d.Vec3 {

@@ -11,6 +11,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
 const (
@@ -62,6 +63,7 @@ type TargetingConfig struct {
 
 type CombatConfig struct {
 	Laser         combat.LaserConfig
+	Torpedo       combat.TorpedoConfig
 	FireInterval  float64
 	FireWindow    float64
 	MaxFireEvents int
@@ -77,9 +79,11 @@ type ShieldConfig struct {
 
 type PlayerConfig struct {
 	Object          string
+	Team            scene.TeamID
 	InitialPose     kinematics.Pose
 	AutopilotMotion kinematics.Motion
 	Flight          control.ManualConfig
+	AutoLevel       control.AutoLevelConfig
 	Shield          ShieldConfig
 }
 
@@ -89,6 +93,7 @@ type DifficultyConfig struct {
 
 type SwarmConfig struct {
 	Object           string
+	Team             scene.TeamID
 	Count            int
 	Controller       string
 	Flight           control.Limits
@@ -100,6 +105,31 @@ type SwarmConfig struct {
 	SpawnRadius      float64
 	RespawnDistance  float64
 	Pursuit          control.PursuitConfig
+}
+
+// SurfaceCombatConfig tunes authoritative local-environment gameplay without
+// changing orbital motion or the global simulation clock. Values are profile
+// data so difficulty modes and downstream games can select a different pace.
+type SurfaceCombatConfig struct {
+	CruiseSpeed         float64
+	MaxForward          float64
+	Acceleration        float64
+	InitialAttackers    int
+	MaxAttackers        int
+	ReinforcementDelay  float64
+	CannonRange         float64
+	CannonFireMinGap    float64
+	CannonFireMaxGap    float64
+	CannonAimError      float64
+	CannonTraverseSpeed float64
+	CannonYawLimit      float64
+	CannonPitchLimit    float64
+	CannonFireTolerance float64
+	CannonBoltLifetime  float64
+	MaxActiveCannons    int
+	MinimumAltitude     float64
+	TerrainLookAhead    float64
+	GuidanceStrength    float64
 }
 
 type ObjectPlacement struct {
@@ -124,6 +154,7 @@ type GameProfile struct {
 	Combat     CombatConfig
 	Player     PlayerConfig
 	Swarm      SwarmConfig
+	Surface    SurfaceCombatConfig
 	World      WorldConfig
 	Difficulty DifficultyConfig
 }
@@ -135,6 +166,10 @@ func Pilot() GameProfile {
 	// Gameplay units use the X-Wing's 1050 km/h specification as the baseline;
 	// the TIE's 1200 km/h maximum is represented as a 15% advantage.
 	manual.MaxForward = 3.0
+	autoLevel := control.AutoLevelConfig{
+		Enabled: true, CorrectionGain: 2.4, MaxRollRate: 1.2,
+		AngleDeadzone: math.Pi / 180, TurnDeadzone: 0.05,
+	}
 	pursuit := control.DefaultPursuitConfig()
 	pursuit.PreferredDistance = 10.0
 	pursuit.MinSpeed = 2.80
@@ -202,13 +237,14 @@ func Pilot() GameProfile {
 		Targeting: TargetingConfig{AimRadius: 190, AimConvergence: 30},
 		Combat: CombatConfig{
 			Laser:         combat.DefaultLaserConfig(),
+			Torpedo:       combat.DefaultTorpedoConfig(),
 			FireInterval:  0.12,
 			FireWindow:    1.5,
 			MaxFireEvents: 3,
 			BeamTime:      0.08,
 		},
 		Player: PlayerConfig{
-			Object: "builtin/x-wing",
+			Object: "builtin/x-wing", Team: scene.TeamAlliance,
 			InitialPose: kinematics.Pose{
 				// Start close enough for the Death Star to read as the immediate
 				// play-space landmark while remaining safely outside its forward
@@ -221,7 +257,8 @@ func Pilot() GameProfile {
 				YawRate:  0.22,
 				RollRate: 0.16,
 			},
-			Flight: manual,
+			Flight:    manual,
+			AutoLevel: autoLevel,
 			Shield: ShieldConfig{
 				Maximum:          8,
 				LaserDamage:      1,
@@ -230,7 +267,7 @@ func Pilot() GameProfile {
 			},
 		},
 		Swarm: SwarmConfig{
-			Object:     "builtin/tie-fighter",
+			Object: "builtin/tie-fighter", Team: scene.TeamEmpire,
 			Count:      5,
 			Controller: control.PursuitName,
 			Flight: control.Limits{
@@ -251,6 +288,14 @@ func Pilot() GameProfile {
 			SpawnRadius:      12.0,
 			RespawnDistance:  48.0,
 			Pursuit:          pursuit,
+		},
+		Surface: SurfaceCombatConfig{
+			CruiseSpeed: 4.5, MaxForward: 5.5, Acceleration: 3.4,
+			InitialAttackers: 3, MaxAttackers: 5, ReinforcementDelay: 4,
+			CannonRange: 82, CannonFireMinGap: 0.8, CannonFireMaxGap: 1.45,
+			CannonAimError: 4.8, CannonBoltLifetime: 2.3, MaxActiveCannons: 4,
+			CannonTraverseSpeed: 2.4, CannonYawLimit: 1.55, CannonPitchLimit: 1.5, CannonFireTolerance: 0.09,
+			MinimumAltitude: 5.5, TerrainLookAhead: 18, GuidanceStrength: 0.85,
 		},
 		World: WorldConfig{Objects: []ObjectPlacement{{
 			Definition: "builtin/death-star",
@@ -279,6 +324,12 @@ func Cadet() GameProfile {
 	profile.Swarm.Pursuit.AttackMaxGap = 8
 	profile.Swarm.Pursuit.AttackFireMinGap = 1.3
 	profile.Swarm.Pursuit.AttackFireMaxGap = 2.1
+	profile.Surface.InitialAttackers = 2
+	profile.Surface.MaxAttackers = 3
+	profile.Surface.ReinforcementDelay = 5.5
+	profile.Surface.MaxActiveCannons = 2
+	profile.Surface.CannonFireMinGap = 1.2
+	profile.Surface.CannonFireMaxGap = 2.0
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -298,6 +349,10 @@ func Ace() GameProfile {
 	profile.Swarm.Pursuit.AttackMaxGap = 4.0
 	profile.Swarm.Pursuit.AttackFireMinGap = 0.65
 	profile.Swarm.Pursuit.AttackFireMaxGap = 1.1
+	profile.Surface.ReinforcementDelay = 3.2
+	profile.Surface.MaxActiveCannons = 5
+	profile.Surface.CannonFireMinGap = 0.65
+	profile.Surface.CannonFireMaxGap = 1.15
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -321,6 +376,12 @@ func Nightmare() GameProfile {
 	profile.Swarm.Pursuit.AttackMaxGap = 2.5
 	profile.Swarm.Pursuit.AttackFireMinGap = 0.45
 	profile.Swarm.Pursuit.AttackFireMaxGap = 0.85
+	profile.Surface.InitialAttackers = 4
+	profile.Surface.MaxAttackers = 7
+	profile.Surface.ReinforcementDelay = 2.2
+	profile.Surface.MaxActiveCannons = 6
+	profile.Surface.CannonFireMinGap = 0.45
+	profile.Surface.CannonFireMaxGap = 0.9
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -374,8 +435,14 @@ func (profile GameProfile) Validate() error {
 	if profile.Player.Object == "" {
 		return fmt.Errorf("player object definition is required")
 	}
+	if profile.Player.Team == scene.TeamNeutral {
+		return fmt.Errorf("player team is required")
+	}
 	if profile.Swarm.Object == "" {
 		return fmt.Errorf("swarm object definition is required")
+	}
+	if profile.Swarm.Team == scene.TeamNeutral || profile.Swarm.Team == profile.Player.Team {
+		return fmt.Errorf("swarm requires a team opposing the player")
 	}
 	for index, placement := range profile.World.Objects {
 		if placement.Definition == "" {
@@ -442,6 +509,9 @@ func (profile GameProfile) Validate() error {
 	if err := profile.Combat.Laser.Validate(); err != nil {
 		return fmt.Errorf("combat: %w", err)
 	}
+	if err := profile.Combat.Torpedo.Validate(); err != nil {
+		return fmt.Errorf("combat: %w", err)
+	}
 	if err := validatePositive("fire interval", profile.Combat.FireInterval); err != nil {
 		return err
 	}
@@ -456,6 +526,12 @@ func (profile GameProfile) Validate() error {
 	}
 	if err := validateManual(profile.Player.Flight); err != nil {
 		return fmt.Errorf("player flight: %w", err)
+	}
+	if err := validateAutoLevel(profile.Player.AutoLevel); err != nil {
+		return fmt.Errorf("player auto-level: %w", err)
+	}
+	if err := validateSurfaceCombat(profile.Surface); err != nil {
+		return fmt.Errorf("surface combat: %w", err)
 	}
 	if profile.Player.Shield.Maximum <= 0 || profile.Player.Shield.LaserDamage <= 0 || profile.Player.Shield.CollisionDamage <= 0 {
 		return fmt.Errorf("shield maximum and damage values must be positive")
@@ -512,6 +588,19 @@ func validateManual(config control.ManualConfig) error {
 	})
 }
 
+func validateAutoLevel(config control.AutoLevelConfig) error {
+	if config.CorrectionGain < 0 || config.MaxRollRate < 0 || config.AngleDeadzone < 0 || config.TurnDeadzone < 0 || config.TurnDeadzone > 1 {
+		return fmt.Errorf("rates and deadzones must be non-negative and turn deadzone must not exceed 1")
+	}
+	if !config.Enabled {
+		return nil
+	}
+	if config.CorrectionGain == 0 || config.MaxRollRate == 0 {
+		return fmt.Errorf("enabled assistance requires positive correction gain and maximum roll rate")
+	}
+	return nil
+}
+
 func validateLimits(config control.Limits) error {
 	values := []struct {
 		name  string
@@ -528,6 +617,53 @@ func validateLimits(config control.Limits) error {
 		if err := validatePositive(value.name, value.value); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateSurfaceCombat(config SurfaceCombatConfig) error {
+	positive := []struct {
+		name  string
+		value float64
+	}{
+		{"cruise speed", config.CruiseSpeed},
+		{"maximum forward speed", config.MaxForward},
+		{"acceleration", config.Acceleration},
+		{"reinforcement delay", config.ReinforcementDelay},
+		{"cannon range", config.CannonRange},
+		{"cannon minimum fire gap", config.CannonFireMinGap},
+		{"cannon maximum fire gap", config.CannonFireMaxGap},
+		{"cannon bolt lifetime", config.CannonBoltLifetime},
+		{"cannon traverse speed", config.CannonTraverseSpeed},
+		{"cannon yaw limit", config.CannonYawLimit},
+		{"cannon pitch limit", config.CannonPitchLimit},
+		{"cannon fire tolerance", config.CannonFireTolerance},
+		{"minimum altitude", config.MinimumAltitude},
+		{"terrain look-ahead", config.TerrainLookAhead},
+		{"guidance strength", config.GuidanceStrength},
+	}
+	for _, value := range positive {
+		if err := validatePositive(value.name, value.value); err != nil {
+			return err
+		}
+	}
+	if config.MaxForward < config.CruiseSpeed {
+		return fmt.Errorf("maximum forward speed must not be below cruise speed")
+	}
+	if config.InitialAttackers < 0 || config.MaxAttackers < config.InitialAttackers {
+		return fmt.Errorf("attacker counts are invalid")
+	}
+	if config.MaxActiveCannons < 0 {
+		return fmt.Errorf("maximum active cannons cannot be negative")
+	}
+	if config.CannonFireMaxGap < config.CannonFireMinGap {
+		return fmt.Errorf("cannon fire gap range is invalid")
+	}
+	if config.CannonYawLimit > math.Pi || config.CannonPitchLimit > math.Pi/2 || config.CannonFireTolerance > math.Pi/2 {
+		return fmt.Errorf("cannon traverse angle is invalid")
+	}
+	if err := validateNonNegative("cannon aim error", config.CannonAimError); err != nil {
+		return err
 	}
 	return nil
 }

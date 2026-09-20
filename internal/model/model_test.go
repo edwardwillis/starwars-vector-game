@@ -22,6 +22,28 @@ func TestCubeHasExpectedTopology(t *testing.T) {
 	}
 }
 
+func TestFaceUVValidationAndTransformPreservation(t *testing.T) {
+	mesh := Model{
+		Verts: []math3d.Vec3{{}, {X: 1}, {Y: 1}},
+		Faces: []Face{{Vertices: []int{0, 1, 2}, UVs: []UV{{U: 0}, {U: 1}, {V: 1}}}},
+	}
+	if err := mesh.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	transformed := Transform(mesh, math3d.Translation(3, 4, 5))
+	if len(transformed.Faces[0].UVs) != 3 || transformed.Faces[0].UVs[1] != (UV{U: 1}) {
+		t.Fatalf("transform lost face UVs: %+v", transformed.Faces[0].UVs)
+	}
+	merged := Merge(transformed, transformed)
+	if len(merged.Faces) != 2 || merged.Faces[1].UVs[2] != (UV{V: 1}) {
+		t.Fatalf("merge lost face UVs: %+v", merged.Faces)
+	}
+	mesh.Faces[0].UVs = mesh.Faces[0].UVs[:2]
+	if err := mesh.Validate(); err == nil {
+		t.Fatal("accepted face with incomplete UVs")
+	}
+}
+
 func TestPolygonModelsReturnClosedFaceMeshes(t *testing.T) {
 	polygons := Cube(2).PolygonModels()
 	if len(polygons) != 6 {

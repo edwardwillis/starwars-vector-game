@@ -488,6 +488,26 @@ layout and preserves authoritative installation/destruction state. This first
 representation may use a locally planar tangent patch; later curvature or
 host-surface remapping must preserve the same environment and tile contracts.
 
+Keep the physical tile radius distinct from an optional, larger visual-horizon
+radius. Horizon tiles follow only the viewed craft and contain presentation
+geometry without installations, collision, targeting, point occlusion, or CPU
+depth writes/rasterization. Its vectors may cheaply test depth already written
+by foreground structures so distant terrain cannot show through them. This
+extends the apparent surface cheaply without
+multiplying authoritative work for every nearby actor. Coplanar grid vectors
+must not depth-test against their own supporting face; other physical surfaces
+may still occlude them, avoiding shallow-angle depth instability and shimmer.
+
+Manual near-surface flight includes optional horizon assistance, enabled in
+the default profile. An environment explicitly declares its local level/up
+axis; enclosed rooms or frames without a meaningful horizon leave it unset.
+When the player supplies neither yaw nor roll input, the assist applies the
+shortest bounded local-roll correction toward level flight while preserving
+heading and pitch. Explicit turning/rolling always wins, orbital flight is
+unchanged, and `L` toggles the assistance at runtime. Correction gain, maximum
+roll rate, angle deadzone, and turn-input deadzone are profile data rather than
+game-loop constants.
+
 Rendered tiles and collision tiles are generated from the same validated
 module definitions so visible floors, trench sides, trench bottoms, towers,
 cannon emplacements, antennae, and block structures have matching collision
@@ -497,6 +517,52 @@ oriented boxes or other simple convex bounds for structures. Projectiles use
 the same earliest-time-of-impact query. Broad-phase tile bounds reject distant
 features before narrow-phase tests; collision geometry is independent of visual
 LOD, so a hidden far-detail feature cannot become non-physical accidentally.
+
+#### Surface-installation variety and destruction — Step 20 slice
+
+This slice precedes the first flyable hangar. Replace the current shared
+scaled-cube tower/cannon placeholder with a small reusable catalog of distinct
+Death Star installations: at least a stepped tower, a recognizable laser-cannon
+emplacement, a slender aerial/antenna, and a low block or vent structure.
+Keep the original arcade vocabulary of sparse green vectors, strong silhouettes,
+and large negative spaces. Models should have valid faces, winding, bounds, and
+opaque physical surfaces so they use the existing culling, depth, and prepared
+frame pipeline; do not add installation-specific renderer branches. A feature
+prototype owns its immutable model parts and a simple matching collider or
+small compound of colliders. Use the existing instance transform and scale
+rather than building a fresh mesh per tile.
+
+Choose feature kinds, orientation, size, and clustering with a deterministic
+tile-coordinate seed. Preserve stable feature IDs and destroyed/damaged state
+when tiles stream out and back in. Keep useful low-clutter flight corridors,
+make a few larger installations visible as navigation landmarks, and avoid
+placing destructible modules across the open trench route or future hangar
+approach. Visual LOD may suppress small antennas and surface detail, but must
+never change authoritative collision, targeting, cannon activity, or damage.
+
+Replace the single hit-to-disappear behavior with a small authoritative
+per-feature damage contract: type-specific durability, hit location/normal,
+active/disabled/destroyed state, and a deterministic destruction event.
+Fragile aerials may fail on one hit; armored towers and cannon bases should
+survive at least an initial hit where gameplay balance allows. Cannon fire
+stops when the emplacement is disabled. On impact, show a short bounded vector
+flash/spark; on destruction, emit a few short-lived fragments with momentum
+from the impact and leave an appropriate inert wreck/base or scorch outline
+before optional cleanup. Keep persistent wreck collision only where the visible
+remnant warrants it. These effects must be capped, frame-aware, and derived
+from simulation events so multiple players see the same outcome; they must not
+be driven by tile visibility or render timing.
+
+Implement in this order: reusable geometry/collider prototypes; deterministic
+placement and landmark density; per-feature hit state and cannon disablement;
+bounded impact/fracture presentation; then interactive tuning. Add deterministic
+tests for feature identity and layout across tile regeneration, collider/visual
+alignment, targetability and damage transitions, cannon shutdown, wreck
+persistence, and non-interaction across frames. Check prepared-candidate,
+depth, triangle, and vector counts while approaching a dense feature cluster;
+reuse aggregate bounds and LOD rather than expanding every tile into render
+work. Do not fold the separate flyable hangar, interiors, or exhaust-port bomb
+mechanic into this slice.
 
 If a shielded fighter survives contact, resolve it to the contact boundary and
 apply a deterministic deflection, slide, or stop response plus a short contact
@@ -1066,6 +1132,83 @@ closed ends, and an addressable exhaust port in the terminal floor. Local entry
 starts above ordinary surface with the trench nearby rather than placing the
 fighter inside it.
 
+The streamed surface now has two ranges: a compact physical neighborhood around
+relevant craft and a larger visual-only horizon centered on the viewed craft.
+The outer shell preserves deck and trench line art but strips features,
+colliders, targeting metadata, sparse-point occlusion, and CPU depth writes.
+Its lines remain depth-test-only so foreground structures occlude the distant
+surface without rasterizing the horizon geometry itself.
+Surface grid strokes also bypass self-depth sampling to prevent distant
+coplanar lines sparkling at grazing camera angles.
+
+The Death Star environment declares local `+Y` as its level reference. Default
+player profiles enable bounded surface auto-level assistance; the manual
+control layer supplies a roll-only correction when yaw and roll are
+uncommanded, with a runtime `L` toggle and HUD state. The correction is generic
+to any environment that declares a level axis and does not activate in exterior
+space or enclosed rooms by assumption.
+
+Near-surface combat now has a profile-owned flight and encounter envelope rather
+than changing the global simulation clock. Surface entry raises the viewed
+craft to a faster local cruise speed, permits a higher local maximum, and starts
+one deterministic host/frame-scoped encounter. The direct development entry and
+the ordinary orbital transition share this path. Initial attackers and capped
+reinforcement waves reuse registered craft and controllers; an optional
+controller engagement hook removes only the initial idle gap while preserving
+ordinary attack-run behavior.
+
+Combat allegiance is explicit `scene.TeamID` data. Controller targeting selects
+and then retains an eligible targetable hostile in the same spatial frame; it
+does not infer factions from models, colors, or a hard-coded local-player ID.
+This is the baseline contract for multiple players and allied autonomous craft.
+Environment encounters are created once per bound host/frame, do not restart
+for each participant, and select available participants by team. All scheduling
+uses fixed-tick simulation time, stable IDs, sorted choices, and deterministic
+seeds.
+
+Addressable surface features carry team identity. Nearby cannon installations
+use persistent per-feature cooldown state, select the nearest hostile in their
+frame, lead imperfectly, and emit faction-styled projectiles under configurable
+range, cadence, lifetime, accuracy, active-cannon, and projectile caps. Visual
+tile visibility cannot activate or retime the encounter. Feature destruction
+and cooldowns survive visual tile streaming; friendly projectiles may be
+physically stopped by friendly installations but cannot destroy them.
+
+Planned follow-up — traversing surface cannons: separate each cannon's fixed
+base from a yawing/pitching turret and barrel assembly. Keep target selection
+and predicted aim in authoritative simulation state, then slew the assembly
+toward that aim under configurable traverse speed and angle limits. Fire only
+when the muzzle has a valid line of fire and is sufficiently aligned; derive
+both the rendered turret pose and projectile origin/direction from the same
+orientation so bolts never appear to leave a sideways barrel. Preserve the
+current forward-arc restriction as a mechanical traverse limit, not a static
+model orientation. Keep per-feature aim state stable across visual tile
+streaming and deterministic for multiple players; damage/disablement must
+stop tracking and firing. Use ordinary articulated part transforms and the
+existing visibility/collision pipeline, with no cannon-specific renderer path.
+Test target acquisition, slew and limits, moving-target lead, firing alignment,
+obstruction, tile regeneration, and cross-frame/team exclusions.
+
+Status (2026-09-17): the cannon foundation stays fixed while a separate turret
+housing yaws and its paired barrels yaw/elevate around authored pivots. Stable
+per-installation simulation state slews toward imperfect predictive aim under
+profile-controlled limits; firing waits for alignment and a clear path past
+other installations. Both the visible barrels and the bolt's origin/direction
+use the same articulated transform. The existing conservative installation
+colliders remain fixed; exact moving-barrel collision is a separate refinement
+if playtesting shows the approximation is noticeable.
+
+Autonomous surface flight composes terrain guidance around the existing pursuit
+decision. The guidance samples authoritative deck or trench-floor planes for
+predicted clearance and nearby installation boxes for forward obstruction,
+then adds bounded climb and lateral avoidance intent before the existing
+acceleration and angular-rate limits are applied. It therefore preserves normal
+pursuit, attack arcs, trench-floor flight, and smooth physical steering.
+Short-lived, capped vector impact sparks and close crossing attack waves provide
+speed and battle cues without adding persistent collision geometry. Projectiles retain
+only a one-tile neighboring collision stream rather than allocating the full
+physical tile square around every long-lived bolt.
+
 Local collision uses swept fighter/projectile spheres against finite planes
 and oriented boxes generated alongside the visible tile geometry. Surviving
 fighter contacts resolve outside the collider, deflect and slow the craft, and
@@ -1117,8 +1260,131 @@ engaging.
 The player starts well back in open space while the initial formation is
 already active near the hangar, making the launch and approach visible before
 the first player shot.
-next tuning work is procedural surface density, landmark visibility, trench
-dimensions, and installation combat feedback through interactive play.
+The surface-installation slice now has four shared sparse solid prototypes:
+stepped towers, paired-barrel cannons, sensor aerials, and low armored vents.
+Deterministic tile seeds vary orientation, proportions, rare tall landmarks,
+and occasional vent/aerial clusters without changing stable feature IDs.
+Prototype-local collider components and cannon muzzle anchors use the same
+instance transform as their visible geometry; static cannons select targets
+within their forward firing arc so bolts do not pass through their own bodies.
+Per-bound-environment hit state survives tile regeneration: aerials fail in one
+hit, towers/vents in two, and cannons disable after two hits before breaking on
+the third. Hits tint the
+structure and emit capped sparks; final hits emit short-lived moving shards
+and leave a non-colliding persistent scorch foundation. The render path uses
+ordinary prepared candidates, bounds, opacity, and depth rather than special
+installation drawing. Deterministic geometry, regeneration, damage, firing,
+and collision tests cover the slice. Each hit also emits a tick-scoped
+`sim.FeatureDamageEvent` in snapshots, separating the authoritative outcome
+from its bounded spark/shard presentation; future multiplayer synchronization
+must include persistent feature state for late joiners. Interactive
+visual/performance tuning of the new silhouettes and effect timing remains the
+acceptance check before the first flyable hangar/portal interior; trench
+dimensions can be tuned there too.
+
+The first flyable Death Star hangar is now an open-front, host-bound room on
+the near-surface deck. A surface doorway and matching interior portal provide
+bidirectional, heading-gated frame transfers that retain the fighter's
+orientation, lateral position and motion; a short inward nudge prevents
+immediate trigger bounce. The exterior shell and interior floor, walls, roof
+and back wall have matching collision boundaries. Sparse landing guides and
+ceiling ribs preserve the vector style. Through the open doorway, a bounded
+set of ordinary surface tiles is retained and rendered through the prepared
+pipeline. Exterior lines and prepared physical triangles are clipped against
+the projected convex doorway before depth, point occlusion, fill or vector
+submission; the open portal exposes skyfield. The same authored opening is
+now considered from both linked frames. Adjacent-frame fighters and other
+ordinary scene objects enter the prepared frame with the doorway clip; laser
+bolts crossing its finite polygon transfer authoritatively into the adjacent
+frame with continuous pose and velocity. Interactive review should check actor
+and bolt continuity on both sides. Near-plane clipping of the portal polygon,
+source-side collision ordering for a bolt that traverses a doorway in one tick,
+and target acquisition across a visible opening remain focused follow-ups.
+
+### Mission split — Battle of Yavin first, Battle of Endor deferred
+
+The current playable mission is explicitly the Battle of Yavin assault on the
+first, completed Death Star. Do not introduce an interior reactor-shaft route
+into this mission. The hangar remains an optional flyable location and a useful
+validation of portals/interiors, but its rear wall is closed and it is not a
+path to the station's reactor.
+
+The Battle of Yavin mission loop is:
+
+1. arrive from hyperspace in orbital space and survive/engage the defending
+   fighter swarm;
+2. approach the Death Star and transition into near-surface flight;
+3. cross the surface, attack or evade installations, locate the finite trench,
+   and enter it through ordinary continuous flight;
+4. fly the trench under pressure from pursuing fighters, surface cannon fire,
+   walls and authored obstacles;
+5. reach the terminal exhaust port and deliver a proton torpedo into it under
+   explicit range, alignment and approach constraints;
+6. escape the trench during a short authoritative countdown;
+7. show the Death Star destruction/outcome cut scene, award success, and enter
+   a clear completed mission state. Destruction, timeout or a missed attack run
+   enters a clear failed/retry state without silently resetting mission state.
+
+Existing foundations already cover orbital combat, approach presentation,
+surface flight, a finite trench and terminal exhaust-port feature, surface
+installations, collisions, pursuit across the orbital/surface boundary, and
+the general cut-scene/camera primitives. The next Yavin slice must supply the
+missing mission mechanics rather than more renderer architecture:
+
+- a small authoritative mission/objective state machine independent of camera
+  and draw timing;
+- a proton-torpedo weapon distinct from laser bolts, with catalog definition,
+  finite ammunition, player command/cooldown, faction style and deterministic
+  projectile state;
+- an exhaust-port target contract that accepts only a valid torpedo attack and
+  reports why invalid laser, angle, range or direction attempts fail;
+- trench-run checkpoints and an attack-run reset/retry policy that preserves
+  identity, score and multiplayer ownership;
+- an escape countdown and a deterministic station-destruction event consumed
+  by presentation/cut-scene code;
+- HUD cues for current objective, torpedo count, target lock/readiness,
+  countdown and success/failure, while keeping targeting state authoritative;
+- tests for objective ordering, invalid shortcuts, torpedo/exhaust-port impact,
+  multiplayer ownership/team rules, escape success, timeout/failure and replay.
+
+Implement this in the cheapest gameplay-first order: mission state and tests;
+torpedo catalog/command; exhaust-port validation; trench checkpoints and HUD;
+escape/destruction outcome; then cinematic polish and balance. Do not require a
+new rendering abstraction for any of these steps.
+
+Status: the first two authoritative Yavin slices are implemented in
+the renderer-independent simulation world and snapshots. It enforces the legal
+ordered phases `orbital battle -> approach -> surface assault -> trench run ->
+exhaust-port attack -> escape -> success`, with failure available from any
+active phase and deterministic restart to orbital battle. Gameplay advances
+the implemented phases from authoritative player frame/transition and physical
+trench-region data; camera and render visibility are not inputs. Player
+destruction fails the mission, the direct surface-development start advances
+through the skipped phases explicitly, mission changes emit tick-scoped events,
+and the debug HUD reports the current objective. Proton torpedoes are now
+catalogued, visually distinct projectiles with finite player ammunition, a
+dedicated command/cooldown, authoritative ownership/team identity, and travel
+distance accumulated by the simulation. The terminal exhaust port accepts only
+an Alliance player's proton torpedo inside the configured arming/range,
+alignment, and forward/downward approach envelope. Invalid payload, owner,
+range, aim, or direction attempts retain the attack objective and publish an
+authoritative reason; a valid impact advances to escape. Escape completion and
+success remain deliberately unreachable until the countdown/outcome slice.
+The main player's first-person cockpit also has a compact vector targeting
+computer that names the current objective and uses a restrained red direction
+arrow. Its target is semantic mission geometry rather than whatever happens to
+be rendered: the host Death Star in orbital/approach phases, the nearest valid
+trench guide point during surface assault, and the authored exhaust-port point
+during the trench/attack phases. Camera-space direction handling continues to
+guide when the objective is off-screen or behind the fighter.
+
+The interior-superstructure assault is reserved for a later Battle of Endor
+mode against the incomplete second Death Star. That mode may use open structural
+flight volumes, tunnels and rooms leading to a reactor chamber followed by a
+timed escape. It should reuse the generic host-bound frame, room, portal,
+collision, prepared-frame and projectile-transfer contracts, but have its own
+mission profile, environment registrations, objectives and set pieces. Nothing
+specific to Death Star II should be registered or active in the Yavin mission.
 
 ## Approved renderer migration — model-switch handoff (2026-09-05)
 
@@ -1285,36 +1551,47 @@ tests and documentation; do not carry obsolete no-op modes forward as if real.
 
 ### Implementation checkpoints and verification
 
-- [ ] Capture baseline deterministic workloads BEFORE renderer changes: TIE,
-  X-Wing, orbital sphere/dish, deck/trench/tower scene, repeated instances and
-  several fixed/rotated camera poses. Record input topology, output segments,
-  elapsed time and allocations. Compare like-for-like geometry separately from
-  topology-migration changes; no invented percentage or blanket performance claim.
-- [ ] Compile topology and add normal/winding/adjacency/degeneracy tests first.
-- [ ] Repair primitives, then major models and debris. Test multiple viewpoints,
+- [x] Capture deterministic correctness workloads for the TIE, X-Wing, orbital
+  sphere/dish, deck/trench/tower scene, repeated instances and fixed/rotated
+  camera poses. The original pre-migration elapsed-time/allocation baseline was
+  not captured and must not be reconstructed or claimed retroactively.
+- [ ] Establish repeatable current performance baselines for orbital,
+  near-surface, trench, interior/portal, showcase and dense-combat views. Record
+  input topology, prepared/output work, elapsed time and allocations so future
+  changes have a trustworthy comparison point.
+- [x] Compile topology and add normal/winding/adjacency/degeneracy tests first.
+- [x] Repair primitives, then major models and debris. Test multiple viewpoints,
   transformed classification, boundary/silhouette/internal/decorative behavior.
-- [ ] Remove bypasses; enforce baseline back-face behavior in every mode. Update
+- [x] Remove bypasses; enforce baseline back-face behavior in every mode. Update
   old tests such as TestRenderCubeProducesEveryEdge to the approved semantics.
-- [ ] Add bounds, frame queue, hierarchy and LOD. Test spheres outside/inside/
+- [x] Add bounds, prepared-frame queue, practical tile/feature hierarchy and
+  projected-size LOD. Test spheres outside/inside/
   intersecting frustum, off-centre/scaled bounds, hysteresis and module rejection.
-- [ ] Add robust polygon/line frustum and viewport clipping and tiny-edge tests,
-  including near-plane crossings and huge potential projected coordinates.
-- [ ] Integrate five profiles across gameplay, showcase, surface and transition.
-- [ ] Add shared depth and partial-line tests: crossing occluders, self-occlusion,
+- [x] Add robust near/far polygon clipping, line viewport clipping and tiny-edge
+  tests, including near-plane crossings and huge potential projected coordinates.
+- [ ] Complete general side-frustum polygon clipping; current portal-aperture and
+  near/far clipping cover implemented scenes but do not constitute the fully
+  general polygon-frustum contract originally requested.
+- [x] Integrate five profiles across gameplay, showcase, surface and transition.
+- [x] Add shared depth and partial-line tests: crossing occluders, self-occlusion,
   submission-order independence, varying depth, bias and thin geometry.
-- [ ] Expose per-frame HUD/debug counters only when debug info is requested:
+- [x] Expose per-frame HUD/debug counters only when debug info is requested:
   objects input/culled/surviving; modules culled; faces input/classified/back/front;
   vertices transformed; input edges; rejection by back adjacency, policy, LOD,
   tiny length and depth; clipped edges; final segments submitted; depth work.
   Separate rejected edges from generated visible segments to avoid misleading
   counts when hidden-line splitting increases segment count.
-- [ ] Format touched code; run package/full tests and vet, plus benchmarks. Use
-  virtual X11 if available for Ebitengine tests; otherwise report the limitation
-  and compile the game tests separately. Exercise interactive slider, cockpit,
-  showcase, surface/trench, transitions and disintegration when display permits.
-- [ ] Report measured before/after workload and allocation results, regressions
-  and tradeoffs. Document new-model authoring requirements and confirm that a
-  future Interceptor needs only topology/LOD data, registration and its own tests.
+- [x] Format touched code; run package/full tests and vet. The installed
+  Xvfb-backed `make test` target covers the Ebitengine suite without a physical
+  display. Interactive reviews have exercised the slider, cockpit, showcase,
+  surface/trench, transitions and disintegration paths.
+- [x] Document the new-model authoring requirements and validate them with the
+  TIE Interceptor as a normal topology/LOD/catalog consumer without renderer
+  special cases.
+- [ ] Maintain a checked-in benchmark/report covering representative before/after
+  workload, allocation, regression and quality tradeoffs. Recent near-surface
+  profiling is useful evidence but is not yet the durable multi-view baseline
+  required by this checkpoint.
 
 ### Resume notes
 
@@ -1437,11 +1714,12 @@ cockpit's physical topology. It should:
 
 Focused model, topology, winding, adjacency, culling, clipping, depth, profile,
 catalog, environment, and registry tests pass; `go vet ./...` passes; the game
-package compiles with `go test -c`. Full Ebitengine runtime tests and interactive
-visual checks still require an X11 display in this environment. Remaining work
-is robust side-frustum polygon clipping, tile/module bounds and hierarchy,
-allocation/workload benchmarks, richer stage counters, visual regression checks,
-and any model-specific topology corrections found during those checks. The
+package compiles with `go test -c`. Xvfb is now installed and `make test` runs
+the complete Ebitengine-backed suite successfully without a physical display;
+interactive visual acceptance still requires running the game. Remaining work
+is general side-frustum polygon clipping, durable multi-view
+allocation/workload benchmarks, visual regression checks, and any topology
+corrections found during those checks. The
 TIE Interceptor now exercises the post-migration catalog, appearance, topology,
 occlusion, weapon-style, showcase, and destruction contracts.
 
@@ -1617,8 +1895,8 @@ Add deterministic tests for the Interceptor before adding it to a live profile:
 The acceptance test is that adding the Interceptor consists of model data,
 catalog/appearance registration, specification/style data, and focused tests—
 not changes to renderer branches, camera logic, HUD type switches, or the
-simulation loop. Run renderer/model/catalog tests and `go vet ./...`; compile
-the game package separately when no X11 display is available. Interactive
+simulation loop. Run renderer/model/catalog tests and `go vet ./...`; use the
+Xvfb-backed `make test` target for the complete game suite. Interactive
 validation should cover all five realism levels, cockpit/chase/follow views,
 rapid panel rotations, skyfield occlusion, laser fire, collisions, and the
 full two-stage disintegration sequence.
@@ -1707,6 +1985,120 @@ analytic tests, geometry/depth tests, opaque triangle batches, raster/depth work
 and submission time. Select optimizations from measured scene cost rather than
 assuming that minimum overdraw always means minimum frame time.
 
+### Retained screen-space vector overlays — planned refinement (2026-09-20)
+
+Cockpit instrumentation, menus, showcase specification panels, mission text,
+reticles and debug information are presentation overlays, not physical scene
+geometry. They must not enter `preparedFrame`, world/view transformation,
+frustum or bounds culling, LOD selection, face classification, surface
+triangulation, point occlusion, CPU depth domains, hidden-line resolution, or
+world visibility statistics. Their known screen-space draw order is sufficient.
+This decision applies to a first-person cockpit representation only; the
+externally viewed cockpit/canopy on a fighter remains ordinary physical model
+geometry and continues through the full visibility pipeline.
+
+Use this explicit frame composition:
+
+```text
+resolved world view
+  -> generalized background
+  -> filled physical surfaces
+  -> depth-resolved world vectors and effects
+  -> cockpit overlay
+       -> retained static frame/artwork
+       -> retained labels and instrument furniture
+       -> small dynamic value/cue batches
+  -> menus, mission messages and optional debug overlay
+```
+
+Opaque or translucent cockpit regions may cover the completed world through
+ordinary final-layer source-over composition. This is legitimate overlay
+composition, not a physical occlusion mask, and must not cause cockpit artwork
+to be registered as a depth writer or scene occluder.
+
+Implement a deliberately small retained screen-space vector facility rather
+than a general UI framework. A suitable concrete design is:
+
+```go
+type OverlayLayer struct {
+    Static  []VectorBatch
+    Dynamic []VectorBatch
+}
+
+type VectorBatch struct {
+    Color color.RGBA
+    Width float32
+    Path  vector.Path
+}
+```
+
+The exact names may change, but retain these properties:
+
+- paths use logical screen coordinates and are clipped only to the viewport;
+- lines are grouped by color, width and blend policy before Ebitengine
+  submission;
+- immutable artwork and glyph topology are compiled once and shared;
+- static paths/vertex data are retained across frames rather than reconstructed;
+- dynamic batches are rebuilt only when their value or geometry changes;
+- value invalidation uses explicit compact keys such as shield value, speed
+  bucket, mission revision, ammunition count, selected fighter or realism
+  profile—not an unconditional per-frame rebuild;
+- moving cues such as a targeting arrow remain tiny dynamic batches and never
+  force rebuilding the surrounding instrument panel;
+- authoritative values come from the simulation snapshot, while layout,
+  caching, color and visibility remain client-local presentation state; and
+- overlay batching is independent of the realism profile and cannot activate
+  physical scene depth.
+
+Do not use an off-screen texture merely to avoid organizing vector geometry if
+retained vector paths or reusable vertex/index buffers provide the same result.
+A cached image is appropriate only for a genuinely static, expensive layer and
+only after measurement shows that one image composite is cheaper on the target
+backend. Preserve the vector appearance regardless of the chosen cache form.
+
+Migrate incrementally in this order:
+
+1. Add overlay-specific counters and a deterministic cockpit workload so the
+   current submission/allocation cost is recorded before migration.
+2. Extract immutable glyph definitions from draw functions and compile text
+   into batched paths without per-glyph maps, slices or draw calls.
+3. Move the static first-person cockpit frame, shield outline and fixed labels
+   into retained batches.
+4. Move shield digits, speed, torpedo count, objective status and targeting
+   cues into independently invalidated dynamic batches.
+5. Move controls/restart cards, pause/quit prompts, realism selector and the
+   fighter-showcase specification panel onto the same overlay facility.
+6. Remove superseded immediate-mode helpers once no caller depends on them;
+   keep one simple immediate path only for rare development diagnostics if it
+   is measurably harmless.
+
+Instrumentation should distinguish `overlay static batches`, `overlay dynamic
+batches`, `overlay vectors`, `overlay rebuilds`, `overlay submissions`, overlay
+CPU time and overlay allocation count from world geometry statistics. Normal
+gameplay must not collect fine counters unless diagnostics are visible.
+
+Add deterministic tests for glyph/path compilation, centering and viewport
+clipping; batch separation by style; static-batch reuse; dynamic invalidation;
+mission/ammunition changes rebuilding only their owning batch; cockpit overlay
+exclusion from prepared candidates and depth domains; and final layer ordering.
+Keep screenshot tests secondary to math/state tests.
+
+Acceptance criteria:
+
+- enabling cockpit instrumentation does not change prepared candidate, face,
+  triangle, depth-writer or hidden-line sample counts;
+- an unchanged cockpit frame performs no overlay geometry rebuilds;
+- one changing instrument does not rebuild unrelated artwork;
+- ordinary cockpit presentation has bounded, near-zero per-frame allocations;
+- overlay submissions scale with style batches, not glyph/segment count; and
+- representative orbital, near-surface, trench and interior benchmarks remain
+  within the frame budget with the overlay enabled and disabled.
+
+This refinement is performance isolation as well as code organization: future
+interior cockpit artwork may grow substantially without increasing the cost of
+physical visibility resolution, and future renderer changes cannot
+accidentally treat UI decoration as world topology.
+
 ### Immediate implementation order
 
 1. Add missing per-phase counters and deterministic surface/interior workloads.
@@ -1723,6 +2115,9 @@ assuming that minimum overdraw always means minimum frame time.
 7. Add flat opaque triangle surfaces first, then textured materials and finally
    sorted translucent materials; do not make filled rendering a prerequisite
    for the vector modes.
+8. Extract cockpit and UI artwork into the retained screen-space overlay path
+   above, beginning with glyph batching and the static cockpit frame before
+   migrating dynamic instruments and secondary cards/panels.
 
 Status (2026-09-13): items 1–6 are complete. Gameplay, showcase, and the
 implemented approach-transition cut scene now produce the same prepared
@@ -1761,7 +2156,7 @@ renderer. Portal destination rendering and aperture-constrained background
 projection remain a later consumer of this metadata, to be introduced with the
 first concrete interior rather than speculated into the core pipeline.
 
-Item 7 is in progress. Its first and foundational increment is complete:
+Item 7's flat and textured opaque increments are complete:
 `scene.Part` may opt into a validated flat opaque surface material while the
 zero value remains vector-only. Filled surfaces reuse the prepared,
 camera-facing, near/far-clipped triangles; only opted-in triangles incur a
@@ -1771,9 +2166,47 @@ prebatched background naturally, those candidates skip redundant sparse-star
 geometry tests while retaining ordinary physical depth participation. HUD
 diagnostics report opaque candidates, triangles, batches and submission time.
 
-No existing model opts into fill yet, preserving the current visual output.
-The first concrete interior or surface-artifact workload should select where
-flat fill materially improves the scene and supply before/after measurements.
-Texture asset identifiers and batching are the next Item 7 increment; sorted
-translucent/glass materials remain last and must not complicate the proven
-opaque path.
+The Death Star near-surface environment is the first concrete flat-fill
+workload. Streamed deck faces use a neutral grey opaque material and the trench
+floor/walls a slightly darker grey beneath their existing luminous green
+vector edges. These candidates still write/test physical depth for scene lines but no
+longer participate in sparse star-versus-triangle tests: the batched GPU fill
+covers the prebatched skyfield naturally. Deterministic preparation tests guard
+that separation. Interactive review should compare star geometry rejection,
+opaque candidates/triangles/batches, depth work, opaque submission time and
+overall responsiveness before adopting fill more widely.
+
+Textured opaque surfaces now use optional per-face UVs that remain attached to
+the authored face through model preparation, transforms, merges and near/far
+clipping. A small immutable CPU texture registry owns RGBA data by ID; the game
+creates Ebitengine images lazily on the render thread. The existing far-to-near
+opaque order is preserved, with consecutive same-texture triangles submitted
+in bounded batches. HUD diagnostics distinguish textured triangles/batches
+from the total opaque workload. The first restrained use is the physical Death
+Star deck: subtle low-contrast procedural plating under its existing green
+vectors, while distant horizon tiles remain flat and inexpensive. Flat fills,
+wireframe presentation, depth/point visibility and all five realism profiles
+continue through the same prepared-frame path.
+
+Item 7 is complete. `SurfaceTranslucent` accepts a flat tint or registered
+texture with material alpha strictly between 0 and 255. It reuses prepared,
+camera-facing, clipped triangles and shares the stable far-to-near surface
+order with opaque fills, so nearer opaque faces cover farther glass while
+nearer glass blends over opaque surfaces. Translucent parts do not write the
+CPU depth buffer or reject background points; their vector outlines still
+use ordinary depth testing. The X-Wing, TIE fighter, TIE Interceptor, and
+Millennium Falcon cockpit windows share the restrained amber-glass material;
+their surrounding hulls, pylons, and corridor remain opaque. HUD diagnostics
+separate translucent candidates, triangles,
+batches and submission time from opaque work. This is a painter-sorted edge
+case, not an exact solution for intersecting translucent polygons; add a more
+expensive visibility treatment only when a concrete scene demonstrates need.
+Before applying textures to large oblique near-camera geometry, assess affine
+UV interpolation artifacts and subdivide only where visibly necessary; do not
+impose that cost on flat or small surfaces.
+
+Item 8 is planned and specified above. The recent mission-computer work exposed
+the cost of rebuilding glyph maps and submitting individual vector segments;
+the immediate batching cleanup is only the first step. Complete the retained
+overlay boundary before substantially expanding cockpit or interior
+instrumentation.

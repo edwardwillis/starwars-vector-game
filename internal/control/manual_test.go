@@ -1,9 +1,11 @@
 package control
 
 import (
+	"math"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 )
 
 func TestApplyChangesSpeedGradually(t *testing.T) {
@@ -16,6 +18,36 @@ func TestApplyChangesSpeedGradually(t *testing.T) {
 	motion = Apply(motion, Intent{Throttle: -1}, config, 1)
 	if motion.Speed != 0 {
 		t.Fatalf("speed is %v after opposing throttle, want 0", motion.Speed)
+	}
+}
+
+func TestAutoLevelRollRateCorrectsBankWithoutChangingHeading(t *testing.T) {
+	config := AutoLevelConfig{Enabled: true, CorrectionGain: 2, MaxRollRate: 1, AngleDeadzone: 0.01}
+	banked := math3d.QuaternionFromYawPitchRoll(0.4, -0.2, 0.5)
+	rate := AutoLevelRollRate(banked, math3d.Vec3{Y: 1}, config)
+	if rate >= 0 || math.Abs(rate+1) > 1e-9 {
+		t.Fatalf("positive bank correction=%v, want capped negative roll", rate)
+	}
+	pose := kinematics.Pose{Orientation: banked}
+	beforeForward := pose.Forward()
+	pose = kinematics.Integrate(pose, kinematics.Motion{RollRate: rate}, 0.1)
+	if beforeForward.Dot(pose.Forward()) < 0.999999 {
+		t.Fatalf("roll correction changed heading: before=%+v after=%+v", beforeForward, pose.Forward())
+	}
+}
+
+func TestAutoLevelRollRateHonorsDeadzoneAndUndefinedHorizon(t *testing.T) {
+	config := AutoLevelConfig{Enabled: true, CorrectionGain: 2, MaxRollRate: 1, AngleDeadzone: 0.05}
+	if got := AutoLevelRollRate(math3d.QuaternionFromYawPitchRoll(0, 0, 0.02), math3d.Vec3{Y: 1}, config); got != 0 {
+		t.Fatalf("small bank produced correction %v", got)
+	}
+	vertical := math3d.QuaternionFromYawPitchRoll(0, math.Pi/2, 0)
+	if got := AutoLevelRollRate(vertical, math3d.Vec3{Y: 1}, config); got != 0 {
+		t.Fatalf("undefined vertical horizon produced correction %v", got)
+	}
+	config.Enabled = false
+	if got := AutoLevelRollRate(math3d.QuaternionFromYawPitchRoll(0, 0, 0.5), math3d.Vec3{Y: 1}, config); got != 0 {
+		t.Fatalf("disabled assist produced correction %v", got)
 	}
 }
 

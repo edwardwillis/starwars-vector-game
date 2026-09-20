@@ -38,7 +38,10 @@ const (
 // visibility/depth processing while the boundary remains available for
 // topology-aware fracture and edge classification.
 type Face struct {
-	Vertices    []int
+	Vertices []int
+	// UVs are normalized texture coordinates in the same order as Vertices.
+	// An empty slice keeps untextured vector/flat models allocation-free.
+	UVs         []UV
 	Normal      math3d.Vec3
 	PlaneD      float64
 	DoubleSided bool
@@ -47,6 +50,8 @@ type Face struct {
 	// construction edge would reintroduce an internal line.
 	OccluderOnly bool
 }
+
+type UV struct{ U, V float64 }
 
 // FaceTriangle is one immutable fan-triangulation entry for an authored face.
 // It is shared by every instance and avoids rebuilding ordinary unclipped
@@ -100,7 +105,7 @@ func Prepare(source Model) Model {
 	result.Edges = append([]Edge(nil), source.Edges...)
 	result.Faces = make([]Face, len(source.Faces))
 	for index, face := range source.Faces {
-		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
+		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), UVs: append([]UV(nil), face.UVs...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	result.Topology = compileTopology(result.Verts, result.Edges, result.Faces)
 	for index := range result.Faces {
@@ -140,7 +145,11 @@ func OrientOutward(source Model) Model {
 		if normal.Dot(faceCenter.Sub(center)) < 0 {
 			reverseFaceIndices(vertices)
 		}
-		result.Faces[index] = Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
+		uvs := append([]UV(nil), face.UVs...)
+		if normal.Dot(faceCenter.Sub(center)) < 0 {
+			reverseUVs(uvs)
+		}
+		result.Faces[index] = Face{Vertices: vertices, UVs: uvs, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	return Prepare(result)
 }
@@ -148,6 +157,12 @@ func OrientOutward(source Model) Model {
 func reverseFaceIndices(indices []int) {
 	for left, right := 0, len(indices)-1; left < right; left, right = left+1, right-1 {
 		indices[left], indices[right] = indices[right], indices[left]
+	}
+}
+
+func reverseUVs(uvs []UV) {
+	for left, right := 0, len(uvs)-1; left < right; left, right = left+1, right-1 {
+		uvs[left], uvs[right] = uvs[right], uvs[left]
 	}
 }
 
@@ -311,6 +326,14 @@ func (m Model) Validate() error {
 		if len(face.Vertices) < 3 {
 			return fmt.Errorf("face %d: has %d vertices, want at least 3", faceIndex, len(face.Vertices))
 		}
+		if len(face.UVs) != 0 && len(face.UVs) != len(face.Vertices) {
+			return fmt.Errorf("face %d: has %d UVs, want %d", faceIndex, len(face.UVs), len(face.Vertices))
+		}
+		for _, uv := range face.UVs {
+			if math.IsNaN(uv.U) || math.IsInf(uv.U, 0) || math.IsNaN(uv.V) || math.IsInf(uv.V, 0) {
+				return fmt.Errorf("face %d: non-finite UV", faceIndex)
+			}
+		}
 		for _, vertex := range face.Vertices {
 			if vertex < 0 || vertex >= len(m.Verts) {
 				return fmt.Errorf("face %d: vertex index %d out of range", faceIndex, vertex)
@@ -339,7 +362,7 @@ func (m Model) PolygonModels() []Model {
 			polygon.Verts[index] = m.Verts[vertex]
 			polygon.Edges = append(polygon.Edges, Edge{A: index, B: (index + 1) % len(face.Vertices), Kind: EdgeStructural, Importance: 1})
 		}
-		polygon.Faces = []Face{{Vertices: polygonVertexIndices(len(polygon.Verts))}}
+		polygon.Faces = []Face{{Vertices: polygonVertexIndices(len(polygon.Verts)), UVs: append([]UV(nil), face.UVs...)}}
 		polygons = append(polygons, Prepare(polygon))
 	}
 	return polygons
@@ -365,7 +388,7 @@ func Transform(source Model, transform math3d.Mat4) Model {
 		result.Verts[index] = transform.TransformPoint(vertex)
 	}
 	for index, face := range source.Faces {
-		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
+		result.Faces[index] = Face{Vertices: append([]int(nil), face.Vertices...), UVs: append([]UV(nil), face.UVs...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly}
 	}
 	result.Topology = nil
 	result = Prepare(result)
@@ -392,7 +415,7 @@ func Merge(models ...Model) Model {
 			for index, vertex := range face.Vertices {
 				vertices[index] = base + vertex
 			}
-			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
+			result.Faces = append(result.Faces, Face{Vertices: vertices, UVs: append([]UV(nil), face.UVs...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
 		}
 	}
 	return Prepare(result)
@@ -437,7 +460,7 @@ func MergeWelded(models ...Model) Model {
 			for index, vertex := range face.Vertices {
 				vertices[index] = indices[vertex]
 			}
-			result.Faces = append(result.Faces, Face{Vertices: vertices, DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
+			result.Faces = append(result.Faces, Face{Vertices: vertices, UVs: append([]UV(nil), face.UVs...), DoubleSided: face.DoubleSided, OccluderOnly: face.OccluderOnly})
 		}
 	}
 	return Prepare(result)

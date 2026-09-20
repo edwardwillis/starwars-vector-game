@@ -23,6 +23,26 @@ func TestPilotShowsControlsForTenSeconds(t *testing.T) {
 	}
 }
 
+func TestPilotEnablesSurfaceAutoLevelByDefault(t *testing.T) {
+	assist := Pilot().Player.AutoLevel
+	if !assist.Enabled || assist.CorrectionGain <= 0 || assist.MaxRollRate <= 0 {
+		t.Fatalf("default surface auto-level=%+v", assist)
+	}
+}
+
+func TestPilotDefinesFasterSurfaceCombat(t *testing.T) {
+	configured := Pilot()
+	if configured.Player.Team == configured.Swarm.Team || configured.Player.Team == "" || configured.Swarm.Team == "" {
+		t.Fatalf("combat teams are not opposing: player=%q swarm=%q", configured.Player.Team, configured.Swarm.Team)
+	}
+	if configured.Surface.CruiseSpeed <= configured.Player.Flight.MaxForward || configured.Surface.MaxForward < configured.Surface.CruiseSpeed {
+		t.Fatalf("surface flight does not increase pace: orbital=%v surface=%+v", configured.Player.Flight.MaxForward, configured.Surface)
+	}
+	if configured.Surface.InitialAttackers <= 0 || configured.Surface.MaxActiveCannons <= 0 {
+		t.Fatalf("surface encounter has no initial pressure: %+v", configured.Surface)
+	}
+}
+
 func TestBuiltinResolvesStableNames(t *testing.T) {
 	for _, name := range []string{CadetName, PilotName, AceName, NightmareName} {
 		profile, err := Builtin(name)
@@ -52,6 +72,9 @@ func TestDifficultyProfilesIncreasePressure(t *testing.T) {
 	if !(cadet.Swarm.Pursuit.MaxSpeed < pilot.Swarm.Pursuit.MaxSpeed && pilot.Swarm.Pursuit.MaxSpeed < ace.Swarm.Pursuit.MaxSpeed && ace.Swarm.Pursuit.MaxSpeed < nightmare.Swarm.Pursuit.MaxSpeed) {
 		t.Fatal("maximum swarm speed does not increase across difficulty profiles")
 	}
+	if !(cadet.Surface.MaxActiveCannons < pilot.Surface.MaxActiveCannons && pilot.Surface.MaxActiveCannons < nightmare.Surface.MaxActiveCannons) {
+		t.Fatal("surface cannon pressure does not increase across difficulty profiles")
+	}
 }
 
 func TestCloneOwnsSwarmPositions(t *testing.T) {
@@ -78,6 +101,9 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "missing rendering profile", mutate: func(profile *GameProfile) { profile.Display.RenderingProfile = "" }},
 		{name: "swarm position mismatch", mutate: func(profile *GameProfile) { profile.Swarm.InitialPositions = nil }},
 		{name: "invalid shield", mutate: func(profile *GameProfile) { profile.Player.Shield.Maximum = 0 }},
+		{name: "invalid auto-level", mutate: func(profile *GameProfile) { profile.Player.AutoLevel.MaxRollRate = 0 }},
+		{name: "same combat team", mutate: func(profile *GameProfile) { profile.Swarm.Team = profile.Player.Team }},
+		{name: "invalid surface speed", mutate: func(profile *GameProfile) { profile.Surface.MaxForward = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
