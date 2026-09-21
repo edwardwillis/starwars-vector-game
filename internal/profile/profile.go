@@ -415,6 +415,13 @@ func Builtin(name string) (GameProfile, error) {
 	}
 }
 
+// Builtins returns the curated difficulty profiles in their intended menu
+// order. Each call constructs independent profile values so callers may select
+// or validate them without sharing mutable slice storage.
+func Builtins() []GameProfile {
+	return []GameProfile{Cadet(), Pilot(), Ace(), Nightmare()}
+}
+
 // Clone protects a running session from mutations to caller-owned slices.
 func (profile GameProfile) Clone() GameProfile {
 	profile.Swarm.InitialPositions = append([]math3d.Vec3(nil), profile.Swarm.InitialPositions...)

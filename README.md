@@ -113,7 +113,9 @@ go test ./...
 go run .
 ```
 
-Select a curated profile when starting the game:
+The title screen selects the mission and one of the curated `Cadet`, `Pilot`,
+`Ace`, or `Nightmare` difficulty profiles. The optional command-line profile
+chooses the difficulty initially highlighted by the game shell:
 
 ```sh
 go run . -profile cadet
@@ -122,14 +124,11 @@ go run . -profile ace
 go run . -profile nightmare
 ```
 
-You should see a 960×540 dark window with a green, low-poly Rebel X-Wing facing
-green Imperial TIE fighters and a
-sparse vector Death Star ahead of the engagement.
-The launch card starts inside the player's cockpit at maximum forward speed.
-Press `S`, `F`, or the left mouse button to begin heading toward the selected
-profile's distant autonomous formation. The controls card hides automatically
-after ten seconds, or immediately when play starts, and can subsequently be
-shown or hidden with `?`.
+The normal flow is mission selection, difficulty selection, the Battle of
+Yavin briefing, and an explicit launch through the hyperspace arrival into the
+existing mission. Battle of Hoth and Battle of Endor are visible future
+missions but cannot be launched. A newly launched Yavin mission always starts
+from a clean session.
 
 In cockpit view, border threat markers point toward the eight nearest fighters
 or incoming enemy bolts. Each marker's urgency progresses from blue to orange to
@@ -137,6 +136,11 @@ red, with a flashing red marker for immediate danger.
 
 ## Controls
 
+- On the title screen, `Up` / `Down` select a mission, `Left` / `Right` select
+  difficulty, and `Enter`, `Space`, `F`, or left mouse continue
+- On the briefing, `Enter`, `Space`, `F`, or left mouse launches; `Backspace`
+  returns to mission selection
+- `N` on the title screen retains the direct near-surface development start
 - `M`: switch between autopilot and manual flight
 - Any `W`/`S`, arrow, `Q`/`E`, or `Space` navigation input automatically enters
   manual flight, regardless of the current camera view
@@ -184,8 +188,8 @@ MCP-backed controllers without granting them authority over simulation state.
 Difficulty selection now provides curated `Cadet`, `Pilot`, `Ace`, and
 `Nightmare` profiles that bundle swarm size, speed, attack cadence, aim error,
 avoidance, recovery, combat, shields, targeting, display, and simulation
-settings. A later settings screen will select these profiles in-game; they are
-currently selected with the `-profile` command-line flag.
+settings. The title screen selects among these profiles, while `-profile`
+provides the initial selection.
 
 Player shields start at eight strength points, shown as eight mirrored segments on each side; a laser hit loses one point and a collision loses three
 to a collision, recharge one segment after 20 seconds without damage, and

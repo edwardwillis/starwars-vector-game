@@ -3,7 +3,7 @@ package profile
 import "testing"
 
 func TestBuiltinProfilesAreValidAndResolved(t *testing.T) {
-	profiles := []GameProfile{Cadet(), Pilot(), Ace(), Nightmare()}
+	profiles := Builtins()
 	for _, profile := range profiles {
 		if err := profile.Validate(); err != nil {
 			t.Fatalf("profile %q is invalid: %v", profile.Name, err)
@@ -14,6 +14,23 @@ func TestBuiltinProfilesAreValidAndResolved(t *testing.T) {
 		if len(profile.Swarm.InitialPositions) != profile.Swarm.Count {
 			t.Fatalf("profile %q has %d positions for %d fighters", profile.Name, len(profile.Swarm.InitialPositions), profile.Swarm.Count)
 		}
+	}
+}
+
+func TestBuiltinsReturnsCuratedIndependentProfiles(t *testing.T) {
+	profiles := Builtins()
+	want := []string{CadetName, PilotName, AceName, NightmareName}
+	if len(profiles) != len(want) {
+		t.Fatalf("Builtins returned %d profiles, want %d", len(profiles), len(want))
+	}
+	for index, name := range want {
+		if profiles[index].Name != name {
+			t.Fatalf("profile %d=%q, want %q", index, profiles[index].Name, name)
+		}
+	}
+	profiles[0].Swarm.InitialPositions[0].X = 999
+	if fresh := Builtins()[0].Swarm.InitialPositions[0].X; fresh == 999 {
+		t.Fatal("Builtins returned shared mutable profile state")
 	}
 }
 

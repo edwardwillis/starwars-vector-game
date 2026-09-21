@@ -807,11 +807,13 @@ a second independent configuration system. Applying `Cadet`, `Pilot`, `Ace`, or
 created.
 
 Initial implementation status: complete. The four built-in profiles resolve to
-validated Go values; `Pilot` preserves the established gameplay, the command
-line selects a profile at launch, and `Game.NewWithProfile` clones the resolved
-configuration before creating the session. External JSON/YAML loading and an
-in-game selection screen remain later work after the schema has seen further
-use.
+validated Go values; `Pilot` preserves the established gameplay, the title
+screen selects among the curated difficulties, and the command line supplies
+the initial selection. `Game.NewWithProfile` clones and retains the caller's
+resolved configuration until the player explicitly changes difficulty. The
+fresh gameplay session is constructed only when the player launches from the
+briefing. External JSON/YAML loading remains later work after the schema has
+seen further use.
 
 ### Registries and Factories
 
@@ -991,9 +993,10 @@ The initial presets should be `Cadet` (few, slower fighters with wide aim error)
 `Pilot` (the balanced default), `Ace` (faster attacks and tighter aim), and an
 optional `Nightmare` profile (full swarm pressure with minimal recovery time).
 Each profile must remain deterministic for a fixed seed, and all values should
-be validated at load time. A later settings screen can select a profile before
-starting a game; the authoritative server will reject mismatched profiles in a
-multiplayer session.
+be validated at load time. The application shell selects a curated profile
+before starting a game while preserving an explicitly supplied custom profile
+until the player changes that selection. A future authoritative server will
+reject mismatched profiles in a multiplayer session.
 
 The core controller boundary is intentionally small. The current
 `Strategy.Step(Context) Motion` and follow-up `Attacker.AttackIntent()` hooks are

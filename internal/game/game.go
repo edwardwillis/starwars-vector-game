@@ -866,6 +866,7 @@ type Game struct {
 	appearanceRegistry       *appearance.Registry
 	cockpitRegistry          *cockpit.Registry
 	environmentRegistry      *environment.Registry
+	environmentDefinitions   []environment.Definition
 	environments             []localEnvironment
 	transitions              map[scene.ObjectID]environmentTransition
 	transitionCommitments    map[scene.ObjectID]bool
@@ -876,7 +877,11 @@ type Game struct {
 	mode                     flightMode
 	paused                   bool
 	quitPrompt               bool
-	started                  bool
+	flow                     applicationFlow
+	selectedMission          int
+	selectedDifficulty       int
+	curatedDifficulties      []profile.GameProfile
+	launchProfile            profile.GameProfile
 	swarmLaunched            bool
 	showHUD                  bool
 	surfaceAutoLevel         bool
@@ -1045,41 +1050,46 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	}
 	viewCamera := camera.New(fighterID)
 	viewCamera.Mode = camera.Cockpit
+	curatedDifficulties := profile.Builtins()
 	game := &Game{
-		profile:               gameProfile,
-		controllerRegistry:    registry,
-		catalogRegistry:       catalogRegistry,
-		appearanceRegistry:    appearanceRegistry,
-		cockpitRegistry:       cockpit.DefaultRegistry(),
-		environmentRegistry:   environmentRegistry,
-		pipeline:              render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
-		objects:               objects,
-		initialPose:           initialPose,
-		autoMotion:            autoMotion,
-		viewCamera:            viewCamera,
-		nextObjectID:          nextObjectID,
-		projectiles:           make(map[scene.ObjectID]float64),
-		owners:                make(map[scene.ObjectID]scene.ObjectID),
-		starField:             starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
-		controllers:           controllers,
-		controllerTargets:     make(map[scene.ObjectID]scene.ObjectID),
-		debris:                make(map[scene.ObjectID]destructionTransient),
-		surfaceEffects:        make(map[scene.ObjectID]surfaceEffect),
-		environmentContacts:   make(map[scene.ObjectID]float64),
-		transitions:           make(map[scene.ObjectID]environmentTransition),
-		transitionCommitments: make(map[scene.ObjectID]bool),
-		respawnSequence:       uint64(gameProfile.Swarm.Count),
-		shieldStrength:        gameProfile.Player.Shield.Maximum,
-		torpedoesRemaining:    gameProfile.Combat.Torpedo.Ammunition,
-		started:               false,
-		swarmLaunched:         true,
-		showHUD:               false,
-		surfaceAutoLevel:      gameProfile.Player.AutoLevel.Enabled,
-		controlsRemaining:     gameProfile.Display.ControlsDisplayDuration,
-		detailLevels:          make(map[scene.ObjectID]scene.DetailTier),
-		billboardLineCache:    make(map[string]map[int][]appearance.Line),
-		textureRegistry:       render.DefaultTextureRegistry(),
-		textureImages:         make(map[string]*ebiten.Image),
+		profile:                gameProfile,
+		controllerRegistry:     registry,
+		catalogRegistry:        catalogRegistry,
+		appearanceRegistry:     appearanceRegistry,
+		cockpitRegistry:        cockpit.DefaultRegistry(),
+		environmentRegistry:    environmentRegistry,
+		environmentDefinitions: environmentRegistry.Definitions(),
+		pipeline:               render.NewPipeline(ScreenWidth, ScreenHeight, gameProfile.Display.VerticalFOV, gameProfile.Display.NearPlane, gameProfile.Display.FarPlane),
+		objects:                objects,
+		initialPose:            initialPose,
+		autoMotion:             autoMotion,
+		viewCamera:             viewCamera,
+		nextObjectID:           nextObjectID,
+		projectiles:            make(map[scene.ObjectID]float64),
+		owners:                 make(map[scene.ObjectID]scene.ObjectID),
+		starField:              starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
+		controllers:            controllers,
+		controllerTargets:      make(map[scene.ObjectID]scene.ObjectID),
+		debris:                 make(map[scene.ObjectID]destructionTransient),
+		surfaceEffects:         make(map[scene.ObjectID]surfaceEffect),
+		environmentContacts:    make(map[scene.ObjectID]float64),
+		transitions:            make(map[scene.ObjectID]environmentTransition),
+		transitionCommitments:  make(map[scene.ObjectID]bool),
+		respawnSequence:        uint64(gameProfile.Swarm.Count),
+		shieldStrength:         gameProfile.Player.Shield.Maximum,
+		torpedoesRemaining:     gameProfile.Combat.Torpedo.Ammunition,
+		flow:                   flowTitle,
+		selectedDifficulty:     difficultyIndex(curatedDifficulties, gameProfile.Name),
+		curatedDifficulties:    curatedDifficulties,
+		launchProfile:          gameProfile.Clone(),
+		swarmLaunched:          true,
+		showHUD:                false,
+		surfaceAutoLevel:       gameProfile.Player.AutoLevel.Enabled,
+		controlsRemaining:      gameProfile.Display.ControlsDisplayDuration,
+		detailLevels:           make(map[scene.ObjectID]scene.DetailTier),
+		billboardLineCache:     make(map[string]map[int][]appearance.Line),
+		textureRegistry:        render.DefaultTextureRegistry(),
+		textureImages:          make(map[string]*ebiten.Image),
 	}
 	starfieldMode := gameProfile.Starfield.Mode
 	if starfieldMode == "" {
@@ -1279,29 +1289,11 @@ func (g *Game) Update() error {
 		g.refreshViewContext()
 		return nil
 	}
-	g.updateControls(seconds)
-	if !g.started {
-		startSurface := inpututil.IsKeyJustPressed(ebiten.KeyN)
-		if inpututil.IsKeyJustPressed(ebiten.KeyS) ||
-			inpututil.IsKeyJustPressed(ebiten.KeyF) ||
-			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) || startSurface {
-			g.started = true
-			g.controlsRemaining = 0
-			g.controlsPinned = false
-			surfaceStarted := startSurface && g.startInSurfaceMode()
-			if err := g.startYavinMission(surfaceStarted); err != nil {
-				return err
-			}
-			if surfaceStarted {
-				// Surface starts intentionally bypass the orbital hyperspace
-				// arrival so the local flight view is available immediately.
-			} else if fighter := g.objectByID(fighterID); fighter != nil {
-				g.beginHyperspaceArrival(fighter.Pose)
-			}
-		}
+	if handled, err := g.updateApplicationFlow(seconds); handled || err != nil {
 		g.refreshViewContext()
-		return nil
+		return err
 	}
+	g.updateControls(seconds)
 	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		if g.mode == modeAutopilot {
 			g.mode = modeManual
@@ -1591,7 +1583,7 @@ func (g *Game) transferPortalProjectiles(previous map[scene.ObjectID]math3d.Vec3
 
 // startInSurfaceMode places the player directly into the first registered
 // exterior-to-surface environment. It is a development-friendly start path
-// used by the title card while the near-surface flight presentation evolves;
+// used by the title screen while the near-surface flight presentation evolves;
 // normal gameplay continues to use the orbital arrival sequence.
 func (g *Game) startInSurfaceMode() bool {
 	if g.world == nil || g.objectByID(fighterID) == nil {
@@ -3759,7 +3751,7 @@ func (g *Game) resetFighter() {
 	} else {
 		fighter.Motion = kinematics.Motion{}
 	}
-	if g.started {
+	if g.flow == flowPlaying {
 		g.beginHyperspaceArrival(fighter.Pose)
 	}
 }
@@ -3819,6 +3811,9 @@ func (g *Game) advanceHyperspaceArrival(seconds float64) {
 	}
 	g.viewCamera.Mode = arrival.previousMode
 	g.hyperspaceArrival = nil
+	if g.flow == flowLaunching {
+		g.flow = flowPlaying
+	}
 }
 
 func (g *Game) applyShieldDamage(amount int) bool {
@@ -3874,7 +3869,7 @@ func (g *Game) respawnPlayer() {
 	g.viewCamera.ClearFixedView()
 	g.viewCamera.Mode = g.playerViewMode
 	g.viewCamera.TargetID = fighterID
-	if g.started {
+	if g.flow == flowPlaying {
 		g.beginHyperspaceArrival(pose)
 	}
 }
@@ -4837,6 +4832,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		g.drawShowcase(screen, prepared)
 		return
 	}
+	if g.drawApplicationShell(screen) {
+		return
+	}
 	visibleObjects := 0
 	prepared := g.prepareGameplayFrame()
 	g.drawStarfield(screen, prepared)
@@ -5690,7 +5688,7 @@ func (g *Game) handleRealismSliderClick() bool {
 	return true
 }
 
-func controlsText(startPrompt bool) string {
+func controlsText(playerActive bool) string {
 	text := "CONTROLS\n" +
 		"W/S  throttle    Arrows  steer\n" +
 		"Q/E  roll        Mouse  aim\n" +
@@ -5702,10 +5700,10 @@ func controlsText(startPrompt bool) string {
 		"C  fighter showcase\n" +
 		"[ / ]  rendering realism\n" +
 		"?  show / hide controls\n\n"
-	if startPrompt {
-		return text + "PRESS S OR FIRE TO START\nN  START IN SURFACE MODE"
+	if playerActive {
+		return text + "R  RESTART MISSION"
 	}
-	return text + "PRESS R TO RESTART"
+	return text + "PRESS R TO RESPAWN"
 }
 
 func questionKeyJustPressed() bool {

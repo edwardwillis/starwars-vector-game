@@ -3,7 +3,6 @@ package game
 import (
 	"image/color"
 	"math"
-	"strings"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
@@ -1097,19 +1096,12 @@ func depthTestObject(id scene.ObjectID, frame scene.FrameID, position math3d.Vec
 	}
 }
 
-func TestControlsTextDocumentsSurfaceStart(t *testing.T) {
-	text := controlsText(true)
-	if !strings.Contains(text, "N  START IN SURFACE MODE") {
-		t.Fatalf("start controls do not document surface mode: %q", text)
-	}
-}
-
-func TestStartedResetBeginsOrbitalArrival(t *testing.T) {
+func TestPlayingResetBeginsOrbitalArrival(t *testing.T) {
 	g := New()
-	g.started = true
+	g.flow = flowPlaying
 	g.resetFighter()
 	if g.hyperspaceArrival == nil {
-		t.Fatal("started orbital reset did not begin hyperspace arrival")
+		t.Fatal("playing orbital reset did not begin hyperspace arrival")
 	}
 	fighter := g.objectByID(fighterID)
 	if fighter == nil || normalizedObjectFrame(*fighter) != scene.ExteriorFrame {
@@ -1269,18 +1261,18 @@ func TestRecenteringFragmentPreservesWorldGeometry(t *testing.T) {
 	}
 }
 
-func TestUpdateWaitsForStartThenMovesAndRotatesFighter(t *testing.T) {
+func TestUpdateWaitsForPlayingThenMovesAndRotatesFighter(t *testing.T) {
 	g := New()
 	before := g.objects[0].Pose
 	if err := g.Update(); err != nil {
 		t.Fatalf("Update returned an error: %v", err)
 	}
 	if g.objects[0].Pose != before {
-		t.Fatal("Update moved the fighter before the game started")
+		t.Fatal("Update moved the fighter before application flow reached playing")
 	}
-	g.started = true
+	g.flow = flowPlaying
 	if err := g.Update(); err != nil {
-		t.Fatalf("started Update returned an error: %v", err)
+		t.Fatalf("playing Update returned an error: %v", err)
 	}
 	after := g.objects[0].Pose
 	if after.Position == before.Position {
@@ -1293,7 +1285,7 @@ func TestUpdateWaitsForStartThenMovesAndRotatesFighter(t *testing.T) {
 
 func TestControlsCardTimesOutAndCanBeToggled(t *testing.T) {
 	g := New()
-	g.started = true
+	g.flow = flowPlaying
 	g.controlsRemaining = 10
 	g.updateControls(9.9)
 	if !g.controlsVisible() {
