@@ -142,6 +142,7 @@ func DeathStarTrench() Definition {
 		TileRadius:        deathStarTileRadius,
 		HorizonTileRadius: deathStarHorizonTileRadius,
 		HorizonTile:       deathStarHorizonTile,
+		DepthProxy:        deathStarSurfaceDepthProxy,
 		DetailThresholds:  scene.DetailThresholds{MediumPixels: 5, NearPixels: 16},
 		LevelUp:           math3d.Vec3{Y: 1},
 		Transitions: []Transition{{
@@ -191,7 +192,7 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	deck.SkipDepth = false
 	deck.DepthTestOnly = false
 	deck.PointOccluder = true
-	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: deathStarSurfaceLine, LineWidth: 1, Surface: deathStarSurfaceFill}}
+	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: deathStarSurfaceLine, LineWidth: 1, Surface: deathStarSurfaceFill, DepthWriteProxy: true}}
 	if !horizonOnly {
 		parts[0].Surface = deathStarSurfaceTexture
 	}
@@ -211,7 +212,7 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 		deck.DepthTestOnly = false
 		deck.PointOccluder = true
 		parts[0].Mesh = deck
-		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: deathStarSurfaceLine, LineWidth: 2, Surface: deathStarTrenchFill})
+		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: deathStarSurfaceLine, LineWidth: 2, Surface: deathStarTrenchFill, DepthWriteProxy: true})
 		if !horizonOnly {
 			planes = trenchPlanes(xCenter, zCenter, outerHalf, trenchHalf, depth)
 		}
@@ -268,6 +269,71 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 // batched skyfield on the GPU.
 func deathStarHorizonTile(coordinate TileCoordinate) Tile {
 	return buildDeathStarTile(coordinate, true)
+}
+
+// deathStarSurfaceDepthProxy collapses the active deck tiles into a handful of
+// broad physical faces for the invisible CPU depth pass. The visual tiles
+// retain their own grid detail and textured fills; this proxy exists solely to
+// avoid repeatedly rasterizing overlapping co-planar tile faces at shallow
+// flight angles. It also leaves the finite trench open and supplies its floor
+// and walls as continuous occluders.
+func deathStarSurfaceDepthProxy(coordinates []TileCoordinate) []model.Model {
+	if len(coordinates) == 0 {
+		return nil
+	}
+	minTileX, maxTileX := coordinates[0].X, coordinates[0].X
+	minTileZ, maxTileZ := coordinates[0].Z, coordinates[0].Z
+	for _, coordinate := range coordinates[1:] {
+		minTileX = min(minTileX, coordinate.X)
+		maxTileX = max(maxTileX, coordinate.X)
+		minTileZ = min(minTileZ, coordinate.Z)
+		maxTileZ = max(maxTileZ, coordinate.Z)
+	}
+	minX := (float64(minTileX) - .5) * deathStarTileSize
+	maxX := (float64(maxTileX) + .5) * deathStarTileSize
+	minZ := (float64(minTileZ) - .5) * deathStarTileSize
+	maxZ := (float64(maxTileZ) + .5) * deathStarTileSize
+
+	mesh := model.Model{}
+	addFace := func(vertices []math3d.Vec3, doubleSided bool) {
+		base := len(mesh.Verts)
+		mesh.Verts = append(mesh.Verts, vertices...)
+		face := model.Face{Vertices: make([]int, len(vertices)), DoubleSided: doubleSided}
+		for index := range vertices {
+			face.Vertices[index] = base + index
+		}
+		mesh.Faces = append(mesh.Faces, face)
+	}
+	deck := func(left, right, near, far float64) {
+		if right-left <= 1e-6 || far-near <= 1e-6 {
+			return
+		}
+		// +Y winding: near-left, near-right, far-right, far-left.
+		addFace([]math3d.Vec3{{X: left, Z: near}, {X: right, Z: near}, {X: right, Z: far}, {X: left, Z: far}}, false)
+	}
+
+	trenchStart := max(minZ, (float64(trenchFirstTileZ)-.5)*deathStarTileSize)
+	trenchEnd := min(maxZ, (float64(trenchLastTileZ)+.5)*deathStarTileSize)
+	hasTrench := minTileX <= trenchTileX && maxTileX >= trenchTileX && trenchEnd-trenchStart > 1e-6
+	if !hasTrench {
+		deck(minX, maxX, minZ, maxZ)
+		return []model.Model{model.Prepare(mesh)}
+	}
+
+	left, right := -deathStarTrenchHalf, deathStarTrenchHalf
+	deck(minX, min(maxX, left), minZ, maxZ)
+	deck(max(minX, right), maxX, minZ, maxZ)
+	deck(max(minX, left), min(maxX, right), minZ, trenchStart)
+	deck(max(minX, left), min(maxX, right), trenchEnd, maxZ)
+
+	// The same continuous physical trench surfaces replace the repeated tile
+	// wall/floor faces. They are double-sided because both the surface approach
+	// and the in-trench view need the correct occluder.
+	depth := deathStarTrenchDepth
+	addFace([]math3d.Vec3{{X: left, Z: trenchStart}, {X: left, Z: trenchEnd}, {X: left, Y: -depth, Z: trenchEnd}, {X: left, Y: -depth, Z: trenchStart}}, true)
+	addFace([]math3d.Vec3{{X: right, Z: trenchStart}, {X: right, Y: -depth, Z: trenchStart}, {X: right, Y: -depth, Z: trenchEnd}, {X: right, Z: trenchEnd}}, true)
+	addFace([]math3d.Vec3{{X: left, Y: -depth, Z: trenchStart}, {X: left, Y: -depth, Z: trenchEnd}, {X: right, Y: -depth, Z: trenchEnd}, {X: right, Y: -depth, Z: trenchStart}}, true)
+	return []model.Model{model.Prepare(mesh)}
 }
 
 func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Model {

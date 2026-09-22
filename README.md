@@ -130,6 +130,28 @@ existing mission. Battle of Hoth and Battle of Endor are visible future
 missions but cannot be launched. A newly launched Yavin mission always starts
 from a clean session.
 
+For post-run performance analysis, the optional development telemetry flag
+writes buffered one-second CSV samples. It is off by default and records the
+existing renderer/HUD metrics, update and draw-stage timings, and actual
+FPS/TPS without logging every frame:
+
+```sh
+go run . -telemetry surface-flight.csv
+```
+
+When developing from WSL, use the native Windows graphics stack for interactive
+play and renderer profiling:
+
+```sh
+make build-windows
+make run-windows
+make run-windows WINDOWS_RUN_ARGS='-profile cadet -telemetry C:\Users\YOUR_WINDOWS_USER\surface-flight-native.csv'
+```
+
+`build-windows` writes `starwars-vector.exe` to the current Windows user's home
+directory by default. Override `WINDOWS_EXE` with a Windows-mounted WSL path if
+you need a different output location.
+
 In cockpit view, border threat markers point toward the eight nearest fighters
 or incoming enemy bolts. Each marker's urgency progresses from blue to orange to
 red, with a flashing red marker for immediate danger.

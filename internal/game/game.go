@@ -26,6 +26,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
+	"github.com/edwardwillis/starwars-vector-game/internal/telemetry"
 	"github.com/edwardwillis/starwars-vector-game/internal/view"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -113,6 +114,7 @@ type localEnvironment struct {
 	bound            environment.Bound
 	tiles            map[environment.TileCoordinate]environment.Tile
 	horizonTiles     map[environment.TileCoordinate]environment.Tile
+	depthProxyMeshes []modelpkg.Model
 	featureStates    map[string]featureDamageState
 	detailLevels     map[string]scene.DetailTier
 	tileDetailLevels map[environment.TileCoordinate]scene.DetailTier
@@ -176,6 +178,7 @@ type preparedCandidate struct {
 	writesDepth    bool
 	testsDepth     bool
 	pointOccluder  bool
+	depthOnly      bool
 	analyticSphere bool
 	object         scene.Object
 	billboard      appearance.Billboard
@@ -465,10 +468,11 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 			continue
 		}
 		for _, tile := range runtime.tiles {
-			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity())
+			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity(), true)
 		}
+		g.appendEnvironmentDepthProxy(prepared, runtime)
 		for _, tile := range runtime.horizonTiles {
-			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity())
+			g.appendEnvironmentTileCandidates(prepared, runtime, tile, math3d.Identity(), false)
 		}
 	}
 	g.appendRoomCandidates(prepared)
@@ -584,7 +588,7 @@ func (g *Game) appendPortalCandidates(prepared *preparedFrame) {
 					tile.Parts = tile.PortalParts
 				}
 				start := len(prepared.candidates)
-				g.appendEnvironmentTileCandidates(prepared, runtime, tile, frameWorld)
+				g.appendEnvironmentTileCandidates(prepared, runtime, tile, frameWorld, false)
 				for candidateIndex := start; candidateIndex < len(prepared.candidates); candidateIndex++ {
 					prepared.candidates[candidateIndex].group = environmentDepthGroup(0)
 					prepared.candidates[candidateIndex].portalClip = aperture
@@ -684,7 +688,7 @@ func (g *Game) appendRoomCandidates(prepared *preparedFrame) {
 // presentation. frameWorld expresses the environment frame in the camera's
 // current frame; active environments therefore pass identity while exterior
 // transition/cut-scene views pass the destination frame's world transform.
-func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime *localEnvironment, tile environment.Tile, frameWorld math3d.Mat4) {
+func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime *localEnvironment, tile environment.Tile, frameWorld math3d.Mat4, useDepthProxy bool) {
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.EnvironmentTilesInput++
 	}
@@ -720,7 +724,7 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 			mesh: part.Mesh, world: frameWorld,
 			owner: environmentPartOwner(runtime.bound.HostID, tile.Coordinate, "tile", partIndex),
 			color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
-			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part),
+			selfOcclusion: partSelfOcclusionMode(part, false), writesDepth: depthWriteCandidate(part) && !(useDepthProxy && part.DepthWriteProxy),
 			testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
 		})
 	}
@@ -799,6 +803,44 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 	}
 }
 
+// appendEnvironmentDepthProxy adds only the coarse physical surfaces needed
+// by the CPU depth prepass. A streamed environment may use it to replace many
+// visually detailed, overlapping tile faces without changing ordinary tile
+// rendering, fills, collisions, or feature behavior.
+func (g *Game) appendEnvironmentDepthProxy(prepared *preparedFrame, runtime *localEnvironment) {
+	if runtime == nil || runtime.bound.Definition.DepthProxy == nil || len(runtime.tiles) == 0 {
+		return
+	}
+	if runtime.depthProxyMeshes == nil {
+		coordinates := make([]environment.TileCoordinate, 0, len(runtime.tiles))
+		for coordinate := range runtime.tiles {
+			coordinates = append(coordinates, coordinate)
+		}
+		sort.Slice(coordinates, func(first, second int) bool {
+			if coordinates[first].Z == coordinates[second].Z {
+				return coordinates[first].X < coordinates[second].X
+			}
+			return coordinates[first].Z < coordinates[second].Z
+		})
+		proxies := runtime.bound.Definition.DepthProxy(coordinates)
+		runtime.depthProxyMeshes = make([]modelpkg.Model, len(proxies))
+		for index, proxy := range proxies {
+			runtime.depthProxyMeshes[index] = modelpkg.Prepare(proxy)
+		}
+	}
+	group := environmentDepthGroup(runtime.bound.HostID)
+	for index, mesh := range runtime.depthProxyMeshes {
+		if !g.meshInView(mesh, math3d.Identity()) {
+			continue
+		}
+		prepared.candidates = append(prepared.candidates, preparedCandidate{
+			mesh: mesh, world: math3d.Identity(),
+			owner: environmentPartOwner(runtime.bound.HostID, environment.TileCoordinate{}, "depth-proxy", index),
+			group: group, writesDepth: true, depthOnly: true,
+		})
+	}
+}
+
 // appendTransitionEnvironmentCandidates adds the destination patch visible in
 // the controlled craft's approach presentation. The patch is already acquired
 // during Update, so preparation remains a read-only classification pass and
@@ -821,7 +863,7 @@ func (g *Game) appendTransitionEnvironmentCandidates(prepared *preparedFrame) {
 			if !exists {
 				continue
 			}
-			g.appendEnvironmentTileCandidates(prepared, runtime, tile, frameWorld)
+			g.appendEnvironmentTileCandidates(prepared, runtime, tile, frameWorld, false)
 		}
 	}
 }
@@ -965,6 +1007,9 @@ type Game struct {
 	controlsPinned           bool
 	realismLevel             int
 	hyperspaceArrival        *hyperspaceArrival
+	telemetry                *telemetry.Recorder
+	telemetryUpdateDuration  time.Duration
+	telemetryUpdateCalls     int
 }
 
 var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
@@ -1208,7 +1253,20 @@ func (g *Game) installEnvironments() error {
 	return nil
 }
 
+// SetTelemetryRecorder enables or disables sampled development telemetry. The
+// recorder observes completed frames only; it does not alter world simulation
+// or the renderer's visibility decisions.
+func (g *Game) SetTelemetryRecorder(recorder *telemetry.Recorder) {
+	g.telemetry = recorder
+	g.telemetryUpdateDuration = 0
+	g.telemetryUpdateCalls = 0
+}
+
 func (g *Game) Update() error {
+	if g.telemetry != nil {
+		updateStarted := time.Now()
+		defer func() { g.recordTelemetryUpdate(time.Since(updateStarted)) }()
+	}
 	seconds := g.profile.Simulation.TickSeconds
 	questionPressed := questionKeyJustPressed()
 	if questionPressed {
@@ -2028,7 +2086,19 @@ func (g *Game) refreshEnvironmentTiles() {
 				delete(runtime.detailLevels, feature.ID)
 			}
 		}
+		tilesChanged := len(tiles) != len(runtime.tiles)
+		if !tilesChanged {
+			for coordinate := range tiles {
+				if _, exists := runtime.tiles[coordinate]; !exists {
+					tilesChanged = true
+					break
+				}
+			}
+		}
 		runtime.tiles = tiles
+		if tilesChanged {
+			runtime.depthProxyMeshes = nil
+		}
 
 		// The distant visual shell follows only the viewed craft. Physical actors
 		// retain the smaller authoritative stream above, so extending the horizon
@@ -2113,6 +2183,7 @@ func (g *Game) refreshTransitionEnvironmentTiles() {
 					tile = environment.PrepareTile(tile)
 				}
 				runtime.tiles[coordinate] = tile
+				runtime.depthProxyMeshes = nil
 			}
 		}
 	}
@@ -4940,7 +5011,7 @@ func (g *Game) depthBufferForPrepared(prepared *preparedFrame) *render.DepthBuff
 func jobsForPreparedCandidates(prepared *preparedFrame, indexes []int, depth *render.DepthBuffer, jobs []worldRenderJob) []worldRenderJob {
 	for _, candidateIndex := range indexes {
 		candidate := prepared.candidates[candidateIndex]
-		if candidate.isBillboard || candidate.analyticSphere {
+		if candidate.depthOnly || candidate.isBillboard || candidate.analyticSphere {
 			continue
 		}
 		jobDepth := (*render.DepthBuffer)(nil)
@@ -4953,27 +5024,63 @@ func jobsForPreparedCandidates(prepared *preparedFrame, indexes []int, depth *re
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	var timings telemetryDrawTimings
+	if g.telemetry != nil {
+		drawStarted := time.Now()
+		defer func() { g.recordTelemetryFrame(time.Since(drawStarted), timings) }()
+	}
 	screen.Fill(background)
 	g.renderStats = render.Stats{}
-	g.pipeline.FineStats = g.showHUD
-	if g.showHUD {
+	collectRenderStats := g.renderDiagnosticsEnabled()
+	g.pipeline.FineStats = collectRenderStats
+	if collectRenderStats {
 		g.pipeline.Stats = &g.renderStats
 	} else {
 		g.pipeline.Stats = nil
 	}
 	g.refreshViewContext()
 	if g.showcaseActive {
-		prepared := g.prepareShowcaseFrame()
-		g.showcaseStarPoints = g.drawBackground(screen, prepared, g.showcaseStarField, g.showcaseStarPoints)
+		var prepared *preparedFrame
+		if g.telemetry != nil {
+			prepareStarted := time.Now()
+			prepared = g.prepareShowcaseFrame()
+			timings.prepare = time.Since(prepareStarted)
+		} else {
+			prepared = g.prepareShowcaseFrame()
+		}
+		if g.telemetry != nil {
+			backgroundStarted := time.Now()
+			g.showcaseStarPoints = g.drawBackground(screen, prepared, g.showcaseStarField, g.showcaseStarPoints)
+			timings.background = time.Since(backgroundStarted)
+		} else {
+			g.showcaseStarPoints = g.drawBackground(screen, prepared, g.showcaseStarField, g.showcaseStarPoints)
+		}
 		g.drawShowcase(screen, prepared)
+		return
+	}
+	if g.quitPrompt {
+		g.drawQuitPrompt(screen)
 		return
 	}
 	if g.drawApplicationShell(screen) {
 		return
 	}
 	visibleObjects := 0
-	prepared := g.prepareGameplayFrame()
-	g.drawStarfield(screen, prepared)
+	var prepared *preparedFrame
+	if g.telemetry != nil {
+		prepareStarted := time.Now()
+		prepared = g.prepareGameplayFrame()
+		timings.prepare = time.Since(prepareStarted)
+	} else {
+		prepared = g.prepareGameplayFrame()
+	}
+	if g.telemetry != nil {
+		backgroundStarted := time.Now()
+		g.drawStarfield(screen, prepared)
+		timings.background = time.Since(backgroundStarted)
+	} else {
+		g.drawStarfield(screen, prepared)
+	}
 	g.drawHyperspaceArrival(screen)
 	g.beginWorldBatch()
 	worldJobs := g.worldJobs[:0]
@@ -4983,7 +5090,13 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	for objectID := range g.visibleObjectIDs {
 		delete(g.visibleObjectIDs, objectID)
 	}
-	g.drawPreparedSurfaces(screen, prepared)
+	if g.telemetry != nil {
+		surfaceStarted := time.Now()
+		g.drawPreparedSurfaces(screen, prepared)
+		timings.surfaces = time.Since(surfaceStarted)
+	} else {
+		g.drawPreparedSurfaces(screen, prepared)
+	}
 	geometryStart := time.Now()
 	depth := g.depthBufferForPrepared(prepared)
 	for _, candidate := range prepared.candidates {
@@ -5034,6 +5147,10 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
 	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
+	if g.telemetry != nil {
+		overlayStarted := time.Now()
+		defer func() { timings.overlays = time.Since(overlayStarted) }()
+	}
 	if g.viewCamera.Mode == camera.Cockpit {
 		g.drawCockpitOverlay(screen)
 	}
@@ -5044,10 +5161,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
 	}
-	if g.quitPrompt {
-		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-24), "PAUSED", color.RGBA{R: 96, G: 220, B: 255, A: 255})
-		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-8), "QUIT GAME? Y/N", color.RGBA{R: 255, G: 224, B: 32, A: 255})
-	}
 	if g.controlsVisible() {
 		ebitenutil.DebugPrintAt(screen, controlsText(!g.playerDestroyed), 16, 16)
 	}
@@ -5055,6 +5168,74 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrint(screen, g.hudText())
 		g.drawRealismSlider(screen)
 	}
+}
+
+func (g *Game) renderDiagnosticsEnabled() bool {
+	return g.showHUD || g.telemetry != nil
+}
+
+type telemetryDrawTimings struct {
+	prepare, background, surfaces, overlays time.Duration
+}
+
+func (g *Game) recordTelemetryUpdate(duration time.Duration) {
+	if g.telemetry == nil {
+		return
+	}
+	g.telemetryUpdateDuration += duration
+	g.telemetryUpdateCalls++
+}
+
+func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetryDrawTimings) {
+	if g.telemetry == nil {
+		return
+	}
+	updateDuration, updateCalls := g.telemetryUpdateDuration, g.telemetryUpdateCalls
+	g.telemetryUpdateDuration, g.telemetryUpdateCalls = 0, 0
+	phase := sim.MissionInactive.String()
+	if g.world != nil {
+		phase = g.world.Mission.Phase.String()
+	}
+	viewMode := "none"
+	if g.viewCamera != nil {
+		viewMode = g.viewCamera.Mode.String()
+	}
+	g.telemetry.Observe(telemetry.Frame{
+		At:                 time.Now(),
+		DrawDuration:       drawDuration,
+		UpdateDuration:     updateDuration,
+		UpdateCalls:        updateCalls,
+		PrepareDuration:    timings.prepare,
+		BackgroundDuration: timings.background,
+		SurfaceDuration:    timings.surfaces,
+		OverlayDuration:    timings.overlays,
+		ActualFPS:          ebiten.ActualFPS(),
+		ActualTPS:          ebiten.ActualTPS(),
+		Flow:               g.flow.String(),
+		MissionPhase:       phase,
+		View:               viewMode,
+		Realism:            g.realismLevel + 1,
+		ActiveTiles:        g.renderStats.ActiveEnvironmentTiles,
+		Features:           g.renderStats.EnvironmentInstancesPrepared,
+		Candidates:         g.renderStats.CandidatesPrepared,
+		DepthDomains:       g.renderStats.ActiveDepthDomains,
+		DepthFaces:         g.renderStats.DepthFacesSubmitted,
+		DepthTriangles:     g.renderStats.DepthTrianglesRasterized,
+		DepthTested:        g.renderStats.DepthPixelsTested,
+		DepthWritten:       g.renderStats.DepthPixelsWritten,
+		LineSamples:        g.renderStats.LineDepthSamples,
+		DepthMS:            g.renderStats.DepthRasterMS,
+		GeometryMS:         g.renderStats.GeometryMS,
+		OpaqueMS:           g.renderStats.OpaqueSubmitMS,
+		VectorMS:           g.renderStats.VectorSubmitMS,
+		OutputEdges:        g.renderStats.OutputEdges,
+		RenderJobs:         g.renderStats.RenderJobs,
+	})
+}
+
+func (g *Game) drawQuitPrompt(screen *ebiten.Image) {
+	drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-24), "PAUSED", color.RGBA{R: 96, G: 220, B: 255, A: 255})
+	drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-8), "QUIT GAME? Y/N", color.RGBA{R: 255, G: 224, B: 32, A: 255})
 }
 
 // drawHyperspaceArrival adds a sparse vector streak treatment behind the
@@ -5457,7 +5638,7 @@ func (g *Game) drawPreparedSurfaces(screen *ebiten.Image, prepared *preparedFram
 	g.surfaceTriangles = g.surfaceTriangles[:0]
 	for index := range prepared.candidates {
 		candidate := &prepared.candidates[index]
-		if !candidate.surface.Filled() || candidate.geometry == nil {
+		if candidate.depthOnly || !candidate.surface.Filled() || candidate.geometry == nil {
 			continue
 		}
 		before := len(g.surfaceTriangles)

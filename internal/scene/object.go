@@ -15,11 +15,16 @@ import (
 // such as cockpit windows, laser cores, or target highlights to use distinct
 // vector colors without coupling model geometry to Ebitengine.
 type Part struct {
-	Name             string
-	Mesh             model.Model
-	Color            color.RGBA
-	LineWidth        float32
-	Surface          SurfaceMaterial
+	Name      string
+	Mesh      model.Model
+	Color     color.RGBA
+	LineWidth float32
+	Surface   SurfaceMaterial
+	// DepthWriteProxy marks a visible environment surface whose CPU depth
+	// contribution is supplied by its containing environment's coarser proxy.
+	// The part still renders normally and tests against that proxy; only its
+	// repeated detailed depth rasterization is suppressed.
+	DepthWriteProxy  bool
 	VisibleInCockpit bool
 	CockpitOnly      bool
 	// SelfOccluding makes this part test its lines against its own depth

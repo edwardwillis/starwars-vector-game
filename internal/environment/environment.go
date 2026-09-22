@@ -150,7 +150,12 @@ type Definition struct {
 	// Tile geometry remains authoritative.
 	HorizonTileRadius int
 	HorizonTile       func(TileCoordinate) Tile
-	DetailThresholds  scene.DetailThresholds
+	// DepthProxy optionally supplies a small set of solid, local-space meshes
+	// for the CPU hidden-line prepass covering the currently active tiles.
+	// It is deliberately independent from visual tile detail: the ordinary tile
+	// Parts still supply vector lines, fills, collision and feature placement.
+	DepthProxy       func([]TileCoordinate) []model.Model
+	DetailThresholds scene.DetailThresholds
 	// LevelUp is the local horizon reference for optional manual-flight
 	// assistance. Zero deliberately disables leveling for interiors and other
 	// environments without a meaningful open-surface horizon.

@@ -20,6 +20,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/edwardwillis/starwars-vector-game/internal/starfield"
+	"github.com/edwardwillis/starwars-vector-game/internal/telemetry"
 	"github.com/edwardwillis/starwars-vector-game/internal/view"
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -30,6 +31,22 @@ func TestLayoutUsesLogicalResolution(t *testing.T) {
 
 	if width != ScreenWidth || height != ScreenHeight {
 		t.Fatalf("Layout() = %dx%d, want %dx%d", width, height, ScreenWidth, ScreenHeight)
+	}
+}
+
+func TestRenderDiagnosticsRequireHUDOrTelemetry(t *testing.T) {
+	g := New()
+	if g.renderDiagnosticsEnabled() {
+		t.Fatal("render diagnostics enabled without HUD or telemetry")
+	}
+	g.showHUD = true
+	if !g.renderDiagnosticsEnabled() {
+		t.Fatal("HUD did not enable render diagnostics")
+	}
+	g.showHUD = false
+	g.SetTelemetryRecorder(&telemetry.Recorder{})
+	if !g.renderDiagnosticsEnabled() {
+		t.Fatal("telemetry did not enable render diagnostics")
 	}
 }
 
@@ -193,7 +210,15 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	}
 	opaque := 0
 	horizonDepthTests := 0
+	depthProxies := 0
+	suppressedTileDepthWrites := 0
 	for _, candidate := range prepared.candidates {
+		if candidate.depthOnly {
+			depthProxies++
+			if !candidate.writesDepth || candidate.testsDepth || !candidate.domain.active() {
+				t.Fatalf("surface depth proxy flags: writes=%t tests=%t domain=%v", candidate.writesDepth, candidate.testsDepth, candidate.domain)
+			}
+		}
 		if candidate.mesh.SkipDepth && candidate.mesh.DepthTestOnly {
 			horizonDepthTests++
 			if candidate.writesDepth || !candidate.testsDepth || !candidate.domain.active() {
@@ -204,6 +229,9 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 			continue
 		}
 		opaque++
+		if !candidate.mesh.SkipDepth && !candidate.writesDepth {
+			suppressedTileDepthWrites++
+		}
 		if candidate.pointOccluder {
 			t.Fatal("filled Death Star surface retained redundant sparse-star geometry occlusion")
 		}
@@ -216,6 +244,9 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	}
 	if horizonDepthTests == 0 {
 		t.Fatal("surface view prepared no depth-test-only visual horizon")
+	}
+	if depthProxies == 0 || suppressedTileDepthWrites == 0 {
+		t.Fatalf("surface depth proxy=%d suppressed tile writes=%d", depthProxies, suppressedTileDepthWrites)
 	}
 }
 
@@ -433,7 +464,7 @@ func TestDestroyedInstallationUsesWreckAfterTileRegeneration(t *testing.T) {
 		featureStates: map[string]featureDamageState{"tile/tower": {Hits: 2, Destroyed: true}}}
 	for attempt := 0; attempt < 2; attempt++ {
 		prepared := g.resetPreparedFrame(scene.ExteriorFrame)
-		g.appendEnvironmentTileCandidates(prepared, runtime, newTile(), math3d.Identity())
+		g.appendEnvironmentTileCandidates(prepared, runtime, newTile(), math3d.Identity(), false)
 		if len(prepared.candidates) != 1 || prepared.candidates[0].mesh.Topology != wreck.Mesh.Topology {
 			t.Fatalf("regeneration %d did not retain wreck presentation: %+v", attempt, prepared.candidates)
 		}
@@ -972,7 +1003,7 @@ func TestEnvironmentAggregateBoundsRejectBeforeParts(t *testing.T) {
 	stats := render.Stats{}
 	g.pipeline.Stats = &stats
 	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
-	g.appendEnvironmentTileCandidates(prepared, &runtime, tile, math3d.Identity())
+	g.appendEnvironmentTileCandidates(prepared, &runtime, tile, math3d.Identity(), false)
 
 	if len(prepared.candidates) != 0 || stats.EnvironmentTilesInput != 1 ||
 		stats.EnvironmentTilesBoundsRejected != 1 || stats.EnvironmentPartsBoundsRejected != 0 {
@@ -998,7 +1029,7 @@ func TestEnvironmentFeatureLODRejectsBeforePartsAndUsesHysteresis(t *testing.T) 
 
 	far := environment.PrepareTile(environment.Tile{Features: []environment.Feature{feature}})
 	prepared := g.resetPreparedFrame(scene.ExteriorFrame)
-	g.appendEnvironmentTileCandidates(prepared, &runtime, far, math3d.Identity())
+	g.appendEnvironmentTileCandidates(prepared, &runtime, far, math3d.Identity(), false)
 	if len(prepared.candidates) != 0 || stats.EnvironmentFeaturesLODRejected != 1 || stats.EnvironmentPartsBoundsRejected != 0 {
 		t.Fatalf("far feature was not rejected before parts: candidates=%d stats=%+v", len(prepared.candidates), stats)
 	}
@@ -1007,14 +1038,14 @@ func TestEnvironmentFeatureLODRejectsBeforePartsAndUsesHysteresis(t *testing.T) 
 	closeTile := environment.PrepareTile(environment.Tile{Features: []environment.Feature{feature}})
 	stats = render.Stats{}
 	prepared = g.resetPreparedFrame(scene.ExteriorFrame)
-	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity())
+	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity(), false)
 	if len(prepared.candidates) != 1 || stats.EnvironmentInstancesPrepared != 1 || stats.EnvironmentPartsLODRejected != 1 {
 		t.Fatalf("medium feature detail candidates=%d stats=%+v", len(prepared.candidates), stats)
 	}
 
 	stats = render.Stats{}
 	prepared = g.resetPreparedFrame(scene.ExteriorFrame)
-	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity())
+	g.appendEnvironmentTileCandidates(prepared, &runtime, closeTile, math3d.Identity(), false)
 	if len(prepared.candidates) != 2 || stats.EnvironmentInstancesPrepared != 1 || stats.EnvironmentPartsLODRejected != 0 {
 		t.Fatalf("near feature detail candidates=%d stats=%+v", len(prepared.candidates), stats)
 	}

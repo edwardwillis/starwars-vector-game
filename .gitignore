@@ -6,6 +6,9 @@ dist/
 *.out
 coverage.out
 
+# Development telemetry captures
+surface-flight*.csv
+
 # Editors and operating systems
 .idea/
 .vscode/

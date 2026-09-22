@@ -71,6 +71,41 @@ func TestDeathStarHorizonTilesAreVisualOnly(t *testing.T) {
 	}
 }
 
+func TestDeathStarDepthProxyCollapsesActiveDeckTiles(t *testing.T) {
+	definition := DeathStarTrench()
+	if definition.DepthProxy == nil {
+		t.Fatal("Death Star surface has no coarse depth proxy")
+	}
+	coordinates := make([]TileCoordinate, 0, 25)
+	for x := -2; x <= 2; x++ {
+		for z := -2; z <= 2; z++ {
+			coordinates = append(coordinates, TileCoordinate{X: x, Z: z})
+		}
+	}
+	proxies := definition.DepthProxy(coordinates)
+	if len(proxies) != 1 {
+		t.Fatalf("depth proxy meshes=%d, want one merged surface", len(proxies))
+	}
+	proxy := proxies[0]
+	if err := proxy.Validate(); err != nil {
+		t.Fatalf("depth proxy is invalid: %v", err)
+	}
+	// Twenty-five deck patches plus their trench walls would previously enter
+	// the raster pass independently. The merged proxy retains the deck opening
+	// and trench surfaces in at most seven broad faces.
+	if len(proxy.Faces) == 0 || len(proxy.Faces) > 7 {
+		t.Fatalf("depth proxy faces=%d, want 1..7 merged faces", len(proxy.Faces))
+	}
+	tile := definition.Tile(TileCoordinate{})
+	for _, part := range tile.Parts {
+		if part.Name == "surface deck" || part.Name == "trench" {
+			if !part.DepthWriteProxy {
+				t.Fatalf("%s did not opt into the environment depth proxy", part.Name)
+			}
+		}
+	}
+}
+
 func TestDeathStarTrenchRouteRequiresForwardPhysicalProgress(t *testing.T) {
 	entry := DeathStarTrenchEntryPoint()
 	if !DeathStarTrenchEntryContains(entry) || DeathStarTrenchEntryContains(math3d.Vec3{Y: -4, Z: 150}) {

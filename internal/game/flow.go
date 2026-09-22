@@ -25,6 +25,25 @@ const (
 	flowResult
 )
 
+func (flow applicationFlow) String() string {
+	switch flow {
+	case flowTitle:
+		return "title"
+	case flowBriefing:
+		return "briefing"
+	case flowLaunching:
+		return "launching"
+	case flowPlaying:
+		return "playing"
+	case flowOutcome:
+		return "outcome"
+	case flowResult:
+		return "result"
+	default:
+		return "unknown"
+	}
+}
+
 type missionDescriptor struct {
 	ID       string
 	Title    string
@@ -345,10 +364,12 @@ func (g *Game) drawTitleScreen(screen *ebiten.Image) {
 		}
 	}
 	drawVectorText(screen, ScreenWidth/2, 318, "DIFFICULTY", blue)
-	drawVectorText(screen, ScreenWidth/2, 346, difficultyLabel(g.launchProfile), green)
-	drawVectorText(screen, ScreenWidth/2, 394, "ARROWS SELECT", muted)
-	drawVectorText(screen, ScreenWidth/2, 418, "ENTER CONTINUE", yellow)
-	drawVectorText(screen, ScreenWidth/2, 450, "N SURFACE DEVELOPMENT", muted)
+	drawVectorText(screen, ScreenWidth/2, 346, "< "+difficultyLabel(g.launchProfile)+" >", green)
+	drawSelectionMarker(screen, 338, 334)
+	drawVectorText(screen, ScreenWidth/2, 394, "UP DOWN MISSION", muted)
+	drawVectorText(screen, ScreenWidth/2, 416, "LEFT RIGHT DIFFICULTY", muted)
+	drawVectorText(screen, ScreenWidth/2, 438, "ENTER CONTINUE", yellow)
+	drawVectorText(screen, ScreenWidth/2, 462, "N SURFACE DEVELOPMENT", muted)
 }
 
 func (g *Game) drawYavinBriefing(screen *ebiten.Image) {
