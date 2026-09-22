@@ -84,3 +84,40 @@ func TestMissionFeedbackDoesNotAdvancePhase(t *testing.T) {
 		t.Fatalf("feedback events=%+v", world.MissionEvents)
 	}
 }
+
+func TestMissionProgressPreservesClosureEngagementAndCheckpointOrder(t *testing.T) {
+	player := catalog.XWing(1, kinematics.Pose{})
+	host := catalog.DeathStar(9, kinematics.Pose{})
+	world, err := New([]scene.Object{player, host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID, HostID: host.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(ObserveMission{HostDistance: 500}, ObserveMission{HostDistance: 420, UnderEngagement: true}); err != nil {
+		t.Fatal(err)
+	}
+	progress := world.Mission.Progress
+	if progress.OrbitalInitialHostDistance != 500 || progress.OrbitalClosestHostDistance != 420 || progress.OrbitalEngagementTicks != 1 {
+		t.Fatalf("orbital progress=%+v", progress)
+	}
+	if err := world.Apply(AdvanceMission{To: MissionApproach, Reason: "test"}, AdvanceMission{To: MissionSurfaceAssault, Reason: "test"}, AdvanceMission{To: MissionTrenchRun, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(ObserveMission{TrenchCheckpoint: 2}); err == nil {
+		t.Fatal("checkpoint ordering accepted a skip")
+	}
+	if err := world.Apply(ObserveMission{TrenchCheckpoint: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if world.Mission.Progress.TrenchCheckpoint != 1 {
+		t.Fatalf("checkpoint progress=%+v", world.Mission.Progress)
+	}
+	if err := world.Apply(ResetMission{}); err != nil {
+		t.Fatal(err)
+	}
+	if world.Mission.Progress != (MissionProgress{}) {
+		t.Fatalf("restart retained mission progress=%+v", world.Mission.Progress)
+	}
+}

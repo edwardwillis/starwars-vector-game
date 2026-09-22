@@ -1889,13 +1889,98 @@ func TestYavinMissionTracksExistingFlightProgression(t *testing.T) {
 	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionTrenchRun {
 		t.Fatalf("trench progression: phase=%s err=%v", g.world.Mission.Phase, err)
 	}
-	player.Pose.Position = math3d.Vec3{Y: -8, Z: 130}
-	if err := g.updateYavinMission(); err != nil || g.world.Mission.Phase != sim.MissionExhaustPortAttack {
-		t.Fatalf("attack progression: phase=%s err=%v", g.world.Mission.Phase, err)
+	for _, checkpoint := range environment.DeathStarTrenchCheckpoints() {
+		player.Pose.Position.Z = checkpoint + 1
+		if err := g.updateYavinMission(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if g.world.Mission.Phase != sim.MissionExhaustPortAttack {
+		t.Fatalf("attack progression: phase=%s", g.world.Mission.Phase)
 	}
 	snapshot := g.Snapshot()
 	if snapshot.Mission.Phase != sim.MissionExhaustPortAttack || snapshot.Mission.PlayerID != fighterID || snapshot.Mission.HostID == 0 {
 		t.Fatalf("snapshot mission=%+v", snapshot.Mission)
+	}
+}
+
+func TestYavinApproachRequiresClosureAndImperialEngagement(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	if g.yavinApproachReady() {
+		t.Fatal("orbital approach was ready before closure or engagement")
+	}
+	initial := g.world.Mission.Progress.OrbitalInitialHostDistance
+	if initial <= 0 {
+		t.Fatalf("missing initial host distance: %+v", g.world.Mission.Progress)
+	}
+	if err := g.world.Apply(sim.ObserveMission{HostDistance: initial * (1 - yavinApproachClosureFraction - 0.05)}); err != nil {
+		t.Fatal(err)
+	}
+	if g.yavinApproachReady() {
+		t.Fatal("orbital approach ignored missing engagement")
+	}
+	for range int(math.Ceil(yavinEngagementSeconds / g.profile.Simulation.TickSeconds)) {
+		if err := g.world.Apply(sim.ObserveMission{UnderEngagement: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !g.yavinApproachReady() {
+		t.Fatalf("orbital approach remained locked: %+v", g.world.Mission.Progress)
+	}
+}
+
+func TestYavinApproachTransitionWaitsForMissionEvidence(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	var surface *localEnvironment
+	var approach environment.Transition
+	for index := range g.environments {
+		runtime := &g.environments[index]
+		if runtime.bound.Definition.Name != environment.DeathStarTrenchName {
+			continue
+		}
+		for _, candidate := range runtime.bound.Definition.Transitions {
+			if candidate.Name == "approach" {
+				surface, approach = runtime, candidate
+				break
+			}
+		}
+	}
+	if surface == nil {
+		t.Fatal("missing Death Star approach transition")
+	}
+	framePose, err := g.world.FramePose(surface.bound.FrameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	player := g.objectByID(fighterID)
+	player.Pose = kinematics.Compose(framePose, kinematics.Pose{Position: approach.Trigger.Center, Orientation: math3d.IdentityQuaternion()})
+	g.world.Objects = g.objects
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.transitions) != 0 {
+		t.Fatal("Death Star approach started without orbital progress and engagement")
+	}
+	initial := g.world.Mission.Progress.OrbitalInitialHostDistance
+	if err := g.world.Apply(sim.ObserveMission{HostDistance: initial * (1 - yavinApproachClosureFraction - 0.05)}); err != nil {
+		t.Fatal(err)
+	}
+	for range int(math.Ceil(yavinEngagementSeconds / g.profile.Simulation.TickSeconds)) {
+		if err := g.world.Apply(sim.ObserveMission{UnderEngagement: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	if _, transitioning := g.transitions[fighterID]; !transitioning {
+		t.Fatal("Death Star approach did not begin after orbital evidence")
 	}
 }
 
@@ -2039,8 +2124,99 @@ func TestCockpitMissionTargetTracksAuthoritativeObjective(t *testing.T) {
 		t.Fatal(err)
 	}
 	target, ok = g.missionObjectiveTarget()
-	if !ok || target != environment.DeathStarExhaustPortPoint() {
+	checkpoints := environment.DeathStarTrenchCheckpoints()
+	if !ok || target != (math3d.Vec3{Y: -2, Z: checkpoints[0]}) {
 		t.Fatalf("trench target=%+v, ok=%v", target, ok)
+	}
+}
+
+func TestYavinTrenchRunRequiresForwardEntryAndOrderedCheckpoints(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	if err := g.startYavinMission(true); err != nil {
+		t.Fatal(err)
+	}
+	player := g.objectByID(fighterID)
+	if player == nil {
+		t.Fatal("missing player")
+	}
+	// Dropping into the terminal tile is not a legal trench entry.
+	player.Pose.Position = math3d.Vec3{Y: -4, Z: 150}
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionSurfaceAssault {
+		t.Fatalf("terminal shortcut advanced mission to %s", g.world.Mission.Phase)
+	}
+	// The actual trench mouth and forward heading begin the attack run.
+	player.Pose.Position = environment.DeathStarTrenchEntryPoint()
+	player.Pose.Orientation = math3d.IdentityQuaternion()
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionTrenchRun {
+		t.Fatalf("legal entry phase=%s", g.world.Mission.Phase)
+	}
+	checkpoints := environment.DeathStarTrenchCheckpoints()
+	// A position beyond the route is not enough: one tick can record only the
+	// first crossed gate, never skip directly to the terminal attack run.
+	player.Pose.Position.Z = checkpoints[len(checkpoints)-1] + 1
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Progress.TrenchCheckpoint != 1 || g.world.Mission.Phase != sim.MissionTrenchRun {
+		t.Fatalf("terminal shortcut progress=%+v phase=%s", g.world.Mission.Progress, g.world.Mission.Phase)
+	}
+	// Return to the first gate, then fly the remaining gates in order. The
+	// final gate alone enables the terminal run.
+	player.Pose.Position.Z = checkpoints[0] + 1
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	for index, checkpoint := range checkpoints[1:] {
+		player.Pose.Position.Z = checkpoint + 1
+		if err := g.updateYavinMission(); err != nil {
+			t.Fatal(err)
+		}
+		if index+2 < len(checkpoints) && g.world.Mission.Phase != sim.MissionTrenchRun {
+			t.Fatalf("checkpoint %d advanced phase to %s", index, g.world.Mission.Phase)
+		}
+	}
+	if g.world.Mission.Phase != sim.MissionExhaustPortAttack {
+		t.Fatalf("completed route phase=%s", g.world.Mission.Phase)
+	}
+}
+
+func TestYavinTrenchRunEscalatesExistingSurfaceEncounter(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	if err := g.startYavinMission(true); err != nil {
+		t.Fatal(err)
+	}
+	runtime := deathStarSurfaceRuntime(g)
+	if runtime == nil {
+		t.Fatal("missing surface runtime")
+	}
+	initial := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team)
+	if initial != g.profile.Surface.InitialAttackers {
+		t.Fatalf("surface attackers=%d, want %d", initial, g.profile.Surface.InitialAttackers)
+	}
+	// Surface assault keeps the initial screen finite. The attack run is the
+	// explicit escalation point for the existing pursuer/reinforcement system.
+	g.updateSurfaceEncounters()
+	if active := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team); active != initial {
+		t.Fatalf("surface assault unexpectedly reinforced to %d", active)
+	}
+	if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionTrenchRun, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	g.updateSurfaceEncounters()
+	if active := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team); active <= initial || active > g.profile.Surface.MaxAttackers {
+		t.Fatalf("trench escalation attackers=%d, initial=%d max=%d", active, initial, g.profile.Surface.MaxAttackers)
 	}
 }
 

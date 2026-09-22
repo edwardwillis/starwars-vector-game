@@ -27,6 +27,13 @@ const (
 	deathStarTrenchDepth       = 14.0
 )
 
+var deathStarTrenchRoute = [...]float64{
+	float64(trenchFirstTileZ)*deathStarTileSize + deathStarTileSize/2 - 4,
+	0.5 * deathStarTileSize,
+	float64(trenchLastTileZ)*deathStarTileSize - deathStarTileSize/2 + 4,
+	float64(trenchLastTileZ)*deathStarTileSize + deathStarTileSize/2 - 20,
+}
+
 type DeathStarMissionRegion uint8
 
 const (
@@ -56,6 +63,44 @@ func DeathStarTrenchGuidePoint(from math3d.Vec3) math3d.Vec3 {
 	start := (float64(trenchFirstTileZ)-0.5)*deathStarTileSize + 8
 	end := (float64(trenchLastTileZ)+0.5)*deathStarTileSize - 8
 	return math3d.Vec3{Y: -2, Z: max(start, min(end, from.Z))}
+}
+
+// DeathStarTrenchEntryPoint is the authored, forward-facing mouth of the
+// finite Yavin trench.  The player enters through its open top near this point
+// and then flies in +Z toward the terminal exhaust-port tile.
+func DeathStarTrenchEntryPoint() math3d.Vec3 {
+	return math3d.Vec3{Y: -2, Z: float64(trenchFirstTileZ) * deathStarTileSize}
+}
+
+// DeathStarTrenchEntryContains accepts only the mouth of the authored trench,
+// rather than every recessed tile.  It keeps a surface player from beginning
+// the attack run by diving directly into the terminal section.
+func DeathStarTrenchEntryContains(position math3d.Vec3) bool {
+	start := (float64(trenchFirstTileZ) - 0.5) * deathStarTileSize
+	entryEnd := float64(trenchFirstTileZ)*deathStarTileSize + deathStarTileSize/2 - 12
+	return math.Abs(position.X) <= deathStarTrenchHalf-2 &&
+		position.Y <= 0 && position.Y >= -deathStarTrenchDepth+1 &&
+		position.Z >= start+6 && position.Z <= entryEnd
+}
+
+// DeathStarTrenchCheckpoints returns forward route gates derived from the
+// same tile dimensions as the physical trench.  Crossing them in order is a
+// mission rule; their geometry never depends on rendered tile visibility.
+func DeathStarTrenchCheckpoints() []float64 {
+	return deathStarTrenchRoute[:]
+}
+
+// DeathStarTrenchCheckpointCrossed reports whether a craft crossed the next
+// authored route gate in the legal forward direction while remaining inside
+// the physical trench.  checkpoint is zero-based.
+func DeathStarTrenchCheckpointCrossed(checkpoint int, previous, current math3d.Vec3) bool {
+	checkpoints := DeathStarTrenchCheckpoints()
+	if checkpoint < 0 || checkpoint >= len(checkpoints) ||
+		DeathStarRegion(previous) == DeathStarSurfaceRegion || DeathStarRegion(current) == DeathStarSurfaceRegion {
+		return false
+	}
+	gate := checkpoints[checkpoint]
+	return previous.Z < gate && current.Z >= gate
 }
 
 func DeathStarExhaustPortPoint() math3d.Vec3 {

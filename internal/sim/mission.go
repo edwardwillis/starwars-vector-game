@@ -23,13 +23,13 @@ const (
 func (phase MissionPhase) String() string {
 	switch phase {
 	case MissionOrbitalBattle:
-		return "ORBITAL BATTLE"
+		return "BREAK THROUGH IMPERIAL DEFENCES"
 	case MissionApproach:
 		return "APPROACH THE DEATH STAR"
 	case MissionSurfaceAssault:
 		return "FIND THE EXHAUST TRENCH"
 	case MissionTrenchRun:
-		return "BEGIN ATTACK RUN"
+		return "FLY THE TRENCH"
 	case MissionExhaustPortAttack:
 		return "TARGET THE EXHAUST PORT"
 	case MissionEscape:
@@ -56,6 +56,25 @@ type MissionState struct {
 	PhaseStartedTick uint64
 	Revision         uint64
 	Reason           string
+	Progress         MissionProgress
+}
+
+// MissionProgress holds compact, renderer-independent evidence used by an
+// active mission.  It is deliberately mission-neutral: gameplay decides what
+// constitutes an observation, while the simulation preserves the ordered
+// state that snapshots and later authoritative hosts need to reproduce.
+type MissionProgress struct {
+	// OrbitalInitialHostDistance and OrbitalClosestHostDistance let an
+	// approach rule require real closure on the mission host without using a
+	// kill quota.  They are measured in the player's current simulation frame.
+	OrbitalInitialHostDistance float64
+	OrbitalClosestHostDistance float64
+	OrbitalEngagementTicks     uint64
+
+	// TrenchCheckpoint is the number of forward route checkpoints passed in
+	// order.  It is intentionally a count rather than a world position so the
+	// authored environment remains the source of geometric truth.
+	TrenchCheckpoint int
 }
 
 type MissionEvent struct {
@@ -139,6 +158,45 @@ func (command ReportMissionFeedback) Apply(world *World) error {
 	return nil
 }
 
+// ObserveMission records fixed-tick, authoritative evidence without changing
+// phase.  Orbital observations establish and refine host closure, while a
+// trench observation can advance by exactly one previously validated route
+// checkpoint.  Geometry validation stays with the environment/gameplay layer;
+// this command protects ordering in the simulation state.
+type ObserveMission struct {
+	HostDistance     float64
+	UnderEngagement  bool
+	TrenchCheckpoint int // one-based; zero means no checkpoint observation
+}
+
+func (command ObserveMission) Apply(world *World) error {
+	mission := &world.Mission
+	if mission.Phase == MissionInactive || mission.Phase.terminal() {
+		return fmt.Errorf("mission cannot record progress from %s", mission.Phase)
+	}
+	if command.HostDistance > 0 && mission.Phase == MissionOrbitalBattle {
+		if mission.Progress.OrbitalInitialHostDistance == 0 {
+			mission.Progress.OrbitalInitialHostDistance = command.HostDistance
+			mission.Progress.OrbitalClosestHostDistance = command.HostDistance
+		} else if command.HostDistance < mission.Progress.OrbitalClosestHostDistance {
+			mission.Progress.OrbitalClosestHostDistance = command.HostDistance
+		}
+	}
+	if command.UnderEngagement && mission.Phase == MissionOrbitalBattle {
+		mission.Progress.OrbitalEngagementTicks++
+	}
+	if command.TrenchCheckpoint != 0 {
+		if mission.Phase != MissionTrenchRun {
+			return fmt.Errorf("mission cannot record trench checkpoint from %s", mission.Phase)
+		}
+		if command.TrenchCheckpoint != mission.Progress.TrenchCheckpoint+1 {
+			return fmt.Errorf("invalid trench checkpoint %d after %d", command.TrenchCheckpoint, mission.Progress.TrenchCheckpoint)
+		}
+		mission.Progress.TrenchCheckpoint = command.TrenchCheckpoint
+	}
+	return nil
+}
+
 type ResetMission struct{}
 
 func (ResetMission) Apply(world *World) error {
@@ -150,6 +208,7 @@ func (ResetMission) Apply(world *World) error {
 	world.Mission.PhaseStartedTick = world.Tick
 	world.Mission.Revision++
 	world.Mission.Reason = "restart"
+	world.Mission.Progress = MissionProgress{}
 	world.appendMissionEvent(previous, MissionOrbitalBattle, "restart")
 	return nil
 }

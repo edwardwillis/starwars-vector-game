@@ -146,6 +146,7 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.environments = fresh.environments
 	g.transitions = fresh.transitions
 	g.transitionCommitments = fresh.transitionCommitments
+	g.missionLastPosition = fresh.missionLastPosition
 	g.objects = fresh.objects
 	g.pipeline = fresh.pipeline
 	g.initialPose = fresh.initialPose

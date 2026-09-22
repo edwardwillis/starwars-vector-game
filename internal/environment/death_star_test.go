@@ -71,6 +71,29 @@ func TestDeathStarHorizonTilesAreVisualOnly(t *testing.T) {
 	}
 }
 
+func TestDeathStarTrenchRouteRequiresForwardPhysicalProgress(t *testing.T) {
+	entry := DeathStarTrenchEntryPoint()
+	if !DeathStarTrenchEntryContains(entry) || DeathStarTrenchEntryContains(math3d.Vec3{Y: -4, Z: 150}) {
+		t.Fatalf("trench entry volume accepted the wrong route: entry=%+v", entry)
+	}
+	checkpoints := DeathStarTrenchCheckpoints()
+	if len(checkpoints) < 2 {
+		t.Fatalf("trench route is too short: %v", checkpoints)
+	}
+	previous := entry
+	current := previous
+	current.Z = checkpoints[0] + 1
+	if !DeathStarTrenchCheckpointCrossed(0, previous, current) {
+		t.Fatal("forward traversal did not cross first trench gate")
+	}
+	if DeathStarTrenchCheckpointCrossed(1, current, previous) {
+		t.Fatal("reverse traversal crossed a trench gate")
+	}
+	if DeathStarTrenchCheckpointCrossed(0, math3d.Vec3{Y: 4, Z: checkpoints[0] - 1}, current) {
+		t.Fatal("surface flight crossed a trench gate")
+	}
+}
+
 func TestDeathStarSurfaceFeaturesAreOpaque(t *testing.T) {
 	tile := DeathStarTrench().Tile(TileCoordinate{X: 2, Z: 0})
 	if len(tile.Features) == 0 {

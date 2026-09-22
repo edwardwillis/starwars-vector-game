@@ -1465,10 +1465,6 @@ proton-torpedo weapon and exhaust-port validation are also implemented. The
 remaining Yavin work must integrate those foundations rather than add more
 renderer architecture:
 
-- an orbital fighting-approach rule based on spatial progress plus appropriate
-  engagement/survival evidence, not a visible kill quota;
-- ordered directional trench-run checkpoints and a clear attack retry/failure
-  policy that preserves mission identity and score;
 - an escape countdown, safe-distance rule and deterministic station-destruction
   outcome consumed by presentation code;
 - an authoritative score breakdown and source attribution for score-bearing
@@ -1483,24 +1479,31 @@ renderer architecture:
 Continue in the cheapest gameplay-first order defined by the six approved
 milestones below. Do not require a new rendering abstraction for these rules.
 
-Status: the first two authoritative Yavin slices are implemented in
-the renderer-independent simulation world and snapshots. It enforces the legal
-ordered phases `orbital battle -> approach -> surface assault -> trench run ->
-exhaust-port attack -> escape -> success`, with failure available from any
-active phase and deterministic restart to orbital battle. Gameplay advances
-the implemented phases from authoritative player frame/transition and physical
-trench-region data; camera and render visibility are not inputs. Player
-destruction fails the mission, the direct surface-development start advances
-through the skipped phases explicitly, mission changes emit tick-scoped events,
-and the debug HUD reports the current objective. Proton torpedoes are now
-catalogued, visually distinct projectiles with finite player ammunition, a
-dedicated command/cooldown, authoritative ownership/team identity, and travel
-distance accumulated by the simulation. The terminal exhaust port accepts only
-an Alliance player's proton torpedo inside the configured arming/range,
-alignment, and forward/downward approach envelope. Invalid payload, owner,
-range, aim, or direction attempts retain the attack objective and publish an
-authoritative reason; a valid impact advances to escape. Escape completion and
-success remain deliberately unreachable until the countdown/outcome slice.
+Status: Milestones 1 and 2 are implemented. The renderer-independent
+simulation world and snapshots retain the legal ordered phases `orbital battle
+-> approach -> surface assault -> trench run -> exhaust-port attack -> escape
+-> success`, with failure available from any active phase and deterministic
+restart to orbital battle. The orbital approach now requires real closure on
+the logical Death Star and cumulative time under an active Imperial fighter
+screen; it is not a visible kill quota. The surface environment owns a
+forward-only entry mouth and ordered route gates derived from its physical
+trench tiles, so a terminal drop or reverse shortcut cannot enable the attack
+run. Existing surface pursuers and reinforcements escalate from the initial
+surface assault to the trench run without creating a second behavior system.
+Gameplay advances these phases from authoritative player frame/transition and
+physical trench-region data; camera and render visibility are not inputs.
+Player destruction fails the mission, the direct surface-development start
+advances through the skipped phases explicitly, mission changes emit
+tick-scoped events, and the debug HUD reports the current objective. Proton
+torpedoes are catalogued, visually distinct projectiles with finite player
+ammunition, a dedicated command/cooldown, authoritative ownership/team
+identity, and travel distance accumulated by the simulation. The terminal
+exhaust port accepts only an Alliance player's proton torpedo inside the
+configured arming/range, alignment, and forward/downward approach envelope.
+Invalid payload, owner, range, aim, or direction attempts retain the attack
+objective and publish an authoritative reason; a valid impact advances to
+escape. Escape completion and success remain deliberately unreachable until
+the countdown/outcome slice.
 The main player's first-person cockpit also has a compact vector targeting
 computer that names the current objective and uses a restrained red direction
 arrow. Its target is semantic mission geometry rather than whatever happens to
@@ -1573,6 +1576,11 @@ controllers and encounter state; do not first build a generic behavior library.
 Acceptance: normal play reliably flows through fighting approach, surface
 assault, trench discovery, legal trench entry and the terminal attack run while
 leaving the player in physical control.
+
+Status: implemented with an authoritative closure-plus-engagement approach
+gate, forward-only trench entry and checkpoint progression, and phase-driven
+surface encounter escalation. Attack validation, escape and outcome remain
+Milestone 3+ work.
 
 #### Milestone 3 — Complete the authoritative attack and escape rules
 

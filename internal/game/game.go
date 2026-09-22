@@ -99,6 +99,7 @@ type surfaceEncounterState struct {
 	participant   scene.ObjectID
 	nextWaveAt    float64
 	wave          int
+	missionPhase  sim.MissionPhase
 	cannonReadyAt map[string]float64
 	cannonAim     map[string]cannonAimState
 }
@@ -851,6 +852,16 @@ const (
 
 const yavinMissionID = "battle-of-yavin"
 
+const (
+	// The Imperial screen starts ahead of the player and closes naturally as
+	// the player advances. These are mission-design constraints, not visual or
+	// collision thresholds: they keep the orbital approach a fight toward the
+	// station rather than a free transition trigger.
+	yavinApproachClosureFraction = 0.35
+	yavinEngagementRange         = 180.0
+	yavinEngagementSeconds       = 3.0
+)
+
 func (mode flightMode) String() string {
 	if mode == modeManual {
 		return "Manual"
@@ -870,6 +881,7 @@ type Game struct {
 	environments             []localEnvironment
 	transitions              map[scene.ObjectID]environmentTransition
 	transitionCommitments    map[scene.ObjectID]bool
+	missionLastPosition      map[scene.ObjectID]math3d.Vec3
 	objects                  []scene.Object
 	pipeline                 render.Pipeline
 	initialPose              kinematics.Pose
@@ -1075,6 +1087,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		environmentContacts:    make(map[scene.ObjectID]float64),
 		transitions:            make(map[scene.ObjectID]environmentTransition),
 		transitionCommitments:  make(map[scene.ObjectID]bool),
+		missionLastPosition:    make(map[scene.ObjectID]math3d.Vec3),
 		respawnSequence:        uint64(gameProfile.Swarm.Count),
 		shieldStrength:         gameProfile.Player.Shield.Maximum,
 		torpedoesRemaining:     gameProfile.Combat.Torpedo.Ammunition,
@@ -1469,6 +1482,9 @@ func (g *Game) startYavinMission(surfaceStart bool) error {
 	if err := g.world.Apply(sim.StartMission{ID: yavinMissionID, PlayerID: fighterID, HostID: hostID}); err != nil {
 		return err
 	}
+	if err := g.initializeYavinOrbitalProgress(); err != nil {
+		return err
+	}
 	if surfaceStart {
 		if err := g.world.Apply(
 			sim.AdvanceMission{To: sim.MissionApproach, Reason: "surface-development-start"},
@@ -1478,6 +1494,25 @@ func (g *Game) startYavinMission(surfaceStart bool) error {
 		}
 	}
 	return nil
+}
+
+func (g *Game) initializeYavinOrbitalProgress() error {
+	if g.world == nil || g.world.Mission.ID != yavinMissionID || g.world.Mission.Phase != sim.MissionOrbitalBattle {
+		return nil
+	}
+	player := g.objectByID(g.world.Mission.PlayerID)
+	if player == nil {
+		return nil
+	}
+	g.missionLastPosition[player.ID] = player.Pose.Position
+	if g.world.Mission.HostID == 0 {
+		return nil
+	}
+	hostPose, err := g.world.PoseInFrame(g.world.Mission.HostID, normalizedObjectFrame(*player))
+	if err != nil {
+		return err
+	}
+	return g.world.Apply(sim.ObserveMission{HostDistance: player.Pose.Position.Sub(hostPose.Position).Length()})
 }
 
 // updateYavinMission derives objective progress from authoritative craft and
@@ -1494,45 +1529,94 @@ func (g *Game) updateYavinMission() error {
 	if player == nil || g.playerDestroyed {
 		return g.world.Apply(sim.FailMission{Reason: "fighter-destroyed"})
 	}
+	previous, known := g.missionLastPosition[player.ID]
+	if !known {
+		previous = player.Pose.Position
+	}
+	defer func() { g.missionLastPosition[player.ID] = player.Pose.Position }()
 	frame := normalizedObjectFrame(*player)
-	for {
-		phase := g.world.Mission.Phase
-		switch phase {
-		case sim.MissionOrbitalBattle:
-			transition, approaching := g.transitions[player.ID]
-			if !approaching || g.deathStarSurfaceRuntime(transition.destination) == nil {
-				if g.deathStarSurfaceRuntime(frame) == nil {
-					return nil
-				}
-			}
-			if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionApproach, Reason: "death-star-approach"}); err != nil {
-				return err
-			}
-		case sim.MissionApproach:
+	if g.world.Mission.Phase == sim.MissionOrbitalBattle {
+		if err := g.observeOrbitalApproach(*player); err != nil {
+			return err
+		}
+	}
+	switch g.world.Mission.Phase {
+	case sim.MissionOrbitalBattle:
+		transition, approaching := g.transitions[player.ID]
+		if !approaching || g.deathStarSurfaceRuntime(transition.destination) == nil {
 			if g.deathStarSurfaceRuntime(frame) == nil {
 				return nil
 			}
-			if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "surface-entry"}); err != nil {
-				return err
-			}
-		case sim.MissionSurfaceAssault:
-			if g.deathStarSurfaceRuntime(frame) == nil || environment.DeathStarRegion(player.Pose.Position) == environment.DeathStarSurfaceRegion {
-				return nil
-			}
-			if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionTrenchRun, Reason: "trench-entry"}); err != nil {
-				return err
-			}
-		case sim.MissionTrenchRun:
-			if g.deathStarSurfaceRuntime(frame) == nil || environment.DeathStarRegion(player.Pose.Position) != environment.DeathStarExhaustAttackRegion {
-				return nil
-			}
-			if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionExhaustPortAttack, Reason: "terminal-attack-run"}); err != nil {
-				return err
-			}
-		default:
+		}
+		return g.world.Apply(sim.AdvanceMission{To: sim.MissionApproach, Reason: "death-star-approach"})
+	case sim.MissionApproach:
+		if g.deathStarSurfaceRuntime(frame) == nil {
 			return nil
 		}
+		return g.world.Apply(sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "surface-entry"})
+	case sim.MissionSurfaceAssault:
+		if g.deathStarSurfaceRuntime(frame) == nil || !environment.DeathStarTrenchEntryContains(player.Pose.Position) || player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) <= 0.2 {
+			return nil
+		}
+		return g.world.Apply(sim.AdvanceMission{To: sim.MissionTrenchRun, Reason: "trench-entry"})
+	case sim.MissionTrenchRun:
+		checkpoint := g.world.Mission.Progress.TrenchCheckpoint
+		if player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) <= 0.2 ||
+			!environment.DeathStarTrenchCheckpointCrossed(checkpoint, previous, player.Pose.Position) {
+			return nil
+		}
+		if err := g.world.Apply(sim.ObserveMission{TrenchCheckpoint: checkpoint + 1}); err != nil {
+			return err
+		}
+		if g.world.Mission.Progress.TrenchCheckpoint < len(environment.DeathStarTrenchCheckpoints()) {
+			return nil
+		}
+		return g.world.Apply(sim.AdvanceMission{To: sim.MissionExhaustPortAttack, Reason: "terminal-attack-run"})
+	default:
+		return nil
 	}
+}
+
+// observeOrbitalApproach records only simulation-space facts: distance to the
+// logical Death Star host and whether an Imperial fighter is actively close
+// enough to form the defending screen. Rendering, camera and kills are not
+// inputs to the approach rule.
+func (g *Game) observeOrbitalApproach(player scene.Object) error {
+	mission := g.world.Mission
+	if mission.HostID == 0 {
+		return nil
+	}
+	hostPose, err := g.world.PoseInFrame(mission.HostID, normalizedObjectFrame(player))
+	if err != nil {
+		return err
+	}
+	underEngagement := false
+	for _, object := range g.objects {
+		if !object.Targetable || object.Team == player.Team || object.Team == scene.TeamNeutral || normalizedObjectFrame(object) != normalizedObjectFrame(player) {
+			continue
+		}
+		if object.Pose.Position.Sub(player.Pose.Position).Length() <= yavinEngagementRange {
+			underEngagement = true
+			break
+		}
+	}
+	return g.world.Apply(sim.ObserveMission{
+		HostDistance:    player.Pose.Position.Sub(hostPose.Position).Length(),
+		UnderEngagement: underEngagement,
+	})
+}
+
+func (g *Game) yavinApproachReady() bool {
+	if g.world == nil || g.world.Mission.ID != yavinMissionID || g.world.Mission.Phase != sim.MissionOrbitalBattle {
+		return true
+	}
+	progress := g.world.Mission.Progress
+	if progress.OrbitalInitialHostDistance <= 0 || progress.OrbitalClosestHostDistance <= 0 {
+		return false
+	}
+	closed := progress.OrbitalInitialHostDistance - progress.OrbitalClosestHostDistance
+	return closed >= progress.OrbitalInitialHostDistance*yavinApproachClosureFraction &&
+		float64(progress.OrbitalEngagementTicks)*g.profile.Simulation.TickSeconds >= yavinEngagementSeconds
 }
 
 // transferPortalProjectiles performs an authoritative frame change at the
@@ -1711,6 +1795,14 @@ func (g *Game) updateEnvironmentTransitions() error {
 					insideTrigger = insideTrigger && object.Pose.Forward().Dot(transition.ApproachDirection.Normalize()) > 0.2
 				}
 				inApproach := insideTrigger && (object.ID == fighterID || source != scene.ExteriorFrame)
+				// The player's first Death Star surface transition is a mission
+				// objective, not merely a proximity trigger. Autonomous pursuers
+				// still inherit a transition once the player has legitimately begun
+				// it, preserving the existing cross-frame combat behavior.
+				if inApproach && object.ID == fighterID && source == scene.ExteriorFrame &&
+					transition.Name == "approach" && !g.yavinApproachReady() {
+					inApproach = false
+				}
 				// Pursuers inherit the target's transition. This lets a swarm
 				// fighter follow the player into a local surface frame even when
 				// it is still outside the ordinary approach volume.
@@ -3030,6 +3122,10 @@ func (g *Game) updateSurfaceEncounters() {
 		if !runtime.encounter.started {
 			continue
 		}
+		phase, active := g.yavinSurfaceMissionPhase(runtime)
+		if !active {
+			continue
+		}
 		participant := g.objectByID(runtime.encounter.participant)
 		if participant == nil || normalizedObjectFrame(*participant) != runtime.bound.FrameID || participant.Team != g.profile.Player.Team {
 			participant = g.nearestTeamObject(runtime.bound.FrameID, g.profile.Player.Team, math3d.Vec3{})
@@ -3038,15 +3134,43 @@ func (g *Game) updateSurfaceEncounters() {
 			}
 			runtime.encounter.participant = participant.ID
 		}
-		active := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team)
-		if active < g.profile.Surface.MaxAttackers && g.simulationTime >= runtime.encounter.nextWaveAt {
-			waveSize := min(2, g.profile.Surface.MaxAttackers-active)
+		attackerLimit := g.profile.Surface.InitialAttackers
+		if phase >= sim.MissionTrenchRun {
+			attackerLimit = g.profile.Surface.MaxAttackers
+			// Entering the trench turns a surface skirmish into a pursued attack
+			// run. Promote one immediate deterministic wave, then retain the
+			// existing capped reinforcement cadence.
+			if runtime.encounter.missionPhase < sim.MissionTrenchRun {
+				runtime.encounter.nextWaveAt = g.simulationTime
+			}
+		}
+		runtime.encounter.missionPhase = phase
+		activeAttackers := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team)
+		if activeAttackers < attackerLimit && g.simulationTime >= runtime.encounter.nextWaveAt {
+			waveSize := min(2, attackerLimit-activeAttackers)
 			g.moveAttackersToSurface(runtime, participant.ID, waveSize)
 			runtime.encounter.wave++
 			runtime.encounter.nextWaveAt = g.simulationTime + g.profile.Surface.ReinforcementDelay
 		}
 		g.updateSurfaceCannons(runtime)
 	}
+}
+
+// yavinSurfaceMissionPhase keeps surface pressure tied to the active
+// authoritative mission rather than to camera state or streamed tile detail.
+func (g *Game) yavinSurfaceMissionPhase(runtime *localEnvironment) (sim.MissionPhase, bool) {
+	if runtime == nil || g.world == nil {
+		return sim.MissionInactive, false
+	}
+	mission := g.world.Mission
+	if mission.ID != yavinMissionID || mission.Phase < sim.MissionSurfaceAssault || mission.Phase >= sim.MissionEscape {
+		return sim.MissionInactive, false
+	}
+	player := g.objectByID(mission.PlayerID)
+	if player == nil || normalizedObjectFrame(*player) != runtime.bound.FrameID {
+		return sim.MissionInactive, false
+	}
+	return mission.Phase, true
 }
 
 func (g *Game) countControlledTeam(frame scene.FrameID, team scene.TeamID) int {
@@ -3751,6 +3875,8 @@ func (g *Game) resetFighter() {
 	} else {
 		fighter.Motion = kinematics.Motion{}
 	}
+	g.world.Objects = g.objects
+	_ = g.initializeYavinOrbitalProgress()
 	if g.flow == flowPlaying {
 		g.beginHyperspaceArrival(fighter.Pose)
 	}
@@ -3869,6 +3995,7 @@ func (g *Game) respawnPlayer() {
 	g.viewCamera.ClearFixedView()
 	g.viewCamera.Mode = g.playerViewMode
 	g.viewCamera.TargetID = fighterID
+	_ = g.initializeYavinOrbitalProgress()
 	if g.flow == flowPlaying {
 		g.beginHyperspaceArrival(pose)
 	}
@@ -4124,7 +4251,16 @@ func (g *Game) missionObjectiveTarget() (math3d.Vec3, bool) {
 			return math3d.Vec3{}, false
 		}
 		return environment.DeathStarTrenchGuidePoint(player.Pose.Position), true
-	case sim.MissionTrenchRun, sim.MissionExhaustPortAttack:
+	case sim.MissionTrenchRun:
+		if g.deathStarSurfaceRuntime(normalizedObjectFrame(*player)) == nil {
+			return math3d.Vec3{}, false
+		}
+		checkpoints := environment.DeathStarTrenchCheckpoints()
+		if index := g.world.Mission.Progress.TrenchCheckpoint; index >= 0 && index < len(checkpoints) {
+			return math3d.Vec3{Y: -2, Z: checkpoints[index]}, true
+		}
+		return environment.DeathStarExhaustPortPoint(), true
+	case sim.MissionExhaustPortAttack:
 		if g.deathStarSurfaceRuntime(normalizedObjectFrame(*player)) == nil {
 			return math3d.Vec3{}, false
 		}
