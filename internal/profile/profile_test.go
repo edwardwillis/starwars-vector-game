@@ -60,6 +60,16 @@ func TestPilotDefinesFasterSurfaceCombat(t *testing.T) {
 	}
 }
 
+func TestYavinEscapeDifficultyConfigurationIsUsable(t *testing.T) {
+	cadet, pilot, ace, nightmare := Cadet(), Pilot(), Ace(), Nightmare()
+	if cadet.Yavin.EscapeSafeClearance <= 0 || pilot.Yavin.EscapeSafeClearance <= 0 {
+		t.Fatalf("escape clearance is not configured: cadet=%+v pilot=%+v", cadet.Yavin, pilot.Yavin)
+	}
+	if !(cadet.Yavin.EscapeDeadlineSeconds > pilot.Yavin.EscapeDeadlineSeconds && pilot.Yavin.EscapeDeadlineSeconds > ace.Yavin.EscapeDeadlineSeconds && ace.Yavin.EscapeDeadlineSeconds > nightmare.Yavin.EscapeDeadlineSeconds) {
+		t.Fatalf("escape deadlines do not decrease with difficulty: cadet=%v pilot=%v ace=%v nightmare=%v", cadet.Yavin.EscapeDeadlineSeconds, pilot.Yavin.EscapeDeadlineSeconds, ace.Yavin.EscapeDeadlineSeconds, nightmare.Yavin.EscapeDeadlineSeconds)
+	}
+}
+
 func TestBuiltinResolvesStableNames(t *testing.T) {
 	for _, name := range []string{CadetName, PilotName, AceName, NightmareName} {
 		profile, err := Builtin(name)
@@ -121,6 +131,7 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid auto-level", mutate: func(profile *GameProfile) { profile.Player.AutoLevel.MaxRollRate = 0 }},
 		{name: "same combat team", mutate: func(profile *GameProfile) { profile.Swarm.Team = profile.Player.Team }},
 		{name: "invalid surface speed", mutate: func(profile *GameProfile) { profile.Surface.MaxForward = 0 }},
+		{name: "invalid escape deadline", mutate: func(profile *GameProfile) { profile.Yavin.EscapeDeadlineSeconds = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

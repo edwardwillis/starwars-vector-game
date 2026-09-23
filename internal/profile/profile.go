@@ -132,6 +132,14 @@ type SurfaceCombatConfig struct {
 	GuidanceStrength    float64
 }
 
+// YavinConfig contains the few active-mission rules that are intentionally
+// tuned per difficulty. It is concrete Yavin data, not a generic scripting
+// system for future missions.
+type YavinConfig struct {
+	EscapeDeadlineSeconds float64
+	EscapeSafeClearance   float64
+}
+
 type ObjectPlacement struct {
 	Definition string
 	Appearance string
@@ -155,6 +163,7 @@ type GameProfile struct {
 	Player     PlayerConfig
 	Swarm      SwarmConfig
 	Surface    SurfaceCombatConfig
+	Yavin      YavinConfig
 	World      WorldConfig
 	Difficulty DifficultyConfig
 }
@@ -253,9 +262,10 @@ func Pilot() GameProfile {
 				Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, 0),
 			},
 			AutopilotMotion: kinematics.Motion{
-				Speed:    manual.MaxForward,
-				YawRate:  0.22,
-				RollRate: 0.16,
+				// The orbital arrival begins on the direct line to the Death Star.
+				// A permanent turn here made the new-session launch visibly peel
+				// away from its objective before the player could act.
+				Speed: manual.MaxForward,
 			},
 			Flight:    manual,
 			AutoLevel: autoLevel,
@@ -297,6 +307,7 @@ func Pilot() GameProfile {
 			CannonTraverseSpeed: 2.4, CannonYawLimit: 1.55, CannonPitchLimit: 1.5, CannonFireTolerance: 0.09,
 			MinimumAltitude: 5.5, TerrainLookAhead: 18, GuidanceStrength: 0.85,
 		},
+		Yavin: YavinConfig{EscapeDeadlineSeconds: 45, EscapeSafeClearance: 110},
 		World: WorldConfig{Objects: []ObjectPlacement{{
 			Definition: "builtin/death-star",
 			Appearance: "builtin/death-star-arcade-billboard",
@@ -330,6 +341,7 @@ func Cadet() GameProfile {
 	profile.Surface.MaxActiveCannons = 2
 	profile.Surface.CannonFireMinGap = 1.2
 	profile.Surface.CannonFireMaxGap = 2.0
+	profile.Yavin.EscapeDeadlineSeconds = 60
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -353,6 +365,7 @@ func Ace() GameProfile {
 	profile.Surface.MaxActiveCannons = 5
 	profile.Surface.CannonFireMinGap = 0.65
 	profile.Surface.CannonFireMaxGap = 1.15
+	profile.Yavin.EscapeDeadlineSeconds = 40
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -382,6 +395,7 @@ func Nightmare() GameProfile {
 	profile.Surface.MaxActiveCannons = 6
 	profile.Surface.CannonFireMinGap = 0.45
 	profile.Surface.CannonFireMaxGap = 0.9
+	profile.Yavin.EscapeDeadlineSeconds = 35
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -540,6 +554,9 @@ func (profile GameProfile) Validate() error {
 	if err := validateSurfaceCombat(profile.Surface); err != nil {
 		return fmt.Errorf("surface combat: %w", err)
 	}
+	if err := validateYavin(profile.Yavin); err != nil {
+		return fmt.Errorf("Battle of Yavin: %w", err)
+	}
 	if profile.Player.Shield.Maximum <= 0 || profile.Player.Shield.LaserDamage <= 0 || profile.Player.Shield.CollisionDamage <= 0 {
 		return fmt.Errorf("shield maximum and damage values must be positive")
 	}
@@ -673,6 +690,13 @@ func validateSurfaceCombat(config SurfaceCombatConfig) error {
 		return err
 	}
 	return nil
+}
+
+func validateYavin(config YavinConfig) error {
+	if err := validatePositive("escape deadline", config.EscapeDeadlineSeconds); err != nil {
+		return err
+	}
+	return validatePositive("escape safe clearance", config.EscapeSafeClearance)
 }
 
 func validatePursuit(config control.PursuitConfig) error {

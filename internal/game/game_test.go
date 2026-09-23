@@ -114,6 +114,12 @@ func TestGameStartsInCockpitAtMaximumForwardSpeed(t *testing.T) {
 	if fighter.Motion.Speed != g.profile.Player.Flight.MaxForward {
 		t.Fatalf("fighter speed after first update is %v, want maximum %v", fighter.Motion.Speed, g.profile.Player.Flight.MaxForward)
 	}
+	if fighter.Motion.YawRate != 0 || fighter.Motion.RollRate != 0 {
+		t.Fatalf("initial autopilot turn rates=%+v, want straight flight", fighter.Motion)
+	}
+	if fighter.Pose.Forward().Dot(kinematics.LocalForward) < 0.999 {
+		t.Fatalf("initial fighter forward=%+v, want direct forward approach", fighter.Pose.Forward())
+	}
 }
 
 func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
@@ -132,8 +138,11 @@ func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
 	if g.hyperspaceArrival != nil {
 		t.Fatal("arrival remained active after its configured duration")
 	}
-	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Pose.Position != target.Position || fighter.Motion.Speed != g.autoMotion.Speed {
+	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Pose.Position != target.Position || fighter.Motion != g.autoMotion {
 		t.Fatalf("arrival did not restore target pose/motion: %+v", fighter)
+	}
+	if fighter := g.objectByID(fighterID); fighter.Motion.YawRate != 0 || fighter.Motion.RollRate != 0 {
+		t.Fatalf("arrival restored turning launch motion: %+v", fighter.Motion)
 	}
 	if g.viewCamera.Mode != camera.Cockpit {
 		t.Fatalf("arrival restored view %v, want original cockpit view", g.viewCamera.Mode)
@@ -447,6 +456,27 @@ func TestInstallationDamagePersistsAndEmitsBoundedFracture(t *testing.T) {
 	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
 	if runtime.featureStates[feature.ID].Hits != 3 || len(g.objects) != 6 || len(g.world.FeatureEvents) != 3 {
 		t.Fatal("already-destroyed installation accepted another hit")
+	}
+}
+
+func TestPlayerDestroyedSurfaceInstallationAwardsMissionScore(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &localEnvironment{bound: environment.Bound{HostID: g.world.Mission.HostID}, featureStates: make(map[string]featureDamageState)}
+	feature := environment.Feature{ID: "test/player-cannon", Kind: "cannon", Hittable: true, HitPoints: 2}
+	projectile := scene.Object{ID: 81001, Frame: scene.FrameID("test/surface"), Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}, Motion: kinematics.Motion{Speed: 80}}
+	g.owners[projectile.ID] = fighterID
+	hit := collision.Hit{Normal: math3d.Vec3{Y: 1}}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if score := g.world.Mission.Score; score.SurfaceInstallations != 1 || score.CombatPoints != sim.SurfaceInstallationPoints {
+		t.Fatalf("surface installation score=%+v", score)
+	}
+	g.hitEnvironmentFeature(runtime, feature, projectile, hit)
+	if score := g.world.Mission.Score; score.SurfaceInstallations != 1 {
+		t.Fatalf("destroyed installation was scored more than once: %+v", score)
 	}
 }
 
@@ -1292,7 +1322,7 @@ func TestRecenteringFragmentPreservesWorldGeometry(t *testing.T) {
 	}
 }
 
-func TestUpdateWaitsForPlayingThenMovesAndRotatesFighter(t *testing.T) {
+func TestUpdateWaitsForPlayingThenMovesFighter(t *testing.T) {
 	g := New()
 	before := g.objects[0].Pose
 	if err := g.Update(); err != nil {
@@ -1309,8 +1339,8 @@ func TestUpdateWaitsForPlayingThenMovesAndRotatesFighter(t *testing.T) {
 	if after.Position == before.Position {
 		t.Fatal("Update did not move the fighter")
 	}
-	if after.Orientation == before.Orientation {
-		t.Fatal("Update did not rotate the fighter")
+	if after.Orientation != before.Orientation {
+		t.Fatalf("neutral launch autopilot rotated the fighter: before=%+v after=%+v", before.Orientation, after.Orientation)
 	}
 }
 
@@ -1594,6 +1624,9 @@ func TestOpposingLaserBoltsInterceptWithoutDisintegration(t *testing.T) {
 
 func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
 	target := g.objectByID(2)
 	target.Pose = kinematics.Pose{
 		Position:    math3d.Vec3{},
@@ -1628,6 +1661,9 @@ func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	}
 	if len(g.respawns) != 1 || g.kills != 1 {
 		t.Fatalf("hit queued %d respawns and %d kills, want 1 and 1", len(g.respawns), g.kills)
+	}
+	if score := g.world.Mission.Score; score.FighterKills != 1 || score.CombatPoints != sim.FighterKillPoints {
+		t.Fatalf("fighter kill score=%+v", score)
 	}
 	for id, transient := range g.debris {
 		fragment := g.objectByID(id)
@@ -2050,6 +2086,23 @@ func TestExhaustPortAttackRequiresValidTorpedoEnvelope(t *testing.T) {
 	}
 }
 
+func TestExhaustPortReadinessUsesSameAttackEnvelope(t *testing.T) {
+	config := combat.DefaultTorpedoConfig()
+	port := environment.DeathStarExhaustPortPoint()
+	fighter := catalog.XWing(fighterID, kinematics.Pose{
+		Position:    port.Add(math3d.Vec3{Y: 8, Z: -32}),
+		Orientation: math3d.IdentityQuaternion(),
+	})
+	mission := sim.MissionState{Phase: sim.MissionExhaustPortAttack, PlayerID: fighterID}
+	if reason := validateExhaustPortReadiness(fighter, fighterID, mission, "muzzle-lower-left", port, config); reason != "" {
+		t.Fatalf("valid launch prediction rejected: %s", reason)
+	}
+	offCenter := port.Add(math3d.Vec3{X: 3})
+	if reason := validateExhaustPortReadiness(fighter, fighterID, mission, "muzzle-lower-left", offCenter, config); reason != exhaustAttackOffCenter {
+		t.Fatalf("off-centre launch prediction=%q, want %q", reason, exhaustAttackOffCenter)
+	}
+}
+
 func TestValidExhaustPortImpactAdvancesMissionToEscape(t *testing.T) {
 	g := New()
 	if err := g.startYavinMission(false); err != nil {
@@ -2072,6 +2125,99 @@ func TestValidExhaustPortImpactAdvancesMissionToEscape(t *testing.T) {
 	g.resolveExhaustPortAttack(torpedo, collision.Hit{Point: port, Normal: math3d.Vec3{Y: 1}})
 	if g.world.Mission.Phase != sim.MissionEscape || g.world.Mission.Reason != "exhaust-port-hit" {
 		t.Fatalf("mission=%+v", g.world.Mission)
+	}
+	wantDeadline := uint64(math.Ceil(g.profile.Yavin.EscapeDeadlineSeconds / g.profile.Simulation.TickSeconds))
+	if got := g.world.Mission.Progress.EscapeDeadlineTick; got != g.world.Tick+wantDeadline {
+		t.Fatalf("escape deadline=%d, want %d", got, g.world.Tick+wantDeadline)
+	}
+}
+
+func TestYavinEscapeRequiresExteriorSafeDistanceBeforeSuccess(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []sim.MissionPhase{sim.MissionApproach, sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.world.Apply(sim.BeginEscape{DeadlineTick: g.world.Tick + 600, Reason: "exhaust-port-hit"}); err != nil {
+		t.Fatal(err)
+	}
+	fighter := g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("player fighter missing")
+	}
+	fighter.Frame = environment.DeathStarTrenchFrame
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionEscape {
+		t.Fatalf("local-frame escape completed: %+v", g.world.Mission)
+	}
+	host := g.objectByID(g.world.Mission.HostID)
+	if host == nil {
+		t.Fatal("Death Star host missing")
+	}
+	fighter.Frame = scene.ExteriorFrame
+	fighter.Pose.Position = host.Pose.Position.Add(math3d.Vec3{Z: host.CollisionRadius + g.profile.Yavin.EscapeSafeClearance + 1})
+	g.world.Objects = g.objects
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionSucceeded || g.world.Mission.Reason != "safe-distance-reached" {
+		t.Fatalf("safe exterior escape=%+v", g.world.Mission)
+	}
+}
+
+func TestYavinEscapeDeadlineFailsMission(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []sim.MissionPhase{sim.MissionApproach, sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := g.world.Tick + 1
+	if err := g.world.Apply(sim.BeginEscape{DeadlineTick: deadline, Reason: "exhaust-port-hit"}); err != nil {
+		t.Fatal(err)
+	}
+	host := g.objectByID(g.world.Mission.HostID)
+	fighter := g.objectByID(fighterID)
+	if host == nil || fighter == nil {
+		t.Fatal("required escape objects missing")
+	}
+	fighter.Frame = scene.ExteriorFrame
+	fighter.Pose.Position = host.Pose.Position.Add(math3d.Vec3{Z: host.CollisionRadius + 1})
+	g.world.Objects = g.objects
+	g.world.Tick = deadline
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionFailed || g.world.Mission.Reason != escapeDeadlineExceeded {
+		t.Fatalf("expired escape=%+v", g.world.Mission)
+	}
+}
+
+func TestYavinMissionFailsWhenAttackTorpedoesAreExpended(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []sim.MissionPhase{sim.MissionApproach, sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g.torpedoesRemaining = 0
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionFailed || g.world.Mission.Reason != exhaustAttackExpended {
+		t.Fatalf("expended attack=%+v", g.world.Mission)
 	}
 }
 

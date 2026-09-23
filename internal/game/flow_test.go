@@ -403,3 +403,52 @@ func TestPlayableNonYavinMissionFailsExplicitly(t *testing.T) {
 		t.Fatalf("unsupported mission changed state: flow=%v mission=%s", g.flow, g.world.Mission.Phase)
 	}
 }
+
+func TestTerminalYavinMissionUsesOutcomeThenResultAndRetryLaunchBoundary(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	g.flow = flowPlaying
+	oldWorld := g.world
+	if err := g.world.Apply(sim.FailMission{Reason: "fighter-destroyed"}); err != nil {
+		t.Fatal(err)
+	}
+	g.enterTerminalMissionFlow()
+	if g.flow != flowOutcome {
+		t.Fatalf("terminal mission flow=%v, want outcome", g.flow)
+	}
+	if err := g.applyShellAction(shellActionOutcomeContinue); err != nil {
+		t.Fatal(err)
+	}
+	if g.flow != flowResult {
+		t.Fatalf("outcome flow=%v, want result", g.flow)
+	}
+	if err := g.applyShellAction(shellActionRetryMission); err != nil {
+		t.Fatal(err)
+	}
+	if g.flow != flowBriefing || g.world != oldWorld {
+		t.Fatalf("retry reconstructed before launch: flow=%v worldChanged=%v", g.flow, g.world != oldWorld)
+	}
+	if err := g.applyShellAction(shellActionLaunch); err != nil {
+		t.Fatal(err)
+	}
+	if g.world == oldWorld || g.world.Mission.Phase != sim.MissionOrbitalBattle || g.world.Mission.Score != (sim.MissionScore{}) {
+		t.Fatalf("retry did not create a fresh Yavin session: mission=%+v", g.world.Mission)
+	}
+}
+
+func TestResultCanReturnToTitleWithoutReconstructingSession(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	g.flow = flowResult
+	oldWorld := g.world
+	if err := g.applyShellAction(shellActionReturnToTitle); err != nil {
+		t.Fatal(err)
+	}
+	if g.flow != flowTitle || g.world != oldWorld {
+		t.Fatalf("title return changed session prematurely: flow=%v worldChanged=%v", g.flow, g.world != oldWorld)
+	}
+}

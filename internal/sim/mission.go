@@ -57,6 +57,7 @@ type MissionState struct {
 	Revision         uint64
 	Reason           string
 	Progress         MissionProgress
+	Score            MissionScore
 }
 
 // MissionProgress holds compact, renderer-independent evidence used by an
@@ -75,6 +76,10 @@ type MissionProgress struct {
 	// order.  It is intentionally a count rather than a world position so the
 	// authored environment remains the source of geometric truth.
 	TrenchCheckpoint int
+
+	// EscapeDeadlineTick is set only after a valid terminal attack. It makes
+	// the escape clock snapshot-safe and independent of presentation timing.
+	EscapeDeadlineTick uint64
 }
 
 type MissionEvent struct {
@@ -118,10 +123,34 @@ type AdvanceMission struct {
 	Reason string
 }
 
+// BeginEscape records the only valid transition into the post-attack escape
+// phase. The deadline is expressed in fixed simulation ticks so rendering
+// stalls, camera changes, and audio presentation cannot change mission rules.
+type BeginEscape struct {
+	DeadlineTick uint64
+	Reason       string
+}
+
+func (command BeginEscape) Apply(world *World) error {
+	mission := &world.Mission
+	if mission.Phase != MissionExhaustPortAttack {
+		return fmt.Errorf("mission cannot begin escape from %s", mission.Phase)
+	}
+	if command.DeadlineTick <= world.Tick {
+		return fmt.Errorf("escape deadline must be after current tick")
+	}
+	mission.Progress.EscapeDeadlineTick = command.DeadlineTick
+	world.setMissionPhase(MissionEscape, command.Reason)
+	return nil
+}
+
 func (command AdvanceMission) Apply(world *World) error {
 	mission := &world.Mission
 	if mission.Phase == MissionInactive || mission.Phase.terminal() {
 		return fmt.Errorf("mission is not advanceable from %s", mission.Phase)
+	}
+	if command.To == MissionEscape {
+		return fmt.Errorf("mission escape requires a deadline")
 	}
 	if command.To != mission.Phase+1 || command.To > MissionSucceeded {
 		return fmt.Errorf("invalid mission transition %s -> %s", mission.Phase, command.To)
@@ -209,6 +238,7 @@ func (ResetMission) Apply(world *World) error {
 	world.Mission.Revision++
 	world.Mission.Reason = "restart"
 	world.Mission.Progress = MissionProgress{}
+	world.Mission.Score = MissionScore{}
 	world.appendMissionEvent(previous, MissionOrbitalBattle, "restart")
 	return nil
 }
@@ -219,6 +249,9 @@ func (world *World) setMissionPhase(phase MissionPhase, reason string) {
 	world.Mission.PhaseStartedTick = world.Tick
 	world.Mission.Revision++
 	world.Mission.Reason = reason
+	if phase == MissionSucceeded {
+		world.awardMissionScore(world.Mission.PlayerID, ScoreMissionCompletion)
+	}
 	world.appendMissionEvent(previous, phase, reason)
 }
 

@@ -43,7 +43,7 @@ func TestMissionFailureIsIdempotentAndResettable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID}, FailMission{Reason: "fighter-destroyed"}); err != nil {
+	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID}, AwardMissionScore{SourceID: player.ID, Kind: ScoreFighterKill}, FailMission{Reason: "fighter-destroyed"}); err != nil {
 		t.Fatal(err)
 	}
 	revision := world.Mission.Revision
@@ -53,7 +53,7 @@ func TestMissionFailureIsIdempotentAndResettable(t *testing.T) {
 	if err := world.Apply(ResetMission{}); err != nil {
 		t.Fatal(err)
 	}
-	if world.Mission.Phase != MissionOrbitalBattle || world.Mission.Reason != "restart" || world.Mission.Revision != revision+1 {
+	if world.Mission.Phase != MissionOrbitalBattle || world.Mission.Reason != "restart" || world.Mission.Revision != revision+1 || world.Mission.Score != (MissionScore{}) {
 		t.Fatalf("reset mission=%+v", world.Mission)
 	}
 	if err := world.Step(.1); err != nil {
@@ -119,5 +119,49 @@ func TestMissionProgressPreservesClosureEngagementAndCheckpointOrder(t *testing.
 	}
 	if world.Mission.Progress != (MissionProgress{}) {
 		t.Fatalf("restart retained mission progress=%+v", world.Mission.Progress)
+	}
+}
+
+func TestBeginEscapeRecordsFixedTickDeadline(t *testing.T) {
+	player := catalog.XWing(1, kinematics.Pose{})
+	world, err := New([]scene.Object{player})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []MissionPhase{MissionApproach, MissionSurfaceAssault, MissionTrenchRun, MissionExhaustPortAttack} {
+		if err := world.Apply(AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := world.Apply(BeginEscape{DeadlineTick: world.Tick + 120, Reason: "exhaust-port-hit"}); err != nil {
+		t.Fatal(err)
+	}
+	if world.Mission.Phase != MissionEscape || world.Mission.Progress.EscapeDeadlineTick != world.Tick+120 {
+		t.Fatalf("escape state=%+v", world.Mission)
+	}
+	if err := world.Apply(BeginEscape{DeadlineTick: world.Tick + 240, Reason: "duplicate"}); err == nil {
+		t.Fatal("escape began twice")
+	}
+}
+
+func TestMissionCannotAdvanceToEscapeWithoutDeadline(t *testing.T) {
+	player := catalog.XWing(1, kinematics.Pose{})
+	world, err := New([]scene.Object{player})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID}); err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []MissionPhase{MissionApproach, MissionSurfaceAssault, MissionTrenchRun, MissionExhaustPortAttack} {
+		if err := world.Apply(AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := world.Apply(AdvanceMission{To: MissionEscape, Reason: "shortcut"}); err == nil {
+		t.Fatal("mission entered escape without an authoritative deadline")
 	}
 }

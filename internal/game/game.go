@@ -1434,6 +1434,7 @@ func (g *Game) Update() error {
 			if err := g.updateYavinMission(); err != nil {
 				return err
 			}
+			g.enterTerminalMissionFlow()
 		}
 		g.refreshTransitionEnvironmentTiles()
 		g.refreshViewContext()
@@ -1505,6 +1506,7 @@ func (g *Game) Update() error {
 	if err := g.updateYavinMission(); err != nil {
 		return err
 	}
+	g.enterTerminalMissionFlow()
 	if g.playerDestroyed && g.viewCamera.Mode == camera.Chase && g.objectByID(g.viewCamera.TargetID) == nil {
 		g.switchToEnemyDestructionFollowView(g.destructionVictim, 0)
 	}
@@ -1514,6 +1516,22 @@ func (g *Game) Update() error {
 	g.viewCamera.Update(seconds)
 	g.refreshViewContext()
 	return nil
+}
+
+// enterTerminalMissionFlow bridges authoritative mission outcomes into the
+// application shell. It deliberately runs after the final simulation tick, so
+// no outcome depends on camera or presentation timing.
+func (g *Game) enterTerminalMissionFlow() {
+	if g.flow != flowPlaying || g.world == nil || (g.world.Mission.Phase != sim.MissionSucceeded && g.world.Mission.Phase != sim.MissionFailed) {
+		return
+	}
+	g.paused = false
+	g.quitPrompt = false
+	g.controlsRemaining = 0
+	g.flow = flowOutcome
+	// Keep the mouse-flight preference for a later retry, but release the
+	// external cursor while a keyboard/mouse shell is being shown.
+	ebiten.SetCursorMode(ebiten.CursorModeVisible)
 }
 
 func (g *Game) deathStarSurfaceRuntime(frame scene.FrameID) *localEnvironment {
@@ -1630,9 +1648,50 @@ func (g *Game) updateYavinMission() error {
 			return nil
 		}
 		return g.world.Apply(sim.AdvanceMission{To: sim.MissionExhaustPortAttack, Reason: "terminal-attack-run"})
+	case sim.MissionExhaustPortAttack:
+		if g.torpedoesRemaining <= 0 && !g.activeMissionProtonTorpedo() {
+			return g.world.Apply(sim.FailMission{Reason: exhaustAttackExpended})
+		}
+		return nil
+	case sim.MissionEscape:
+		return g.updateYavinEscape(*player)
 	default:
 		return nil
 	}
+}
+
+func (g *Game) activeMissionProtonTorpedo() bool {
+	if g.world == nil {
+		return false
+	}
+	for _, object := range g.objects {
+		if object.ProjectileKind == scene.ProjectileProtonTorpedo && g.owners[object.ID] == g.world.Mission.PlayerID {
+			return true
+		}
+	}
+	return false
+}
+
+// updateYavinEscape resolves the post-attack objective from authoritative
+// frame and host distance state. The local environment performs its ordinary
+// altitude-based transfer; success only becomes possible after that transfer
+// and a host-relative exterior clearance.
+func (g *Game) updateYavinEscape(player scene.Object) error {
+	mission := g.world.Mission
+	if normalizedObjectFrame(player) == scene.ExteriorFrame && mission.HostID != 0 {
+		hostPose, err := g.world.PoseInFrame(mission.HostID, scene.ExteriorFrame)
+		if err != nil {
+			return err
+		}
+		host := g.objectByID(mission.HostID)
+		if host != nil && player.Pose.Position.Sub(hostPose.Position).Length() >= host.CollisionRadius+g.profile.Yavin.EscapeSafeClearance {
+			return g.world.Apply(sim.AdvanceMission{To: sim.MissionSucceeded, Reason: "safe-distance-reached"})
+		}
+	}
+	if deadline := mission.Progress.EscapeDeadlineTick; deadline > 0 && g.world.Tick >= deadline {
+		return g.world.Apply(sim.FailMission{Reason: escapeDeadlineExceeded})
+	}
+	return nil
 }
 
 // observeOrbitalApproach records only simulation-space facts: distance to the
@@ -2400,6 +2459,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 			if owner == fighterID {
 				if _, autonomous := g.controllers[nearest.ID]; autonomous {
 					g.kills++
+					g.awardMissionScore(sim.ScoreFighterKill)
 				}
 			}
 		}
@@ -2557,34 +2617,96 @@ const (
 	exhaustAttackTooFar      = "attack-torpedo-out-of-range"
 	exhaustAttackOffCenter   = "attack-aim-off-center"
 	exhaustAttackWrongCourse = "attack-wrong-approach"
+	exhaustAttackExpended    = "attack-torpedoes-expended"
+	escapeDeadlineExceeded   = "escape-deadline-exceeded"
 )
+
+type exhaustAttackEnvelope struct {
+	Kind      scene.ProjectileKind
+	Owner     scene.ObjectID
+	Team      scene.TeamID
+	Travel    float64
+	Alignment float64
+	Forward   math3d.Vec3
+}
+
+// validateExhaustPortEnvelope holds the shared, renderer-independent attack
+// contract. Both a real impact and the cockpit's pre-launch prediction reduce
+// to this same travel, alignment, and approach envelope.
+func validateExhaustPortEnvelope(envelope exhaustAttackEnvelope, mission sim.MissionState, config combat.TorpedoConfig) string {
+	if envelope.Kind != scene.ProjectileProtonTorpedo {
+		return exhaustAttackWrongWeapon
+	}
+	if envelope.Owner == 0 || envelope.Owner != mission.PlayerID || envelope.Team != scene.TeamAlliance {
+		return exhaustAttackWrongPilot
+	}
+	if envelope.Travel < config.MinimumTravel {
+		return exhaustAttackTooClose
+	}
+	if envelope.Travel > config.MaximumTravel {
+		return exhaustAttackTooFar
+	}
+	if envelope.Alignment > config.MaximumAlignment {
+		return exhaustAttackOffCenter
+	}
+	if envelope.Forward.Z < config.MinimumForwardDot || -envelope.Forward.Y < config.MinimumDownDot {
+		return exhaustAttackWrongCourse
+	}
+	return ""
+}
 
 // validateExhaustPortAttack contains no rendering or input assumptions. It
 // validates the authoritative payload, owner, travel envelope and impact
 // vector so the same result can be reproduced for a remote player.
 func validateExhaustPortAttack(projectile scene.Object, owner scene.ObjectID, mission sim.MissionState, hit collision.Hit, config combat.TorpedoConfig) string {
-	if projectile.ProjectileKind != scene.ProjectileProtonTorpedo {
-		return exhaustAttackWrongWeapon
-	}
-	if owner == 0 || owner != mission.PlayerID || projectile.Team != scene.TeamAlliance {
-		return exhaustAttackWrongPilot
-	}
-	if projectile.ProjectileTravel < config.MinimumTravel {
-		return exhaustAttackTooClose
-	}
-	if projectile.ProjectileTravel > config.MaximumTravel {
-		return exhaustAttackTooFar
-	}
 	port := environment.DeathStarExhaustPortPoint()
 	dx, dz := hit.Point.X-port.X, hit.Point.Z-port.Z
-	if dx*dx+dz*dz > config.MaximumAlignment*config.MaximumAlignment {
-		return exhaustAttackOffCenter
-	}
-	forward := projectile.Pose.Forward()
-	if forward.Z < config.MinimumForwardDot || -forward.Y < config.MinimumDownDot {
+	return validateExhaustPortEnvelope(exhaustAttackEnvelope{
+		Kind: projectile.ProjectileKind, Owner: owner, Team: projectile.Team,
+		Travel: projectile.ProjectileTravel, Alignment: math.Hypot(dx, dz), Forward: projectile.Pose.Forward(),
+	}, mission, config)
+}
+
+// validateExhaustPortReadiness predicts the same attack envelope before a
+// torpedo exists. It intersects the selected launcher ray with the port's
+// horizontal impact plane, so it shares the real hit validator's travel,
+// centreline, and approach conditions without depending on rendering.
+func validateExhaustPortReadiness(fighter scene.Object, owner scene.ObjectID, mission sim.MissionState, launcher string, aimTarget math3d.Vec3, config combat.TorpedoConfig) string {
+	launch, ok := fighter.Anchor(launcher)
+	if !ok {
 		return exhaustAttackWrongCourse
 	}
-	return ""
+	direction := aimTarget.Sub(launch.Position).Normalize()
+	if direction == (math3d.Vec3{}) || math.Abs(direction.Y) < 1e-9 {
+		return exhaustAttackWrongCourse
+	}
+	port := environment.DeathStarExhaustPortPoint()
+	travel := (port.Y - launch.Position.Y) / direction.Y
+	impact := launch.Position.Add(direction.Scale(travel))
+	dx, dz := impact.X-port.X, impact.Z-port.Z
+	return validateExhaustPortEnvelope(exhaustAttackEnvelope{
+		Kind: scene.ProjectileProtonTorpedo, Owner: owner, Team: fighter.Team,
+		Travel: travel, Alignment: math.Hypot(dx, dz), Forward: direction,
+	}, mission, config)
+}
+
+func (g *Game) exhaustPortReadiness() string {
+	if g.world == nil || g.world.Mission.ID != yavinMissionID || g.world.Mission.Phase != sim.MissionExhaustPortAttack {
+		return ""
+	}
+	fighter := g.objectByID(g.world.Mission.PlayerID)
+	if fighter == nil {
+		return exhaustAttackWrongPilot
+	}
+	launcher := "muzzle-lower-left"
+	if g.torpedoesRemaining%2 == 0 {
+		launcher = "muzzle-lower-right"
+	}
+	aimTarget := fighter.Pose.Position.Add(fighter.Pose.Forward().Scale(g.profile.Targeting.AimConvergence))
+	if target, aimed := g.cockpitAimTarget(); aimed {
+		aimTarget = target
+	}
+	return validateExhaustPortReadiness(*fighter, fighter.ID, g.world.Mission, launcher, aimTarget, g.profile.Combat.Torpedo)
 }
 
 func (g *Game) resolveExhaustPortAttack(projectile scene.Object, hit collision.Hit) {
@@ -2597,7 +2719,11 @@ func (g *Game) resolveExhaustPortAttack(projectile scene.Object, hit collision.H
 		_ = g.world.Apply(sim.ReportMissionFeedback{Reason: reason})
 		return
 	}
-	_ = g.world.Apply(sim.AdvanceMission{To: sim.MissionEscape, Reason: "exhaust-port-hit"})
+	deadlineTicks := uint64(math.Ceil(g.profile.Yavin.EscapeDeadlineSeconds / g.profile.Simulation.TickSeconds))
+	if deadlineTicks == 0 {
+		return
+	}
+	_ = g.world.Apply(sim.BeginEscape{DeadlineTick: g.world.Tick + deadlineTicks, Reason: "exhaust-port-hit"})
 }
 
 func (g *Game) spawnSurfaceImpact(frame scene.FrameID, point, normal math3d.Vec3) {
@@ -2677,7 +2803,17 @@ func (g *Game) hitEnvironmentFeature(runtime *localEnvironment, feature environm
 		event.Tick = g.world.Tick
 		g.world.FeatureEvents = append(g.world.FeatureEvents, event)
 	}
+	if state.Destroyed && g.world != nil && g.owners[projectile.ID] == g.world.Mission.PlayerID {
+		g.awardMissionScore(sim.ScoreSurfaceInstallation)
+	}
 	g.presentFeatureDamage(event, projectile)
+}
+
+func (g *Game) awardMissionScore(kind sim.ScoreKind) {
+	if g.world == nil || g.world.Mission.ID != yavinMissionID {
+		return
+	}
+	_ = g.world.Apply(sim.AwardMissionScore{SourceID: g.world.Mission.PlayerID, Kind: kind})
 }
 
 func (g *Game) presentFeatureDamage(event sim.FeatureDamageEvent, projectile scene.Object) {
@@ -4259,7 +4395,15 @@ func (g *Game) drawMissionTargetingComputer(screen *ebiten.Image) {
 		computerPath.LineTo(line[2], line[3])
 	}
 	status := fmt.Sprintf("%s  T%d", mission.Phase.String(), g.torpedoesRemaining)
-	if feedback := missionFeedbackText(mission.Reason); feedback != "" {
+	if mission.Phase == sim.MissionExhaustPortAttack {
+		if readiness := g.exhaustPortReadiness(); readiness == "" {
+			status = "TORPEDO LOCK READY"
+		} else {
+			status = missionFeedbackText(readiness)
+		}
+	} else if mission.Phase == sim.MissionEscape {
+		status = fmt.Sprintf("ESCAPE %02d", int(math.Ceil(g.escapeSecondsRemaining())))
+	} else if feedback := missionFeedbackText(mission.Reason); feedback != "" {
 		status = feedback
 	}
 	appendVectorTextPath(&computerPath, left+width/2-18, top+15, status)
@@ -4292,6 +4436,10 @@ func missionFeedbackText(reason string) string {
 		return "AIM OFF CENTER"
 	case exhaustAttackWrongCourse:
 		return "INVALID APPROACH"
+	case exhaustAttackExpended:
+		return "TORPEDOES EXPENDED"
+	case escapeDeadlineExceeded:
+		return "DEATH STAR EXPLODED"
 	default:
 		return ""
 	}
@@ -4336,9 +4484,34 @@ func (g *Game) missionObjectiveTarget() (math3d.Vec3, bool) {
 			return math3d.Vec3{}, false
 		}
 		return environment.DeathStarExhaustPortPoint(), true
+	case sim.MissionEscape:
+		if normalizedObjectFrame(*player) != scene.ExteriorFrame {
+			// The trench is open above its floor. Point straight up until the
+			// existing local-environment exit transfers the player to exterior.
+			return player.Pose.Position.Add(math3d.Vec3{Y: 64}), true
+		}
+		if g.world.Mission.HostID == 0 {
+			return math3d.Vec3{}, false
+		}
+		hostPose, err := g.world.PoseInFrame(g.world.Mission.HostID, scene.ExteriorFrame)
+		if err != nil {
+			return math3d.Vec3{}, false
+		}
+		away := player.Pose.Position.Sub(hostPose.Position).Normalize()
+		if away == (math3d.Vec3{}) {
+			away = player.Pose.Forward()
+		}
+		return player.Pose.Position.Add(away.Scale(g.profile.Yavin.EscapeSafeClearance)), true
 	default:
 		return math3d.Vec3{}, false
 	}
+}
+
+func (g *Game) escapeSecondsRemaining() float64 {
+	if g.world == nil || g.world.Mission.Phase != sim.MissionEscape || g.world.Mission.Progress.EscapeDeadlineTick <= g.world.Tick {
+		return 0
+	}
+	return float64(g.world.Mission.Progress.EscapeDeadlineTick-g.world.Tick) * g.profile.Simulation.TickSeconds
 }
 
 func objectiveArrowDirection(cameraPoint math3d.Vec3) (float64, float64) {
@@ -6200,7 +6373,7 @@ func (g *Game) hudText() string {
 	}
 	return fmt.Sprintf(
 		"Objective: %s | Torpedoes: %d\nProfile: %s | Mode: %s | %s | View: %s | Pointer: %s | Captured: %s | Auto-level: %s | Tempo: %.1fx | Bolts: %d\nSpeed: %+0.2f  Yaw: %+0.2f  Pitch: %+0.2f  Roll: %+0.2f\n"+
-			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Collisions: %d\n"+
+			"Swarm: %d active, %d returning | Objects: %d total, %d visible | Shield: %d/%d | Kills: %d | Score: %d | Collisions: %d\n"+
 			"Render objects: %d in, %d visible, %d culled | Vertices: %d input, %d transformed\n"+
 			"Faces: %d input | Edges: %d input, %d output | Rejected: backface %d, policy %d, depth %d, tiny %d\n"+
 			"Clipped edges: %d | Vectors: %d jobs, %d world batches\n"+
@@ -6234,6 +6407,7 @@ func (g *Game) hudText() string {
 		g.shieldStrength,
 		g.profile.Player.Shield.Maximum,
 		g.kills,
+		g.world.Mission.Score.Total(),
 		g.collisions,
 		g.renderStats.ObjectsInput,
 		g.renderStats.ObjectsVisible,

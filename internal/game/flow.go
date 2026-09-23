@@ -7,6 +7,7 @@ import (
 
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
+	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
@@ -68,6 +69,9 @@ const (
 	shellActionBack
 	shellActionLaunch
 	shellActionSurfaceDevelopment
+	shellActionOutcomeContinue
+	shellActionRetryMission
+	shellActionReturnToTitle
 )
 
 func difficultyIndex(difficulties []profile.GameProfile, name string) int {
@@ -122,6 +126,19 @@ func (g *Game) applyShellAction(action shellAction) error {
 			g.flow = flowTitle
 		case shellActionLaunch:
 			return g.launchYavinSession(false)
+		}
+	case flowOutcome:
+		if action == shellActionOutcomeContinue {
+			g.flow = flowResult
+		}
+	case flowResult:
+		switch action {
+		case shellActionRetryMission:
+			// Session construction remains at the explicit Launch boundary.
+			g.selectedMission = 0
+			g.flow = flowBriefing
+		case shellActionReturnToTitle:
+			g.flow = flowTitle
 		}
 	}
 	return nil
@@ -305,8 +322,20 @@ func (g *Game) updateApplicationFlow(seconds float64) (bool, error) {
 			g.advanceHyperspaceArrival(seconds)
 		}
 		return true, nil
-	case flowOutcome, flowResult:
+	case flowOutcome:
+		if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			return true, g.applyShellAction(shellActionOutcomeContinue)
+		}
 		return true, nil
+	case flowResult:
+		action := shellActionNone
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyR) || inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft):
+			action = shellActionRetryMission
+		case inpututil.IsKeyJustPressed(ebiten.KeyT):
+			action = shellActionReturnToTitle
+		}
+		return true, g.applyShellAction(action)
 	default:
 		return false, nil
 	}
@@ -320,7 +349,11 @@ func (g *Game) drawApplicationShell(screen *ebiten.Image) bool {
 	case flowBriefing:
 		g.drawYavinBriefing(screen)
 		return true
-	case flowOutcome, flowResult:
+	case flowOutcome:
+		g.drawYavinOutcome(screen)
+		return true
+	case flowResult:
+		g.drawYavinResult(screen)
 		return true
 	default:
 		return false
@@ -386,4 +419,61 @@ func (g *Game) drawYavinBriefing(screen *ebiten.Image) {
 	drawVectorText(screen, ScreenWidth/2, 312, difficultyLabel(g.launchProfile), blue)
 	drawVectorText(screen, ScreenWidth/2, 376, "ENTER LAUNCH", yellow)
 	drawVectorText(screen, ScreenWidth/2, 410, "BACKSPACE MISSION SELECT", muted)
+}
+
+func (g *Game) drawYavinOutcome(screen *ebiten.Image) {
+	mission := g.world.Mission
+	completed := mission.Phase == sim.MissionSucceeded
+	primary := color.RGBA{R: 255, G: 224, B: 32, A: 255}
+	if !completed {
+		primary = color.RGBA{R: 255, G: 64, B: 64, A: 255}
+	}
+	blue := color.RGBA{R: 64, G: 220, B: 255, A: 255}
+	muted := color.RGBA{R: 128, G: 176, B: 192, A: 255}
+	drawShellPanel(screen, 240, 156, 720, 386)
+	drawVectorText(screen, ScreenWidth/2, 194, "BATTLE OF YAVIN", blue)
+	drawVectorText(screen, ScreenWidth/2, 252, mission.Phase.String(), primary)
+	drawVectorText(screen, ScreenWidth/2, 294, missionResultReason(mission.Reason), muted)
+	drawVectorText(screen, ScreenWidth/2, 346, "ENTER MISSION RESULT", primary)
+}
+
+func (g *Game) drawYavinResult(screen *ebiten.Image) {
+	mission := g.world.Mission
+	completed := mission.Phase == sim.MissionSucceeded
+	primary := color.RGBA{R: 255, G: 224, B: 32, A: 255}
+	if !completed {
+		primary = color.RGBA{R: 255, G: 64, B: 64, A: 255}
+	}
+	blue := color.RGBA{R: 64, G: 220, B: 255, A: 255}
+	green := color.RGBA{R: 64, G: 255, B: 128, A: 255}
+	muted := color.RGBA{R: 128, G: 176, B: 192, A: 255}
+	score := mission.Score
+	drawShellPanel(screen, 218, 72, 742, 474)
+	drawVectorText(screen, ScreenWidth/2, 102, "BATTLE OF YAVIN", blue)
+	drawVectorText(screen, ScreenWidth/2, 142, mission.Phase.String(), primary)
+	drawVectorText(screen, ScreenWidth/2, 182, missionResultReason(mission.Reason), muted)
+	drawVectorText(screen, ScreenWidth/2, 232, fmt.Sprintf("FIGHTERS %d", score.FighterKills), green)
+	drawVectorText(screen, ScreenWidth/2, 260, fmt.Sprintf("INSTALLATIONS %d", score.SurfaceInstallations), green)
+	drawVectorText(screen, ScreenWidth/2, 288, fmt.Sprintf("COMBAT %05d", score.CombatPoints), green)
+	drawVectorText(screen, ScreenWidth/2, 316, fmt.Sprintf("MISSION %05d", score.CompletionBonus), green)
+	drawVectorText(screen, ScreenWidth/2, 360, fmt.Sprintf("TOTAL %05d", score.Total()), primary)
+	drawVectorText(screen, ScreenWidth/2, 410, "ENTER OR R RETRY", primary)
+	drawVectorText(screen, ScreenWidth/2, 438, "T TITLE", muted)
+}
+
+func missionResultReason(reason string) string {
+	switch reason {
+	case "safe-distance-reached":
+		return "DEATH STAR ESCAPED"
+	case "fighter-destroyed":
+		return "YOUR FIGHTER WAS DESTROYED"
+	case escapeDeadlineExceeded:
+		return "ESCAPE WINDOW EXPIRED"
+	case exhaustAttackExpended:
+		return "TORPEDO ATTACK FAILED"
+	case "":
+		return "MISSION ENDED"
+	default:
+		return strings.ToUpper(strings.ReplaceAll(reason, "-", " "))
+	}
 }

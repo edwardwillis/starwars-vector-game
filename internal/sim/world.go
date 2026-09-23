@@ -58,6 +58,7 @@ type World struct {
 	Frames        map[scene.FrameID]Frame
 	Transitions   []TransitionEvent
 	FeatureEvents []FeatureDamageEvent
+	ScoreEvents   []ScoreEvent
 	Mission       MissionState
 	MissionEvents []MissionEvent
 }
@@ -92,6 +93,7 @@ func (w *World) Step(seconds float64) error {
 		return fmt.Errorf("simulation step must be positive")
 	}
 	w.FeatureEvents = w.FeatureEvents[:0]
+	w.ScoreEvents = w.ScoreEvents[:0]
 	w.MissionEvents = w.MissionEvents[:0]
 	for i := range w.Objects {
 		before := w.Objects[i].Pose.Position
@@ -114,7 +116,7 @@ func (w *World) Snapshot() Snapshot {
 		frames[id] = frame
 	}
 	return Snapshot{Tick: w.Tick, Time: w.Time, Objects: cloneObjects(w.Objects), Frames: frames,
-		Transitions: append([]TransitionEvent(nil), w.Transitions...), FeatureEvents: append([]FeatureDamageEvent(nil), w.FeatureEvents...),
+		Transitions: append([]TransitionEvent(nil), w.Transitions...), FeatureEvents: append([]FeatureDamageEvent(nil), w.FeatureEvents...), ScoreEvents: append([]ScoreEvent(nil), w.ScoreEvents...),
 		Mission: w.Mission, MissionEvents: append([]MissionEvent(nil), w.MissionEvents...)}
 }
 
@@ -125,6 +127,7 @@ type Snapshot struct {
 	Frames        map[scene.FrameID]Frame
 	Transitions   []TransitionEvent
 	FeatureEvents []FeatureDamageEvent
+	ScoreEvents   []ScoreEvent
 	Mission       MissionState
 	MissionEvents []MissionEvent
 }
