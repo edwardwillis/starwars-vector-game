@@ -342,6 +342,7 @@ func Cadet() GameProfile {
 	profile.Surface.CannonFireMinGap = 1.2
 	profile.Surface.CannonFireMaxGap = 2.0
 	profile.Yavin.EscapeDeadlineSeconds = 60
+	profile.Combat.Laser.InterceptionDistance = 0.72
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -366,6 +367,7 @@ func Ace() GameProfile {
 	profile.Surface.CannonFireMinGap = 0.65
 	profile.Surface.CannonFireMaxGap = 1.15
 	profile.Yavin.EscapeDeadlineSeconds = 40
+	profile.Combat.Laser.InterceptionDistance = 0.44
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -396,6 +398,7 @@ func Nightmare() GameProfile {
 	profile.Surface.CannonFireMinGap = 0.45
 	profile.Surface.CannonFireMaxGap = 0.9
 	profile.Yavin.EscapeDeadlineSeconds = 35
+	profile.Combat.Laser.InterceptionDistance = 0.34
 	syncSwarmFlight(&profile)
 	return profile
 }

@@ -25,6 +25,19 @@ func TestDeathStarArcadeProgressivelyRevealsStableDetail(t *testing.T) {
 	}
 }
 
+func TestDeathStarArcadeUsesSmoothOrbitalApproachScale(t *testing.T) {
+	billboard := DeathStarArcade().Billboard
+	far := billboard.RadiusScale(billboard.FarDepth + 100)
+	middle := billboard.RadiusScale((billboard.NearDepth + billboard.FarDepth) / 2)
+	near := billboard.RadiusScale(billboard.NearDepth - 1)
+	if far != billboard.FarScale || !(far < middle && middle < near) || near != 1 {
+		t.Fatalf("approach scale far=%v middle=%v near=%v, config=%+v", far, middle, near, billboard)
+	}
+	if plain := (Billboard{}).RadiusScale(1000); plain != 1 {
+		t.Fatalf("ordinary billboard scale=%v, want 1", plain)
+	}
+}
+
 func TestAppearanceRegistrySelectsByLogicalObject(t *testing.T) {
 	definition, ok := DefaultRegistry().ForObject("builtin/death-star", "")
 	if !ok || definition.Name != DeathStarArcadeName {

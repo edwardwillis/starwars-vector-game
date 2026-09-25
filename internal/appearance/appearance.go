@@ -28,6 +28,31 @@ type Billboard struct {
 	Name    string
 	Base    []Line
 	Details []Detail
+	// NearDepth, FarDepth, and FarScale optionally tune the apparent scale of
+	// very large billboarded bodies. At and inside NearDepth the artwork uses
+	// its physical projected radius; at and beyond FarDepth it uses FarScale.
+	// Zero values preserve ordinary perspective projection.
+	NearDepth float64
+	FarDepth  float64
+	FarScale  float64
+}
+
+// RadiusScale returns the presentation-only scale for an object's projected
+// radius at the supplied camera depth. Smooth interpolation avoids a visible
+// scale step while keeping the default billboard behavior exactly unchanged.
+func (billboard Billboard) RadiusScale(depth float64) float64 {
+	if billboard.NearDepth <= 0 || billboard.FarDepth <= billboard.NearDepth || billboard.FarScale <= 0 {
+		return 1
+	}
+	progress := (depth - billboard.NearDepth) / (billboard.FarDepth - billboard.NearDepth)
+	if progress <= 0 {
+		return 1
+	}
+	if progress >= 1 {
+		return billboard.FarScale
+	}
+	progress = progress * progress * (3 - 2*progress)
+	return 1 + (billboard.FarScale-1)*progress
 }
 
 func (billboard Billboard) Lines(reveal float64) []Line {

@@ -22,16 +22,18 @@ const (
 // LaserConfig contains the tunable behavior of a laser projectile. Geometry
 // and styling remain owned by the catalog.
 type LaserConfig struct {
-	Speed    float64
-	SpinRate float64
-	Lifetime float64
+	Speed                float64
+	SpinRate             float64
+	Lifetime             float64
+	InterceptionDistance float64
 }
 
 func DefaultLaserConfig() LaserConfig {
 	return LaserConfig{
-		Speed:    LaserSpeed,
-		SpinRate: LaserSpinRate,
-		Lifetime: LaserLifetime,
+		Speed:                LaserSpeed,
+		SpinRate:             LaserSpinRate,
+		Lifetime:             LaserLifetime,
+		InterceptionDistance: 0.55,
 	}
 }
 
@@ -44,6 +46,9 @@ func (config LaserConfig) Validate() error {
 	}
 	if config.Lifetime <= 0 || math.IsNaN(config.Lifetime) || math.IsInf(config.Lifetime, 0) {
 		return fmt.Errorf("laser lifetime must be positive")
+	}
+	if config.InterceptionDistance <= 0 || math.IsNaN(config.InterceptionDistance) || math.IsInf(config.InterceptionDistance, 0) {
+		return fmt.Errorf("laser interception distance must be positive")
 	}
 	return nil
 }

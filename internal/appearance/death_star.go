@@ -75,7 +75,13 @@ func DeathStarArcade() Definition {
 		}
 		details = append(details, Detail{Threshold: 0.12 + 0.82*float64(index)/71, Line: line})
 	}
-	return Definition{Name: DeathStarArcadeName, ObjectDefinition: catalog.DeathStarName, Kind: "vector-billboard", PointOccluder: "sphere", Billboard: Billboard{Name: DeathStarArcadeName, Base: base, Details: details}}
+	return Definition{Name: DeathStarArcadeName, ObjectDefinition: catalog.DeathStarName, Kind: "vector-billboard", PointOccluder: "sphere", Billboard: Billboard{
+		Name: DeathStarArcadeName, Base: base, Details: details,
+		// The orbital view opens with a readable, distant station rather than a
+		// screen-filling disc. Its apparent radius then catches up smoothly as
+		// the fighter closes on the established physical approach boundary.
+		NearDepth: 360, FarDepth: 650, FarScale: 0.48,
+	}}
 }
 
 func DefaultRegistry() *Registry {

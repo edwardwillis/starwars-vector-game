@@ -155,6 +155,78 @@ func TestHyperspaceArrivalRunsOnlyInOrbitalFrame(t *testing.T) {
 	}
 }
 
+func TestBillboardAngularRadiusDoesNotInflateAtViewEdge(t *testing.T) {
+	object := catalog.DeathStar(40, kinematics.Pose{})
+	billboard := appearance.DeathStarArcade().Billboard
+	frontRadius, frontRange := billboardVisualRadius(object, billboard, math3d.Vec3{Z: -550})
+	edgeRadius, edgeRange := billboardVisualRadius(object, billboard, math3d.Vec3{X: 275 * math.Sqrt2, Z: -275 * math.Sqrt2})
+	if math.Abs(frontRange-edgeRange) > 1e-9 {
+		t.Fatalf("test ranges differ: front=%v edge=%v", frontRange, edgeRange)
+	}
+	if math.Abs(frontRadius/frontRange-edgeRadius/edgeRange) > 1e-12 {
+		t.Fatalf("angular billboard radius inflated at edge: front=%v edge=%v", frontRadius/frontRange, edgeRadius/edgeRange)
+	}
+}
+
+func TestYavinSurfaceEntryProjectionRequiresNearbyAlignedOrbitalPlayer(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	player := g.objectByID(fighterID)
+	hostPose, err := g.world.WorldPose(g.world.Mission.HostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: 420})
+	player.Pose.Orientation = orientationToward(hostPose.Position.Sub(player.Pose.Position))
+	portal, ok := g.yavinSurfaceEntryProjection()
+	if !ok || portal.intensity <= 0 {
+		t.Fatalf("near aligned player has no surface-entry projection: %+v", portal)
+	}
+	var runtime *localEnvironment
+	var transition environment.Transition
+	for index := range g.environments {
+		candidate := &g.environments[index]
+		if candidate.bound.HostID != g.world.Mission.HostID || candidate.bound.Definition.Name != environment.DeathStarTrenchName {
+			continue
+		}
+		runtime = candidate
+		transition = candidate.bound.Definition.Transitions[0]
+		break
+	}
+	if runtime == nil || transition.Name != "approach" {
+		t.Fatalf("missing authored surface approach: runtime=%+v transition=%+v", runtime, transition)
+	}
+	framePose, err := g.world.FramePose(runtime.bound.ResolveFrame(transition.Destination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCenter := framePose.Matrix().TransformPoint(transition.Trigger.Center)
+	gotCenter := math3d.Vec3{}
+	for _, corner := range portal.corners {
+		gotCenter = gotCenter.Add(corner)
+	}
+	if gotCenter.Scale(0.25).Sub(wantCenter).Length() > 1e-9 {
+		t.Fatalf("projection centre=%+v, want authored trigger centre=%+v", gotCenter.Scale(0.25), wantCenter)
+	}
+
+	player.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)
+	if _, visible := g.yavinSurfaceEntryProjection(); visible {
+		t.Fatal("projection remained visible while flying away from the Death Star")
+	}
+	player.Pose.Orientation = orientationToward(hostPose.Position.Sub(player.Pose.Position))
+	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: surfaceEntryProjectionRange + 1})
+	if _, visible := g.yavinSurfaceEntryProjection(); visible {
+		t.Fatal("projection appeared outside its range gate")
+	}
+	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: 420})
+	g.hyperspaceArrival = &hyperspaceArrival{}
+	if _, visible := g.yavinSurfaceEntryProjection(); visible {
+		t.Fatal("projection appeared during hyperspace arrival")
+	}
+}
+
 func deathStarSurfaceRuntime(g *Game) *localEnvironment {
 	for index := range g.environments {
 		if g.environments[index].bound.Definition.Frame == environment.DeathStarTrenchFrame {
@@ -1604,14 +1676,15 @@ func TestOpposingLaserBoltsInterceptWithoutDisintegration(t *testing.T) {
 	g := New()
 	firstID := g.nextObjectID
 	secondID := firstID + 1
-	first := catalog.LaserBolt(firstID, kinematics.Pose{Position: math3d.Vec3{Z: 2}, Orientation: math3d.IdentityQuaternion()})
-	second := catalog.LaserBolt(secondID, kinematics.Pose{Position: math3d.Vec3{Z: -2}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)})
+	first := catalog.LaserBolt(firstID, kinematics.Pose{Position: math3d.Vec3{X: 100, Z: 2}, Orientation: math3d.IdentityQuaternion()})
+	second := catalog.LaserBolt(secondID, kinematics.Pose{Position: math3d.Vec3{X: 100, Z: -2}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)})
 	g.objects = append(g.objects, first, second)
+	g.nextObjectID += 2
 	g.projectiles[firstID], g.projectiles[secondID] = 1, 1
 	g.owners[firstID], g.owners[secondID] = fighterID, scene.ObjectID(2)
 	previous := objectPositions(g.objects)
-	previous[firstID] = math3d.Vec3{Z: -2}
-	previous[secondID] = math3d.Vec3{Z: 2}
+	previous[firstID] = math3d.Vec3{X: 100, Z: -2}
+	previous[secondID] = math3d.Vec3{X: 100, Z: 2}
 
 	g.resolveLaserCollisions(previous)
 	if g.objectByID(firstID) != nil || g.objectByID(secondID) != nil {
@@ -1619,6 +1692,46 @@ func TestOpposingLaserBoltsInterceptWithoutDisintegration(t *testing.T) {
 	}
 	if len(g.debris) != 0 {
 		t.Fatalf("bolt interception spawned %d debris objects", len(g.debris))
+	}
+	if len(g.surfaceEffects) != 1 {
+		t.Fatalf("bolt interception spawned %d effects, want 1", len(g.surfaceEffects))
+	}
+	for id := range g.surfaceEffects {
+		effect := g.objectByID(id)
+		if effect == nil || effect.Definition != "builtin/laser-interception" {
+			t.Fatalf("interception effect = %+v, want laser interception", effect)
+		}
+	}
+}
+
+func TestLaserInterceptionUsesProfileForgivenessWithoutChangingBoltHitboxes(t *testing.T) {
+	makeGame := func(interceptionDistance float64) (*Game, scene.ObjectID, scene.ObjectID, map[scene.ObjectID]math3d.Vec3) {
+		g := New()
+		g.profile.Combat.Laser.InterceptionDistance = interceptionDistance
+		firstID := g.nextObjectID
+		secondID := firstID + 1
+		first := catalog.LaserBolt(firstID, kinematics.Pose{Position: math3d.Vec3{X: 100, Z: 2}, Orientation: math3d.IdentityQuaternion()})
+		second := catalog.LaserBolt(secondID, kinematics.Pose{Position: math3d.Vec3{X: 100.4, Z: -2}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)})
+		g.objects = append(g.objects, first, second)
+		g.nextObjectID += 2
+		g.projectiles[firstID], g.projectiles[secondID] = 1, 1
+		g.owners[firstID], g.owners[secondID] = fighterID, scene.ObjectID(2)
+		previous := objectPositions(g.objects)
+		previous[firstID] = math3d.Vec3{X: 100, Z: -2}
+		previous[secondID] = math3d.Vec3{X: 100.4, Z: 2}
+		return g, firstID, secondID, previous
+	}
+
+	forgiving, firstID, secondID, previous := makeGame(0.5)
+	forgiving.resolveLaserCollisions(previous)
+	if forgiving.objectByID(firstID) != nil || forgiving.objectByID(secondID) != nil {
+		t.Fatal("forgiving profile did not intercept near-miss bolts")
+	}
+
+	strict, firstID, secondID, previous := makeGame(0.3)
+	strict.resolveLaserCollisions(previous)
+	if strict.objectByID(firstID) == nil || strict.objectByID(secondID) == nil {
+		t.Fatal("strict profile intercepted bolts outside its assistance envelope")
 	}
 }
 

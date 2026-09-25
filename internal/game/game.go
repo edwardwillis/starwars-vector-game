@@ -68,6 +68,21 @@ type surfaceEffect struct {
 	remaining float64
 }
 
+// surfaceEntryProjection is a navigation-only view of an already-authored
+// exterior-to-surface transition. Its corners are in exterior world space;
+// it has no simulation, collision, depth, or occlusion role.
+type surfaceEntryProjection struct {
+	corners   [4]math3d.Vec3
+	intensity float64
+}
+
+const (
+	surfaceEntryProjectionRange       = 480.0
+	surfaceEntryProjectionFullRange   = 340.0
+	surfaceEntryProjectionMinHeading  = 0.55
+	surfaceEntryProjectionFullHeading = 0.90
+)
+
 // Feature damage is authoritative to the bound environment, not the streamed
 // tile or the current camera. It survives tile eviction and regeneration.
 type featureDamageState struct {
@@ -89,6 +104,11 @@ var surfaceImpactMesh = modelpkg.Prepare(modelpkg.Model{
 		{A: 8, B: 9, Kind: modelpkg.EdgeDecorative},
 	},
 })
+
+var laserInterceptionMesh = modelpkg.Prepare(modelpkg.Transform(
+	surfaceImpactMesh,
+	math3d.Scaling(0.35, 0.35, 0.35),
+))
 
 var installationShardMesh = modelpkg.Cube(0.35)
 
@@ -2399,12 +2419,19 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 			}
 			relativeStart := start.Sub(otherStart)
 			relativeEnd := projectile.Pose.Position.Sub(other.Pose.Position)
-			if _, hit := collision.SegmentSphere(
+			// This is an intentional arcade-assistance envelope for opposing
+			// bolts only. It makes a near-deflection count without changing the
+			// physical collision radius used for hits against fighters or scenery.
+			interceptTime, hit := collision.SegmentSphere(
 				relativeStart,
 				relativeEnd,
 				math3d.Vec3{},
-				projectile.CollisionRadius+other.CollisionRadius,
-			); hit {
+				g.profile.Combat.Laser.InterceptionDistance,
+			)
+			if hit {
+				projectileAtImpact := start.Add(projectile.Pose.Position.Sub(start).Scale(interceptTime))
+				otherAtImpact := otherStart.Add(other.Pose.Position.Sub(otherStart).Scale(interceptTime))
+				g.spawnLaserInterception(projectile.Frame, projectileAtImpact.Add(otherAtImpact).Scale(0.5))
 				remove[projectile.ID] = true
 				remove[other.ID] = true
 				break
@@ -2744,6 +2771,23 @@ func (g *Game) spawnSurfaceImpact(frame scene.FrameID, point, normal math3d.Vec3
 	}
 	g.objects = append(g.objects, impact)
 	g.surfaceEffects[id] = surfaceEffect{remaining: 0.18}
+}
+
+func (g *Game) spawnLaserInterception(frame scene.FrameID, point math3d.Vec3) {
+	if len(g.surfaceEffects) >= 24 {
+		return
+	}
+	id := g.nextObjectID
+	g.nextObjectID++
+	spark := scene.Object{
+		ID: id, Name: "laser interception", Definition: "builtin/laser-interception", Frame: frame,
+		Pose:         kinematics.Pose{Position: point, Orientation: math3d.IdentityQuaternion()},
+		Parts:        []scene.Part{{Name: "spark", Mesh: laserInterceptionMesh, Color: color.RGBA{R: 255, G: 236, B: 128, A: 255}, LineWidth: 1.5}},
+		Anchors:      map[string]kinematics.Pose{"center": {Orientation: math3d.IdentityQuaternion()}},
+		VisualRadius: 0.45,
+	}
+	g.objects = append(g.objects, spark)
+	g.surfaceEffects[id] = surfaceEffect{remaining: 0.12}
 }
 
 func (g *Game) updateSurfaceEffects(seconds float64) {
@@ -4379,6 +4423,115 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
 }
 
+// yavinSurfaceEntryProjection derives the navigation plane directly from the
+// active Death Star surface transition. It deliberately does not make a
+// transition more permissive: the existing trigger and mission evidence stay
+// authoritative.
+func (g *Game) yavinSurfaceEntryProjection() (surfaceEntryProjection, bool) {
+	if g.world == nil || g.world.Mission.ID != yavinMissionID ||
+		(g.world.Mission.Phase != sim.MissionOrbitalBattle && g.world.Mission.Phase != sim.MissionApproach) ||
+		g.hyperspaceArrival != nil {
+		return surfaceEntryProjection{}, false
+	}
+	player := g.objectByID(g.world.Mission.PlayerID)
+	if player == nil || normalizedObjectFrame(*player) != scene.ExteriorFrame {
+		return surfaceEntryProjection{}, false
+	}
+	if _, transitioning := g.transitions[player.ID]; transitioning {
+		return surfaceEntryProjection{}, false
+	}
+	hostPose, err := g.world.WorldPose(g.world.Mission.HostID)
+	if err != nil {
+		return surfaceEntryProjection{}, false
+	}
+	toDeathStar := hostPose.Position.Sub(player.Pose.Position)
+	distance := toDeathStar.Length()
+	if distance <= 1e-6 || distance >= surfaceEntryProjectionRange {
+		return surfaceEntryProjection{}, false
+	}
+	heading := player.Pose.Forward().Dot(toDeathStar.Scale(1 / distance))
+	if heading <= surfaceEntryProjectionMinHeading {
+		return surfaceEntryProjection{}, false
+	}
+	rangeFade := (surfaceEntryProjectionRange - distance) / (surfaceEntryProjectionRange - surfaceEntryProjectionFullRange)
+	headingFade := (heading - surfaceEntryProjectionMinHeading) / (surfaceEntryProjectionFullHeading - surfaceEntryProjectionMinHeading)
+	intensity := max(0, min(1, min(rangeFade, headingFade)))
+	// Smooth the two gates independently of simulation progress so the plane
+	// fades rather than popping as the player changes heading or range.
+	intensity = intensity * intensity * (3 - 2*intensity)
+	for _, runtime := range g.environments {
+		if runtime.bound.HostID != g.world.Mission.HostID || runtime.bound.Definition.Name != environment.DeathStarTrenchName {
+			continue
+		}
+		for _, transition := range runtime.bound.Definition.Transitions {
+			if transition.Name != "approach" || runtime.bound.ResolveFrame(transition.Source) != scene.ExteriorFrame {
+				continue
+			}
+			destination := runtime.bound.ResolveFrame(transition.Destination)
+			framePose, err := g.world.FramePose(destination)
+			if err != nil {
+				return surfaceEntryProjection{}, false
+			}
+			center, half := transition.Trigger.Center, transition.Trigger.HalfExtents
+			localCorners := [4]math3d.Vec3{
+				{X: center.X - half.X, Y: center.Y, Z: center.Z - half.Z},
+				{X: center.X + half.X, Y: center.Y, Z: center.Z - half.Z},
+				{X: center.X + half.X, Y: center.Y, Z: center.Z + half.Z},
+				{X: center.X - half.X, Y: center.Y, Z: center.Z + half.Z},
+			}
+			projection := surfaceEntryProjection{intensity: intensity}
+			for index, corner := range localCorners {
+				projection.corners[index] = framePose.Matrix().TransformPoint(corner)
+			}
+			return projection, true
+		}
+	}
+	return surfaceEntryProjection{}, false
+}
+
+// drawSurfaceEntryProjection is intentionally a small post-world overlay. It
+// projects the authoritative transition volume but does not submit a world
+// object, raster depth, test visibility, or alter the scene in any way.
+func (g *Game) drawSurfaceEntryProjection(screen *ebiten.Image) {
+	if g.viewCamera.Mode != camera.Cockpit || g.viewCamera.TargetID != fighterID {
+		return
+	}
+	portal, active := g.yavinSurfaceEntryProjection()
+	if !active || portal.intensity <= 0 {
+		return
+	}
+	var points [4]render.Point
+	for index, corner := range portal.corners {
+		point, visible := g.pipeline.ProjectPointUnclipped(corner)
+		if !visible {
+			return
+		}
+		points[index] = point
+	}
+	var path vector.Path
+	path.MoveTo(float32(points[0].X), float32(points[0].Y))
+	for _, point := range points[1:] {
+		path.LineTo(float32(point.X), float32(point.Y))
+	}
+	path.Close()
+	fill := &vector.DrawPathOptions{AntiAlias: true}
+	fill.ColorScale.ScaleWithColor(color.RGBA{R: 48, G: 188, B: 255, A: uint8(math.Round(3 + 12*portal.intensity))})
+	vector.FillPath(screen, &path, nil, fill)
+	border := &vector.DrawPathOptions{AntiAlias: true}
+	border.ColorScale.ScaleWithColor(color.RGBA{R: 96, G: 224, B: 255, A: uint8(math.Round(72 + 156*portal.intensity))})
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: 1.5 + float32(portal.intensity)}, border)
+	centerX, centerY := 0.0, 0.0
+	for _, point := range points {
+		centerX += point.X
+		centerY += point.Y
+	}
+	centerX /= float64(len(points))
+	centerY /= float64(len(points))
+	if centerX >= 0 && centerX <= ScreenWidth && centerY >= 0 && centerY <= ScreenHeight {
+		drawVectorText(screen, float32(centerX), float32(centerY), "SURFACE ENTRY", color.RGBA{R: 96, G: 224, B: 255, A: uint8(math.Round(100 + 130*portal.intensity))})
+	}
+}
+
 func (g *Game) drawMissionTargetingComputer(screen *ebiten.Image) {
 	if g.viewCamera.TargetID != fighterID || g.world == nil || g.world.Mission.ID != yavinMissionID || g.world.Mission.Phase == sim.MissionInactive {
 		return
@@ -5320,6 +5473,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
 	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
+	g.drawSurfaceEntryProjection(screen)
 	if g.telemetry != nil {
 		overlayStarted := time.Now()
 		defer func() { timings.overlays = time.Since(overlayStarted) }()
@@ -5658,7 +5812,12 @@ func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboar
 	if !visible || object.VisualRadius <= 0 || center.Depth <= g.pipeline.Near {
 		return false
 	}
-	projectedRadius := object.VisualRadius / center.Depth * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
+	visualRadius, rangeToObject := billboardVisualRadius(object, billboard, cameraPoint)
+	if rangeToObject <= g.pipeline.Near {
+		return false
+	}
+	projectedRadius := visualRadius / rangeToObject * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
 	if projectedRadius <= 0 {
 		return false
 	}
@@ -5675,6 +5834,17 @@ func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboar
 		g.pipeline.Stats.BillboardBatches += batchCount
 	}
 	return true
+}
+
+// billboardVisualRadius derives a camera-facing billboard's angular size from
+// camera-to-object range, not forward depth. That keeps a distant body from
+// inflating when the player rotates it toward the edge of view.
+func billboardVisualRadius(object scene.Object, billboard appearance.Billboard, cameraPoint math3d.Vec3) (float64, float64) {
+	rangeToObject := cameraPoint.Length()
+	if object.VisualRadius <= 0 || rangeToObject <= 0 {
+		return 0, rangeToObject
+	}
+	return object.VisualRadius * billboard.RadiusScale(rangeToObject), rangeToObject
 }
 
 // billboardLines returns a cached immutable line set for the current detail
@@ -6253,7 +6423,7 @@ func (g *Game) buildStarOccluders(prepared *preparedFrame) {
 	g.starOccluders.Stats = g.pipeline.Stats
 	for _, candidate := range prepared.candidates {
 		if candidate.analyticSphere {
-			g.addSphereStarOccluder(candidate.object)
+			g.addSphereStarOccluder(candidate.object, candidate.billboard)
 			continue
 		}
 		if !candidate.pointOccluder {
@@ -6273,13 +6443,19 @@ func (g *Game) buildStarOccluders(prepared *preparedFrame) {
 	}
 }
 
-func (g *Game) addSphereStarOccluder(object scene.Object) {
+func (g *Game) addSphereStarOccluder(object scene.Object, billboard appearance.Billboard) {
 	if object.VisualRadius <= 0 {
 		return
 	}
 	cameraPoint := g.pipeline.View.TransformPoint(object.Pose.Position)
 	depth := -cameraPoint.Z
-	radius := object.VisualRadius
+	radius, rangeToObject := billboardVisualRadius(object, billboard, cameraPoint)
+	if rangeToObject <= 0 {
+		return
+	}
+	// Keep sparse star occlusion aligned with the same presentation scale as
+	// the visible billboard. This is visual-space opacity; the logical object
+	// radius remains authoritative for mission and collision systems.
 	if depth+radius <= g.pipeline.Near || (g.pipeline.Far > g.pipeline.Near && depth-radius > g.pipeline.Far) {
 		return
 	}
@@ -6294,7 +6470,7 @@ func (g *Game) addSphereStarOccluder(object scene.Object) {
 		center = render.Point{X: float64(g.pipeline.Width) / 2, Y: float64(g.pipeline.Height) / 2, Depth: g.pipeline.Near}
 		depth = g.pipeline.Near
 	}
-	projectedRadius := radius / math.Max(depth, g.pipeline.Near) * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
+	projectedRadius := radius / math.Max(rangeToObject, g.pipeline.Near) * g.pipeline.Projection[1][1] * float64(g.pipeline.Height) * 0.5
 	if depth <= g.pipeline.Near {
 		projectedRadius = math.Hypot(float64(g.pipeline.Width), float64(g.pipeline.Height)) * 2
 	}

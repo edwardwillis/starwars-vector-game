@@ -47,7 +47,7 @@ func TestFireLaserRejectsMissingMuzzle(t *testing.T) {
 
 func TestFireLaserWithConfigUsesSessionTuning(t *testing.T) {
 	shooter := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
-	config := LaserConfig{Speed: 30, SpinRate: 4, Lifetime: 3}
+	config := LaserConfig{Speed: 30, SpinRate: 4, Lifetime: 3, InterceptionDistance: 0.6}
 	spawn, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", config)
 	if err != nil {
 		t.Fatalf("FireLaserWithConfig returned an error: %v", err)
@@ -61,6 +61,14 @@ func TestFireLaserWithConfigRejectsInvalidTuning(t *testing.T) {
 	shooter := catalog.TIEFighter(1, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
 	if _, err := FireLaserWithConfig(shooter, 2, "muzzle-upper-left", LaserConfig{}); err == nil {
 		t.Fatal("FireLaserWithConfig accepted invalid tuning")
+	}
+}
+
+func TestLaserConfigRejectsMissingInterceptionDistance(t *testing.T) {
+	config := DefaultLaserConfig()
+	config.InterceptionDistance = 0
+	if err := config.Validate(); err == nil {
+		t.Fatal("LaserConfig accepted a missing interception distance")
 	}
 }
 

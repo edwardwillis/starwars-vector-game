@@ -70,6 +70,15 @@ func TestYavinEscapeDifficultyConfigurationIsUsable(t *testing.T) {
 	}
 }
 
+func TestLaserInterceptionAssistanceTightensWithDifficulty(t *testing.T) {
+	cadet, pilot, ace, nightmare := Cadet(), Pilot(), Ace(), Nightmare()
+	if !(cadet.Combat.Laser.InterceptionDistance > pilot.Combat.Laser.InterceptionDistance &&
+		pilot.Combat.Laser.InterceptionDistance > ace.Combat.Laser.InterceptionDistance &&
+		ace.Combat.Laser.InterceptionDistance > nightmare.Combat.Laser.InterceptionDistance) {
+		t.Fatalf("interception distances do not tighten with difficulty: cadet=%v pilot=%v ace=%v nightmare=%v", cadet.Combat.Laser.InterceptionDistance, pilot.Combat.Laser.InterceptionDistance, ace.Combat.Laser.InterceptionDistance, nightmare.Combat.Laser.InterceptionDistance)
+	}
+}
+
 func TestBuiltinResolvesStableNames(t *testing.T) {
 	for _, name := range []string{CadetName, PilotName, AceName, NightmareName} {
 		profile, err := Builtin(name)
