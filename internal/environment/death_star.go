@@ -151,6 +151,7 @@ func DeathStarTrench() Definition {
 			Destination: DeathStarTrenchFrame,
 			Trigger:     Volume{Center: math3d.Vec3{Y: 18}, HalfExtents: math3d.Vec3{X: 45, Y: 25, Z: 30}},
 			Duration:    3,
+			RollRadians: math.Pi,
 			EntryPose: kinematics.Pose{
 				// Entry begins above ordinary surface with the trench off the
 				// fighter's left side, available to discover and dive into.
@@ -159,8 +160,12 @@ func DeathStarTrench() Definition {
 			},
 		}, {
 			Name: "hangar-entry", Source: DeathStarTrenchFrame, Destination: DeathStarHangarFrame,
-			Trigger:      Volume{Center: math3d.Vec3{X: hangarSurfaceX, Y: 9, Z: -36}, HalfExtents: math3d.Vec3{X: 21, Y: 8, Z: 3}},
-			PreservePose: true, EntryOffset: math3d.Vec3{Z: 9}, ApproachDirection: math3d.Vec3{Z: 1},
+			Trigger: Volume{Center: math3d.Vec3{X: hangarSurfaceX, Y: 9, Z: hangarSurfaceZ - 36}, HalfExtents: math3d.Vec3{X: 21, Y: 8, Z: 3}},
+			// Preserve the chosen opening lane, then level the fighter against the
+			// room's floor as it crosses the actual surface doorway.
+			Duration: 0.65, PreservePose: true, AlignOrientation: true,
+			EntryPose:   kinematics.Pose{Orientation: math3d.IdentityQuaternion()},
+			EntryOffset: math3d.Vec3{Z: 9}, ApproachDirection: math3d.Vec3{Z: 1},
 		}},
 		Tile: deathStarTrenchTile,
 	}
@@ -221,9 +226,9 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	var boxes []collision.OrientedBox
 	var portalParts []scene.Part
 	if !horizonOnly {
-		if coordinate == (TileCoordinate{X: 1, Z: 0}) {
+		if coordinate == hangarSurfaceTile {
 			portalParts = []scene.Part{parts[0]}
-			parts = append(parts, sharedHangarExteriorParts...)
+			parts = append(parts, sharedHangarEgressParts...)
 			boxes = hangarSurfaceBoxes()
 		} else {
 			features, boxes = tileFeatures(coordinate, xCenter, zCenter, isTrench)

@@ -14,20 +14,32 @@ import (
 const (
 	DeathStarHangarName                = "builtin/death-star-hangar"
 	DeathStarHangarFrame scene.FrameID = "builtin/death-star-hangar"
-	hangarSurfaceX                     = 60.0
-	hangarSurfaceZ                     = 0.0
-	hangarHalfWidth                    = 25.0
-	hangarHalfLength                   = 34.0
-	hangarHeight                       = 18.0
+	// The optional hangar is deliberately away from the mandatory surface-entry
+	// route so a fresh surface assault opens onto the Death Star deck rather
+	// than immediately framing the doorway as its next destination.
+	hangarSurfaceX   = 160.0
+	hangarSurfaceZ   = 120.0
+	hangarHalfWidth  = 25.0
+	hangarHalfLength = 34.0
+	hangarHeight     = 18.0
 )
 
+var hangarSurfaceTile = TileCoordinate{X: 2, Z: 2}
+
+// DeathStarHangarSurfacePosition identifies the doorway in the Death Star
+// surface frame for focused tests and future authored navigation cues.
+func DeathStarHangarSurfacePosition() math3d.Vec3 {
+	return math3d.Vec3{X: hangarSurfaceX, Z: hangarSurfaceZ}
+}
+
 var (
-	sharedHangarExteriorParts = hangarShellParts(math3d.Vec3{X: hangarSurfaceX, Z: hangarSurfaceZ}, false)
-	sharedHangarRoomParts     = append(hangarShellParts(math3d.Vec3{}, true), hangarGuidePart())
+	sharedHangarEgressParts = hangarEgressParts()
+	sharedHangarRoomParts   = append(hangarShellParts(math3d.Vec3{}, true), hangarGuidePart())
 )
 
 // DeathStarHangar is one enclosed room attached to the same host as the
-// near-surface environment. Its front face is deliberately open at local -Z.
+// near-surface environment. Its front face is deliberately open at local -Z;
+// the surface only draws a shallow rectangular egress, not a second building.
 func DeathStarHangar() Definition {
 	surface := DeathStarTrench()
 	return Definition{
@@ -102,13 +114,24 @@ func hangarShellParts(offset math3d.Vec3, floor bool) []scene.Part {
 	return parts
 }
 
+// hangarEgressParts marks the entrance at the surface with a thin three-sided
+// frame. The former roof, side walls and rear wall were a long freestanding
+// structure; the room now exists behind this opening in its own local frame.
+func hangarEgressParts() []scene.Part {
+	origin := math3d.Vec3{X: hangarSurfaceX, Z: -hangarHalfLength}
+	return []scene.Part{
+		hangarBoxPart("hangar entry port jamb", origin.Add(math3d.Vec3{X: -hangarHalfWidth, Y: hangarHeight / 2}), math3d.Vec3{X: 1.2, Y: hangarHeight, Z: 1.2}),
+		hangarBoxPart("hangar entry starboard jamb", origin.Add(math3d.Vec3{X: hangarHalfWidth, Y: hangarHeight / 2}), math3d.Vec3{X: 1.2, Y: hangarHeight, Z: 1.2}),
+		hangarBoxPart("hangar entry lintel", origin.Add(math3d.Vec3{Y: hangarHeight}), math3d.Vec3{X: hangarHalfWidth * 2, Y: 1.2, Z: 1.2}),
+	}
+}
+
 func hangarSurfaceBoxes() []collision.OrientedBox {
-	origin := math3d.Vec3{X: hangarSurfaceX, Z: hangarSurfaceZ}
+	origin := math3d.Vec3{X: hangarSurfaceX, Z: -hangarHalfLength}
 	return []collision.OrientedBox{
-		{Center: origin.Add(math3d.Vec3{X: -25.4, Y: 9}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.4, Y: 9, Z: 34}, FeatureID: "hangar-port-wall"},
-		{Center: origin.Add(math3d.Vec3{X: 25.4, Y: 9}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.4, Y: 9, Z: 34}, FeatureID: "hangar-starboard-wall"},
-		{Center: origin.Add(math3d.Vec3{Y: 18.4}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 25, Y: 0.4, Z: 34}, FeatureID: "hangar-roof"},
-		{Center: origin.Add(math3d.Vec3{Y: 9, Z: 34.4}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 25, Y: 9, Z: 0.4}, FeatureID: "hangar-back-wall"},
+		{Center: origin.Add(math3d.Vec3{X: -hangarHalfWidth, Y: hangarHeight / 2}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.6, Y: hangarHeight / 2, Z: 0.6}, FeatureID: "hangar-entry-port-jamb"},
+		{Center: origin.Add(math3d.Vec3{X: hangarHalfWidth, Y: hangarHeight / 2}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.6, Y: hangarHeight / 2, Z: 0.6}, FeatureID: "hangar-entry-starboard-jamb"},
+		{Center: origin.Add(math3d.Vec3{Y: hangarHeight}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: hangarHalfWidth, Y: 0.6, Z: 0.6}, FeatureID: "hangar-entry-lintel"},
 	}
 }
 

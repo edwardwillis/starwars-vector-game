@@ -168,65 +168,6 @@ func TestBillboardAngularRadiusDoesNotInflateAtViewEdge(t *testing.T) {
 	}
 }
 
-func TestYavinSurfaceEntryProjectionRequiresNearbyAlignedOrbitalPlayer(t *testing.T) {
-	g := New()
-	if err := g.startYavinMission(false); err != nil {
-		t.Fatal(err)
-	}
-	player := g.objectByID(fighterID)
-	hostPose, err := g.world.WorldPose(g.world.Mission.HostID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: 420})
-	player.Pose.Orientation = orientationToward(hostPose.Position.Sub(player.Pose.Position))
-	portal, ok := g.yavinSurfaceEntryProjection()
-	if !ok || portal.intensity <= 0 {
-		t.Fatalf("near aligned player has no surface-entry projection: %+v", portal)
-	}
-	var runtime *localEnvironment
-	var transition environment.Transition
-	for index := range g.environments {
-		candidate := &g.environments[index]
-		if candidate.bound.HostID != g.world.Mission.HostID || candidate.bound.Definition.Name != environment.DeathStarTrenchName {
-			continue
-		}
-		runtime = candidate
-		transition = candidate.bound.Definition.Transitions[0]
-		break
-	}
-	if runtime == nil || transition.Name != "approach" {
-		t.Fatalf("missing authored surface approach: runtime=%+v transition=%+v", runtime, transition)
-	}
-	framePose, err := g.world.FramePose(runtime.bound.ResolveFrame(transition.Destination))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantCenter := framePose.Matrix().TransformPoint(transition.Trigger.Center)
-	gotCenter := math3d.Vec3{}
-	for _, corner := range portal.corners {
-		gotCenter = gotCenter.Add(corner)
-	}
-	if gotCenter.Scale(0.25).Sub(wantCenter).Length() > 1e-9 {
-		t.Fatalf("projection centre=%+v, want authored trigger centre=%+v", gotCenter.Scale(0.25), wantCenter)
-	}
-
-	player.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)
-	if _, visible := g.yavinSurfaceEntryProjection(); visible {
-		t.Fatal("projection remained visible while flying away from the Death Star")
-	}
-	player.Pose.Orientation = orientationToward(hostPose.Position.Sub(player.Pose.Position))
-	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: surfaceEntryProjectionRange + 1})
-	if _, visible := g.yavinSurfaceEntryProjection(); visible {
-		t.Fatal("projection appeared outside its range gate")
-	}
-	player.Pose.Position = hostPose.Position.Sub(math3d.Vec3{Z: 420})
-	g.hyperspaceArrival = &hyperspaceArrival{}
-	if _, visible := g.yavinSurfaceEntryProjection(); visible {
-		t.Fatal("projection appeared during hyperspace arrival")
-	}
-}
-
 func deathStarSurfaceRuntime(g *Game) *localEnvironment {
 	for index := range g.environments {
 		if g.environments[index].bound.Definition.Frame == environment.DeathStarTrenchFrame {
@@ -260,6 +201,16 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	}
 	if attackers := g.countControlledTeam(runtime.bound.FrameID, g.profile.Swarm.Team); attackers != g.profile.Surface.InitialAttackers {
 		t.Fatalf("surface start attackers=%d, want %d", attackers, g.profile.Surface.InitialAttackers)
+	}
+	for id := range g.controllers {
+		attacker := g.objectByID(id)
+		if attacker == nil || normalizedObjectFrame(*attacker) != runtime.bound.FrameID || attacker.Team != g.profile.Swarm.Team {
+			continue
+		}
+		offset := attacker.Pose.Position.Sub(fighter.Pose.Position)
+		if offset.Dot(fighter.Pose.Forward()) >= -40 {
+			t.Fatalf("surface attacker %d begins ahead of or too close to the player: offset=%+v", id, offset)
+		}
 	}
 	nextWave := runtime.encounter.nextWaveAt
 	g.beginSurfaceEncounter(runtime.bound.FrameID, fighterID)
@@ -331,6 +282,45 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 	}
 }
 
+func TestSurfaceEntryGraceSuppressesHostileFireAtAllDifficulties(t *testing.T) {
+	for _, configured := range profile.Builtins() {
+		t.Run(configured.Name, func(t *testing.T) {
+			g, err := NewWithProfile(configured)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.startYavinMission(true); err != nil {
+				t.Fatal(err)
+			}
+			if !g.startInSurfaceMode() {
+				t.Fatal("could not start near the Death Star surface")
+			}
+			g.flow = flowPlaying
+			runtime := deathStarSurfaceRuntime(g)
+			if runtime == nil {
+				t.Fatal("missing Death Star surface runtime")
+			}
+			if got := runtime.encounter.attackEnabledAt - g.simulationTime; math.Abs(got-configured.Surface.EntryGraceSeconds) > 1e-9 {
+				t.Fatalf("entry grace=%v, want %v", got, configured.Surface.EntryGraceSeconds)
+			}
+			protectedTicks := int(math.Ceil(configured.Surface.EntryGraceSeconds/configured.Simulation.TickSeconds)) - 1
+			for tick := 0; tick < protectedTicks; tick++ {
+				if err := g.Update(); err != nil {
+					t.Fatal(err)
+				}
+				if g.playerDestroyed {
+					t.Fatalf("player was destroyed during the %v-second entry grace at tick %d", configured.Surface.EntryGraceSeconds, tick+1)
+				}
+				for _, object := range g.objects {
+					if object.CollisionRole == scene.CollisionProjectile && object.Team == configured.Swarm.Team {
+						t.Fatalf("hostile projectile %d spawned during entry grace at tick %d", object.ID, tick+1)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestControllerTargetSelectionUsesStableHostileTeamAndFrame(t *testing.T) {
 	g := New()
 	self := g.objectByID(2)
@@ -370,6 +360,12 @@ func TestSurfaceCannonsFireAtHostileParticipants(t *testing.T) {
 		t.Fatal("could not enter surface mode")
 	}
 	runtime := deathStarSurfaceRuntime(g)
+	if runtime == nil {
+		t.Fatal("missing Death Star surface runtime")
+	}
+	// The entry grace is covered separately; this test exercises normal cannon
+	// firing once that player-controlled opening has elapsed.
+	g.simulationTime = runtime.encounter.attackEnabledAt
 	// First update discovers nearby cannons and establishes deterministic
 	// cooldowns; forcing those deadlines to zero isolates the firing behavior.
 	g.updateSurfaceCannons(runtime)
@@ -1769,6 +1765,15 @@ func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	if len(g.debris) != 3 {
 		t.Fatalf("laser hit spawned %d debris objects, want 3", len(g.debris))
 	}
+	if len(g.surfaceEffects) != 1 {
+		t.Fatalf("laser hit spawned %d impact effects, want 1", len(g.surfaceEffects))
+	}
+	for impactID := range g.surfaceEffects {
+		impact := g.objectByID(impactID)
+		if impact == nil || impact.Definition != "builtin/fighter-laser-impact" || impact.Frame != target.Frame {
+			t.Fatalf("laser impact=%+v, want a bounded fighter impact in frame %q", impact, target.Frame)
+		}
+	}
 	if _, ok := g.controllers[2]; ok {
 		t.Fatal("destroyed fighter retains its controller")
 	}
@@ -1808,6 +1813,10 @@ func TestLaserHitBreaksComponentIntoFreshPolygonShards(t *testing.T) {
 	if component == nil {
 		t.Fatal("first-stage disintegration did not produce a component")
 	}
+	// resolveLaserCollisions removes objects by compacting g.objects. Keep the
+	// immutable catalog identity rather than retaining a pointer into that
+	// mutable backing array.
+	componentDefinition := component.Definition
 	// The three fresh components overlap near their shared origin. Isolate the
 	// selected target so map iteration order cannot make this focused test hit a
 	// different valid component first.
@@ -1840,9 +1849,9 @@ func TestLaserHitBreaksComponentIntoFreshPolygonShards(t *testing.T) {
 	if g.objectByID(componentID) != nil || g.objectByID(boltID) != nil {
 		t.Fatal("component hit did not consume the component and projectile")
 	}
-	wantPolygons, err := g.catalogRegistry.PolygonCount(component.Definition, componentIndex)
+	wantPolygons, err := g.catalogRegistry.PolygonCount(componentDefinition, componentIndex)
 	if err != nil {
-		t.Fatalf("polygon count for %q component %d: %v", component.Definition, componentIndex, err)
+		t.Fatalf("polygon count for %q component %d: %v", componentDefinition, componentIndex, err)
 	}
 	polygonCount := 0
 	componentCount := 0
@@ -1962,20 +1971,34 @@ func TestFixedDestructionViewRetainsSurfaceFrame(t *testing.T) {
 	}
 }
 
-func TestDeathStarHangarDoorTransfersBothWaysWithoutChangingHeading(t *testing.T) {
+func TestDeathStarHangarDoorLevelsFlightWhilePreservingEntryLane(t *testing.T) {
 	g := New()
 	if !g.startInSurfaceMode() {
 		t.Fatal("could not start near the Death Star surface")
 	}
 	player := g.objectByID(fighterID)
 	surfaceFrame := player.Frame
-	player.Pose.Position = math3d.Vec3{X: 63, Y: 8, Z: -36}
-	player.Pose.Orientation = math3d.IdentityQuaternion()
+	hangarSurface := environment.DeathStarHangarSurfacePosition()
+	player.Pose.Position = hangarSurface.Add(math3d.Vec3{X: 3, Y: 8, Z: -36})
+	player.Pose.Orientation = math3d.QuaternionFromAxisAngle(math3d.Vec3{Z: 1}, math.Pi/3)
 	player.Motion.Speed = 18
+	var entry environment.Transition
+	for _, transition := range environment.DeathStarTrench().Transitions {
+		if transition.Name == "hangar-entry" {
+			entry = transition
+		}
+	}
+	if !entry.Trigger.Contains(player.Pose.Position) || player.Pose.Forward().Dot(entry.ApproachDirection.Normalize()) <= 0.2 {
+		t.Fatalf("hangar entry setup is outside the authored trigger: pose=%+v transition=%+v", player.Pose, entry)
+	}
 	g.world.Objects = g.objects
 	if err := g.updateEnvironmentTransitions(); err != nil {
 		t.Fatal(err)
 	}
+	if _, transitioning := g.transitions[fighterID]; !transitioning {
+		t.Fatal("hangar entry did not begin its level-flight transition")
+	}
+	g.advanceEnvironmentTransitions(1, false)
 	player = g.objectByID(fighterID)
 	var hangarFrame scene.FrameID
 	for _, runtime := range g.environments {
@@ -1984,8 +2007,8 @@ func TestDeathStarHangarDoorTransfersBothWaysWithoutChangingHeading(t *testing.T
 		}
 	}
 	if player.Frame != hangarFrame || math.Abs(player.Pose.Position.X-3) > 1e-6 || player.Pose.Position.Z >= -24 ||
-		player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) < 0.99 || player.Motion.Speed != 18 {
-		t.Fatalf("hangar entry changed flight unexpectedly: frame=%q pose=%+v motion=%+v", player.Frame, player.Pose, player.Motion)
+		player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) < 0.99 || player.Pose.Orientation.Rotate(math3d.Vec3{Y: 1}).Dot(math3d.Vec3{Y: 1}) < 0.99 || player.Motion.Speed != 18 {
+		t.Fatalf("hangar entry did not preserve its lane and level flight: frame=%q pose=%+v motion=%+v", player.Frame, player.Pose, player.Motion)
 	}
 	player.Pose.Position = math3d.Vec3{X: 3, Y: 8}
 	player.Pose.Orientation = math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, math.Pi)
@@ -1997,7 +2020,7 @@ func TestDeathStarHangarDoorTransfersBothWaysWithoutChangingHeading(t *testing.T
 	var portalDeckTopology *model.Topology
 	for _, runtime := range g.environments {
 		if runtime.bound.FrameID == surfaceFrame {
-			if tile, ok := runtime.tiles[environment.TileCoordinate{X: 1, Z: 0}]; !ok || len(tile.PortalParts) != 1 {
+			if tile, ok := runtime.tiles[environment.TileCoordinate{X: 2, Z: 2}]; !ok || len(tile.PortalParts) != 1 {
 				t.Fatal("surface geometry was not retained for the open hangar doorway")
 			} else {
 				portalDeckTopology = tile.PortalParts[0].Mesh.Topology
@@ -2030,7 +2053,7 @@ func TestDeathStarHangarDoorTransfersBothWaysWithoutChangingHeading(t *testing.T
 		t.Fatal(err)
 	}
 	player = g.objectByID(fighterID)
-	if player.Frame != surfaceFrame || math.Abs(player.Pose.Position.X-63) > 1e-6 || player.Pose.Position.Z >= -39 ||
+	if player.Frame != surfaceFrame || math.Abs(player.Pose.Position.X-(hangarSurface.X+3)) > 1e-6 || player.Pose.Position.Z >= hangarSurface.Z-39 ||
 		player.Pose.Forward().Dot(math3d.Vec3{Z: -1}) < 0.99 {
 		t.Fatalf("hangar exit changed flight unexpectedly: frame=%q pose=%+v", player.Frame, player.Pose)
 	}
@@ -2140,6 +2163,10 @@ func TestYavinApproachTransitionWaitsForMissionEvidence(t *testing.T) {
 	}
 	player := g.objectByID(fighterID)
 	player.Pose = kinematics.Compose(framePose, kinematics.Pose{Position: approach.Trigger.Center, Orientation: math3d.IdentityQuaternion()})
+	// Simulate a player who was turning as the approach trigger was crossed.
+	// Those rates must not survive the cinematic and pitch the level surface
+	// entry into the deck on the first gameplay tick.
+	player.Motion = kinematics.Motion{Speed: 3, YawRate: 0.4, PitchRate: -0.7, RollRate: 0.6}
 	g.world.Objects = g.objects
 	if err := g.updateEnvironmentTransitions(); err != nil {
 		t.Fatal(err)
@@ -2161,6 +2188,97 @@ func TestYavinApproachTransitionWaitsForMissionEvidence(t *testing.T) {
 	}
 	if _, transitioning := g.transitions[fighterID]; !transitioning {
 		t.Fatal("Death Star approach did not begin after orbital evidence")
+	}
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionApproach {
+		t.Fatalf("approach transition phase=%s, want approach", g.world.Mission.Phase)
+	}
+	// The trigger is intentionally just above the rendered Death Star surface,
+	// which overlaps the host's coarse orbital collision sphere by the fighter
+	// radius. The active authored transition must take ownership before that
+	// broad exterior collider can damage the player.
+	shieldBefore := g.shieldStrength
+	g.resolveSolidCollisions(objectPositions(g.objects))
+	if g.shieldStrength != shieldBefore || g.objectByID(fighterID) == nil {
+		t.Fatal("Death Star approach applied a host-sphere collision during the transition handoff")
+	}
+	g.advanceEnvironmentTransitions(approach.Duration, false)
+	player = g.objectByID(fighterID)
+	if player == nil {
+		t.Fatal("surface transition removed player")
+	}
+	if player.Frame != surface.bound.FrameID || player.Pose != approach.EntryPose {
+		t.Fatalf("surface transition entry=%+v frame=%q, want %+v in %q", player, player.Frame, approach.EntryPose, surface.bound.FrameID)
+	}
+	if player.Motion.YawRate != 0 || player.Motion.PitchRate != 0 || player.Motion.RollRate != 0 {
+		t.Fatalf("surface entry retained pre-cinematic turn rates: %+v", player.Motion)
+	}
+	previous := objectPositions(g.objects)
+	g.world.Objects = g.objects
+	if err := g.world.Step(g.profile.Simulation.TickSeconds); err != nil {
+		t.Fatal(err)
+	}
+	g.objects = g.world.Objects
+	g.refreshEnvironmentTiles()
+	collisions := g.collisions
+	g.resolveEnvironmentCollisions(previous)
+	if g.collisions != collisions {
+		t.Fatal("level surface entry collided with the Death Star on its first tick")
+	}
+	if err := g.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if g.world.Mission.Phase != sim.MissionSurfaceAssault {
+		t.Fatalf("surface handoff phase=%s, want surface assault", g.world.Mission.Phase)
+	}
+	// The opening surface formation must provide several seconds of controlled
+	// flight, rather than immediately turning the handoff into a pile-up with
+	// the defending screen or nearby installations.
+	g.flow = flowPlaying
+	for tick := range 360 {
+		if err := g.Update(); err != nil {
+			t.Fatal(err)
+		}
+		if g.playerDestroyed {
+			t.Fatalf("surface entry destroyed player after %d ticks: shield=%d collisions=%d attacker=%d", tick+1, g.shieldStrength, g.collisions, g.viewCamera.TargetID)
+		}
+	}
+}
+
+func TestSurfaceApproachHidesOrbitalHostBillboard(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	var surface *localEnvironment
+	for index := range g.environments {
+		runtime := &g.environments[index]
+		if runtime.bound.Definition.Name == environment.DeathStarTrenchName {
+			surface = runtime
+			break
+		}
+	}
+	if surface == nil {
+		t.Fatal("missing Death Star surface environment")
+	}
+	prepared := g.prepareGameplayFrame()
+	containsHostBillboard := func() bool {
+		for _, candidate := range prepared.candidates {
+			if candidate.isBillboard && candidate.object.ID == surface.bound.HostID {
+				return true
+			}
+		}
+		return false
+	}
+	if !containsHostBillboard() {
+		t.Fatal("orbital view unexpectedly omitted Death Star billboard")
+	}
+	g.transitions[fighterID] = environmentTransition{objectID: fighterID, destination: surface.bound.FrameID}
+	prepared = g.prepareGameplayFrame()
+	if containsHostBillboard() {
+		t.Fatal("surface approach retained the Death Star orbital billboard")
 	}
 }
 
@@ -2547,11 +2665,12 @@ func TestHangarPortalPreparesFightersFromBothSides(t *testing.T) {
 	}
 	g.swarmLaunched = true
 	g.viewCamera.Mode = camera.Cockpit
+	hangarSurface := environment.DeathStarHangarSurfacePosition()
 	inside := depthTestObject(990, hangarFrame, math3d.Vec3{Y: 8, Z: -25}, true)
 	g.objects = append(g.objects, inside)
 	g.world.Objects = g.objects
 	player = g.objectByID(fighterID)
-	player.Pose.Position = math3d.Vec3{X: 60, Y: 8, Z: -50}
+	player.Pose.Position = hangarSurface.Add(math3d.Vec3{Y: 8, Z: -50})
 	player.Pose.Orientation = math3d.IdentityQuaternion()
 	g.refreshViewContext()
 	prepared := g.prepareGameplayFrame()
@@ -2565,7 +2684,7 @@ func TestHangarPortalPreparesFightersFromBothSides(t *testing.T) {
 		t.Fatal("fighter inside hangar was invisible through exterior doorway")
 	}
 
-	outside := depthTestObject(991, surfaceFrame, math3d.Vec3{X: 60, Y: 8, Z: -45}, true)
+	outside := depthTestObject(991, surfaceFrame, hangarSurface.Add(math3d.Vec3{Y: 8, Z: -45}), true)
 	g.objects = append(g.objects, outside)
 	g.world.Objects = g.objects
 	player = g.objectByID(fighterID)
@@ -2598,13 +2717,14 @@ func TestHangarPortalTransfersProjectilesOnlyThroughOpening(t *testing.T) {
 			hangarFrame = runtime.bound.FrameID
 		}
 	}
-	bolt := depthTestObject(992, surfaceFrame, math3d.Vec3{X: 60, Y: 8, Z: -30}, false)
+	hangarSurface := environment.DeathStarHangarSurfacePosition()
+	bolt := depthTestObject(992, surfaceFrame, hangarSurface.Add(math3d.Vec3{Y: 8, Z: -30}), false)
 	bolt.CollisionRole = scene.CollisionProjectile
 	bolt.Physical = false
 	bolt.Motion.Velocity = math3d.Vec3{Z: 10}
 	g.objects = append(g.objects, bolt)
 	g.world.Objects = g.objects
-	previous := map[scene.ObjectID]math3d.Vec3{bolt.ID: {X: 60, Y: 8, Z: -40}}
+	previous := map[scene.ObjectID]math3d.Vec3{bolt.ID: hangarSurface.Add(math3d.Vec3{Y: 8, Z: -40})}
 	if err := g.transferPortalProjectiles(previous); err != nil {
 		t.Fatal(err)
 	}
@@ -2617,14 +2737,14 @@ func TestHangarPortalTransfersProjectilesOnlyThroughOpening(t *testing.T) {
 	if err := g.transferPortalProjectiles(previous); err != nil {
 		t.Fatal(err)
 	}
-	if object := g.objectByID(bolt.ID); object.Frame != surfaceFrame || math.Abs(object.Pose.Position.X-60) > 1e-6 {
+	if object := g.objectByID(bolt.ID); object.Frame != surfaceFrame || math.Abs(object.Pose.Position.X-hangarSurface.X) > 1e-6 {
 		t.Fatalf("outgoing bolt did not return to surface frame: %+v", object)
 	}
-	blocked := depthTestObject(993, surfaceFrame, math3d.Vec3{X: 90, Y: 8, Z: -30}, false)
+	blocked := depthTestObject(993, surfaceFrame, hangarSurface.Add(math3d.Vec3{X: 30, Y: 8, Z: -30}), false)
 	blocked.CollisionRole = scene.CollisionProjectile
 	g.objects = append(g.objects, blocked)
 	g.world.Objects = g.objects
-	previous[blocked.ID] = math3d.Vec3{X: 90, Y: 8, Z: -40}
+	previous[blocked.ID] = hangarSurface.Add(math3d.Vec3{X: 30, Y: 8, Z: -40})
 	if err := g.transferPortalProjectiles(previous); err != nil {
 		t.Fatal(err)
 	}

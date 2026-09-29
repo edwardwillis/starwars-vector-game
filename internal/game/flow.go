@@ -3,10 +3,13 @@ package game
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strings"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
+	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -25,6 +28,15 @@ const (
 	flowOutcome
 	flowResult
 )
+
+// yavinOutcomePresentation is deliberately a small presentation-only state.
+// It consumes an authoritative terminal mission result but cannot alter it.
+// Keeping it here avoids turning the Yavin ending into a reusable cut-scene
+// framework before a second mission establishes those requirements.
+type yavinOutcomePresentation struct {
+	elapsed float64
+	success bool
+}
 
 func (flow applicationFlow) String() string {
 	switch flow {
@@ -130,6 +142,7 @@ func (g *Game) applyShellAction(action shellAction) error {
 	case flowOutcome:
 		if action == shellActionOutcomeContinue {
 			g.flow = flowResult
+			g.outcomePresentation = nil
 		}
 	case flowResult:
 		switch action {
@@ -239,6 +252,7 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.destructionVictim = fresh.destructionVictim
 	g.controlsRemaining = 0
 	g.hyperspaceArrival = fresh.hyperspaceArrival
+	g.outcomePresentation = nil
 
 	// Pipeline construction follows the selected gameplay profile, while the
 	// user's runtime realism choice remains an application preference.
@@ -326,6 +340,7 @@ func (g *Game) updateApplicationFlow(seconds float64) (bool, error) {
 		if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 			return true, g.applyShellAction(shellActionOutcomeContinue)
 		}
+		g.advanceYavinOutcomePresentation(seconds)
 		return true, nil
 	case flowResult:
 		action := shellActionNone
@@ -348,9 +363,6 @@ func (g *Game) drawApplicationShell(screen *ebiten.Image) bool {
 		return true
 	case flowBriefing:
 		g.drawYavinBriefing(screen)
-		return true
-	case flowOutcome:
-		g.drawYavinOutcome(screen)
 		return true
 	case flowResult:
 		g.drawYavinResult(screen)
@@ -421,20 +433,108 @@ func (g *Game) drawYavinBriefing(screen *ebiten.Image) {
 	drawVectorText(screen, ScreenWidth/2, 410, "BACKSPACE MISSION SELECT", muted)
 }
 
-func (g *Game) drawYavinOutcome(screen *ebiten.Image) {
+// beginYavinOutcomePresentation starts the only bespoke Yavin presentation
+// beat. A success composes an exterior, fixed camera around the Death Star;
+// failure retains the view in which the mission ended.
+func (g *Game) beginYavinOutcomePresentation() {
+	if g.world == nil {
+		return
+	}
+	mission := g.world.Mission
+	presentation := &yavinOutcomePresentation{success: mission.Phase == sim.MissionSucceeded}
+	g.outcomePresentation = presentation
+	if !presentation.success || mission.HostID == 0 {
+		return
+	}
+	host := g.objectByID(mission.HostID)
+	if host == nil {
+		return
+	}
+	hostPose, err := g.world.PoseInFrame(mission.HostID, scene.ExteriorFrame)
+	if err != nil {
+		return
+	}
+	direction := math3d.Vec3{Z: 1}
+	if playerPose, err := g.world.PoseInFrame(mission.PlayerID, scene.ExteriorFrame); err == nil {
+		if escaped := playerPose.Position.Sub(hostPose.Position); escaped.Length() > 1e-9 {
+			direction = escaped.Normalize()
+		}
+	}
+	distance := math.Max(host.CollisionRadius*2.25, 360)
+	eye := hostPose.Position.Add(direction.Scale(distance)).Add(math3d.Vec3{Y: distance * 0.16})
+	g.viewCamera.FixLookingAt(eye, hostPose.Position, math3d.Vec3{Y: 1})
+	g.refreshViewContext()
+}
+
+func (g *Game) advanceYavinOutcomePresentation(seconds float64) {
+	if g.outcomePresentation == nil || seconds <= 0 {
+		return
+	}
+	// The visual effect reaches its full composition quickly then remains
+	// available for the player to acknowledge. There is no presentation timer
+	// that can silently advance the application flow.
+	g.outcomePresentation.elapsed += seconds
+}
+
+func (g *Game) drawYavinOutcomePresentation(screen *ebiten.Image) {
+	if g.world == nil {
+		return
+	}
 	mission := g.world.Mission
 	completed := mission.Phase == sim.MissionSucceeded
+	elapsed := 0.0
+	if g.outcomePresentation != nil {
+		elapsed = g.outcomePresentation.elapsed
+	}
+	if completed {
+		g.drawDeathStarDestructionEffect(screen, elapsed)
+	}
 	primary := color.RGBA{R: 255, G: 224, B: 32, A: 255}
 	if !completed {
 		primary = color.RGBA{R: 255, G: 64, B: 64, A: 255}
 	}
 	blue := color.RGBA{R: 64, G: 220, B: 255, A: 255}
 	muted := color.RGBA{R: 128, G: 176, B: 192, A: 255}
-	drawShellPanel(screen, 240, 156, 720, 386)
-	drawVectorText(screen, ScreenWidth/2, 194, "BATTLE OF YAVIN", blue)
-	drawVectorText(screen, ScreenWidth/2, 252, mission.Phase.String(), primary)
-	drawVectorText(screen, ScreenWidth/2, 294, missionResultReason(mission.Reason), muted)
-	drawVectorText(screen, ScreenWidth/2, 346, "ENTER MISSION RESULT", primary)
+	drawShellPanel(screen, 268, 42, 692, 142)
+	drawVectorText(screen, ScreenWidth/2, 66, "BATTLE OF YAVIN", blue)
+	if completed && elapsed < 0.8 {
+		drawVectorText(screen, ScreenWidth/2, 96, "REACTOR CHAIN REACTION", primary)
+	} else {
+		drawVectorText(screen, ScreenWidth/2, 96, mission.Phase.String(), primary)
+	}
+	drawVectorText(screen, ScreenWidth/2, 122, missionResultReason(mission.Reason), muted)
+	drawVectorText(screen, ScreenWidth/2, ScreenHeight-42, "ENTER MISSION RESULT", primary)
+}
+
+// drawDeathStarDestructionEffect is intentionally bounded screen-space vector
+// artwork. It provides the Yavin payoff without putting a station-scale object
+// through fighter fragmentation, terrain simulation, or a general timeline.
+func (g *Game) drawDeathStarDestructionEffect(screen *ebiten.Image, elapsed float64) {
+	progress := math.Min(1, math.Max(0, elapsed/2.4))
+	centerX, centerY := float32(ScreenWidth/2), float32(ScreenHeight/2)
+	coreRadius := float32(14 + 110*progress)
+	for ring := 0; ring < 3; ring++ {
+		radius := coreRadius * float32(0.30+0.28*float64(ring))
+		segments := 18 + ring*6
+		color := color.RGBA{R: 255, G: uint8(205 - ring*38), B: 48, A: 255}
+		for segment := 0; segment < segments; segment++ {
+			angle := 2*math.Pi*float64(segment)/float64(segments) + elapsed*(0.5+0.15*float64(ring))
+			next := angle + 2*math.Pi/float64(segments)*0.7
+			vector.StrokeLine(screen,
+				centerX+radius*float32(math.Cos(angle)), centerY+radius*float32(math.Sin(angle)),
+				centerX+radius*float32(math.Cos(next)), centerY+radius*float32(math.Sin(next)),
+				1.5, color, true)
+		}
+	}
+	for ray := 0; ray < 24; ray++ {
+		angle := 2*math.Pi*float64(ray)/24 + math.Sin(float64(ray)*7.3)*0.14
+		start := coreRadius * float32(0.35+0.08*math.Sin(elapsed*4+float64(ray)))
+		end := start + float32(12+76*progress+12*math.Sin(float64(ray)*1.7+elapsed*3))
+		vector.StrokeLine(screen,
+			centerX+start*float32(math.Cos(angle)), centerY+start*float32(math.Sin(angle)),
+			centerX+end*float32(math.Cos(angle)), centerY+end*float32(math.Sin(angle)),
+			2, color.RGBA{R: 255, G: 190, B: 48, A: 255}, true)
+	}
 }
 
 func (g *Game) drawYavinResult(screen *ebiten.Image) {

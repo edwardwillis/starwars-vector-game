@@ -1,6 +1,7 @@
 package game
 
 import (
+	"math"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
@@ -418,11 +419,14 @@ func TestTerminalYavinMissionUsesOutcomeThenResultAndRetryLaunchBoundary(t *test
 	if g.flow != flowOutcome {
 		t.Fatalf("terminal mission flow=%v, want outcome", g.flow)
 	}
+	if g.outcomePresentation == nil || g.outcomePresentation.success {
+		t.Fatalf("failure did not start a failure outcome presentation: %+v", g.outcomePresentation)
+	}
 	if err := g.applyShellAction(shellActionOutcomeContinue); err != nil {
 		t.Fatal(err)
 	}
-	if g.flow != flowResult {
-		t.Fatalf("outcome flow=%v, want result", g.flow)
+	if g.flow != flowResult || g.outcomePresentation != nil {
+		t.Fatalf("outcome flow=%v presentation=%+v, want result with no presentation", g.flow, g.outcomePresentation)
 	}
 	if err := g.applyShellAction(shellActionRetryMission); err != nil {
 		t.Fatal(err)
@@ -435,6 +439,49 @@ func TestTerminalYavinMissionUsesOutcomeThenResultAndRetryLaunchBoundary(t *test
 	}
 	if g.world == oldWorld || g.world.Mission.Phase != sim.MissionOrbitalBattle || g.world.Mission.Score != (sim.MissionScore{}) {
 		t.Fatalf("retry did not create a fresh Yavin session: mission=%+v", g.world.Mission)
+	}
+}
+
+func TestSuccessfulTerminalMissionFramesDeathStarAndAnimatesOutcome(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	g.flow = flowPlaying
+	for _, phase := range []sim.MissionPhase{
+		sim.MissionApproach,
+		sim.MissionSurfaceAssault,
+		sim.MissionTrenchRun,
+		sim.MissionExhaustPortAttack,
+	} {
+		if err := g.world.Apply(sim.AdvanceMission{To: phase, Reason: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.world.Apply(sim.BeginEscape{DeadlineTick: g.world.Tick + 300, Reason: "exhaust-port-hit"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionSucceeded, Reason: "safe-distance-reached"}); err != nil {
+		t.Fatal(err)
+	}
+	g.enterTerminalMissionFlow()
+	if g.flow != flowOutcome || g.outcomePresentation == nil || !g.outcomePresentation.success {
+		t.Fatalf("success did not start a success outcome: flow=%v presentation=%+v", g.flow, g.outcomePresentation)
+	}
+	if g.viewCamera.Mode != camera.Fixed {
+		t.Fatalf("success camera mode=%v, want fixed Death Star composition", g.viewCamera.Mode)
+	}
+	host := g.objectByID(g.world.Mission.HostID)
+	if host == nil {
+		t.Fatal("Death Star host missing")
+	}
+	point := g.pipeline.View.TransformPoint(host.Pose.Position)
+	if math.Abs(point.X) > 1e-8 || math.Abs(point.Y) > 1e-8 || point.Z >= 0 {
+		t.Fatalf("Death Star camera point=%+v, want centered object in front of camera", point)
+	}
+	g.advanceYavinOutcomePresentation(1.25)
+	if got := g.outcomePresentation.elapsed; math.Abs(got-1.25) > 1e-9 {
+		t.Fatalf("outcome elapsed=%v, want 1.25", got)
 	}
 }
 

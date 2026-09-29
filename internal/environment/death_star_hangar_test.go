@@ -23,9 +23,23 @@ func TestDeathStarHangarHasOpenDoorAndPhysicalInterior(t *testing.T) {
 	if tile := definition.Tile(TileCoordinate{X: 1}); len(tile.Planes) != 0 {
 		t.Fatal("hangar collision leaked into adjacent tile")
 	}
-	surface := DeathStarTrench().Tile(TileCoordinate{X: 1})
-	if len(surface.Parts) != 5 || len(surface.Boxes) != 4 || len(surface.Features) != 0 {
+	surface := DeathStarTrench().Tile(hangarSurfaceTile)
+	if len(surface.Parts) != 4 || len(surface.Boxes) != 3 || len(surface.Features) != 0 {
 		t.Fatalf("hangar entrance tile parts=%d boxes=%d features=%d", len(surface.Parts), len(surface.Boxes), len(surface.Features))
+	}
+	for _, part := range surface.Parts {
+		if part.Name == "hangar roof" || part.Name == "hangar back wall" || part.Name == "hangar port wall" || part.Name == "hangar starboard wall" {
+			t.Fatalf("obsolete freestanding hangar shell part remained: %q", part.Name)
+		}
+	}
+	var entry Transition
+	for _, transition := range DeathStarTrench().Transitions {
+		if transition.Name == "hangar-entry" {
+			entry = transition
+		}
+	}
+	if entry.Duration <= 0 || !entry.PreservePose || !entry.AlignOrientation || entry.EntryPose.Orientation != math3d.IdentityQuaternion() {
+		t.Fatalf("hangar entry does not preserve lane and level into interior: %+v", entry)
 	}
 	for _, part := range room.Parts {
 		if part.Name == "hangar front wall" {
@@ -35,8 +49,8 @@ func TestDeathStarHangarHasOpenDoorAndPhysicalInterior(t *testing.T) {
 	if _, hit := collision.SweepSpherePlane(math3d.Vec3{Y: 4}, math3d.Vec3{Y: -2}, 1, definition.Tile(TileCoordinate{}).Planes[0]); !hit {
 		t.Fatal("hangar floor does not stop a descending fighter")
 	}
-	entryStart := math3d.Vec3{X: hangarSurfaceX, Y: 8, Z: -40}
-	entryEnd := math3d.Vec3{X: hangarSurfaceX, Y: 8, Z: -25}
+	entryStart := math3d.Vec3{X: hangarSurfaceX, Y: 8, Z: hangarSurfaceZ - hangarHalfLength - 6}
+	entryEnd := math3d.Vec3{X: hangarSurfaceX, Y: 8, Z: hangarSurfaceZ - hangarHalfLength + 9}
 	for _, box := range surface.Boxes {
 		if _, hit := collision.SweepSphereBox(entryStart, entryEnd, 1, box); hit {
 			t.Fatalf("hangar shell blocks its own open doorway: %+v", box)

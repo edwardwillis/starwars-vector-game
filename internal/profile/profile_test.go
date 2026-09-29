@@ -113,6 +113,16 @@ func TestDifficultyProfilesIncreasePressure(t *testing.T) {
 	}
 }
 
+func TestSurfaceEntryGraceTightensWithDifficulty(t *testing.T) {
+	cadet, pilot, ace, nightmare := Cadet(), Pilot(), Ace(), Nightmare()
+	if !(cadet.Surface.EntryGraceSeconds > pilot.Surface.EntryGraceSeconds &&
+		pilot.Surface.EntryGraceSeconds > ace.Surface.EntryGraceSeconds &&
+		ace.Surface.EntryGraceSeconds > nightmare.Surface.EntryGraceSeconds &&
+		nightmare.Surface.EntryGraceSeconds > 0) {
+		t.Fatalf("surface entry grace does not tighten with difficulty: cadet=%v pilot=%v ace=%v nightmare=%v", cadet.Surface.EntryGraceSeconds, pilot.Surface.EntryGraceSeconds, ace.Surface.EntryGraceSeconds, nightmare.Surface.EntryGraceSeconds)
+	}
+}
+
 func TestCloneOwnsSwarmPositions(t *testing.T) {
 	original := Pilot()
 	clone := original.Clone()
@@ -140,6 +150,7 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "invalid auto-level", mutate: func(profile *GameProfile) { profile.Player.AutoLevel.MaxRollRate = 0 }},
 		{name: "same combat team", mutate: func(profile *GameProfile) { profile.Swarm.Team = profile.Player.Team }},
 		{name: "invalid surface speed", mutate: func(profile *GameProfile) { profile.Surface.MaxForward = 0 }},
+		{name: "invalid surface entry grace", mutate: func(profile *GameProfile) { profile.Surface.EntryGraceSeconds = -1 }},
 		{name: "invalid escape deadline", mutate: func(profile *GameProfile) { profile.Yavin.EscapeDeadlineSeconds = 0 }},
 	}
 	for _, test := range tests {

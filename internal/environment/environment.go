@@ -39,6 +39,14 @@ type Transition struct {
 	// position. EntryOffset nudges it clear of the opposite trigger.
 	PreservePose bool
 	EntryOffset  math3d.Vec3
+	// AlignOrientation retains the preserved destination-relative position but
+	// uses EntryPose.Orientation. It is useful when a doorway leads into a
+	// space with its own level-flight reference.
+	AlignOrientation bool
+	// RollRadians is optional presentation roll layered over the orientation
+	// blend during a timed transition. It returns to the authored entry
+	// orientation when the transfer completes.
+	RollRadians float64
 	// ApproachDirection is expressed in Source coordinates; zero accepts
 	// either direction, while a nonzero vector gates a one-way opening.
 	ApproachDirection math3d.Vec3
@@ -476,8 +484,8 @@ func (registry *Registry) Register(def Definition) error {
 		if transition.Duration < 0 {
 			return fmt.Errorf("environment %q transition %q has negative duration", def.Name, transition.Name)
 		}
-		if transition.PreservePose && transition.Duration > 0 {
-			return fmt.Errorf("environment %q transition %q cannot combine pose-preserving portal transfer with a timed cinematic", def.Name, transition.Name)
+		if transition.PreservePose && transition.Duration > 0 && !transition.AlignOrientation {
+			return fmt.Errorf("environment %q transition %q needs orientation alignment when combining a preserved doorway lane with a timed transition", def.Name, transition.Name)
 		}
 		for _, component := range []float64{transition.ApproachDirection.X, transition.ApproachDirection.Y, transition.ApproachDirection.Z,
 			transition.EntryOffset.X, transition.EntryOffset.Y, transition.EntryOffset.Z} {

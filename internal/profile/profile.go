@@ -111,12 +111,16 @@ type SwarmConfig struct {
 // changing orbital motion or the global simulation clock. Values are profile
 // data so difficulty modes and downstream games can select a different pace.
 type SurfaceCombatConfig struct {
-	CruiseSpeed         float64
-	MaxForward          float64
-	Acceleration        float64
-	InitialAttackers    int
-	MaxAttackers        int
-	ReinforcementDelay  float64
+	CruiseSpeed        float64
+	MaxForward         float64
+	Acceleration       float64
+	InitialAttackers   int
+	MaxAttackers       int
+	ReinforcementDelay float64
+	// EntryGraceSeconds is the short player-controlled opening after arrival
+	// in a local surface environment. Defenders may pursue and position during
+	// it, but do not fire until the grace window ends.
+	EntryGraceSeconds   float64
 	CannonRange         float64
 	CannonFireMinGap    float64
 	CannonFireMaxGap    float64
@@ -301,7 +305,7 @@ func Pilot() GameProfile {
 		},
 		Surface: SurfaceCombatConfig{
 			CruiseSpeed: 4.5, MaxForward: 5.5, Acceleration: 3.4,
-			InitialAttackers: 3, MaxAttackers: 5, ReinforcementDelay: 4,
+			InitialAttackers: 3, MaxAttackers: 5, ReinforcementDelay: 4, EntryGraceSeconds: 2.5,
 			CannonRange: 82, CannonFireMinGap: 0.8, CannonFireMaxGap: 1.45,
 			CannonAimError: 4.8, CannonBoltLifetime: 2.3, MaxActiveCannons: 4,
 			CannonTraverseSpeed: 2.4, CannonYawLimit: 1.55, CannonPitchLimit: 1.5, CannonFireTolerance: 0.09,
@@ -338,6 +342,7 @@ func Cadet() GameProfile {
 	profile.Surface.InitialAttackers = 2
 	profile.Surface.MaxAttackers = 3
 	profile.Surface.ReinforcementDelay = 5.5
+	profile.Surface.EntryGraceSeconds = 3.5
 	profile.Surface.MaxActiveCannons = 2
 	profile.Surface.CannonFireMinGap = 1.2
 	profile.Surface.CannonFireMaxGap = 2.0
@@ -363,6 +368,7 @@ func Ace() GameProfile {
 	profile.Swarm.Pursuit.AttackFireMinGap = 0.65
 	profile.Swarm.Pursuit.AttackFireMaxGap = 1.1
 	profile.Surface.ReinforcementDelay = 3.2
+	profile.Surface.EntryGraceSeconds = 2
 	profile.Surface.MaxActiveCannons = 5
 	profile.Surface.CannonFireMinGap = 0.65
 	profile.Surface.CannonFireMaxGap = 1.15
@@ -394,6 +400,7 @@ func Nightmare() GameProfile {
 	profile.Surface.InitialAttackers = 4
 	profile.Surface.MaxAttackers = 7
 	profile.Surface.ReinforcementDelay = 2.2
+	profile.Surface.EntryGraceSeconds = 1.5
 	profile.Surface.MaxActiveCannons = 6
 	profile.Surface.CannonFireMinGap = 0.45
 	profile.Surface.CannonFireMaxGap = 0.9
@@ -676,6 +683,9 @@ func validateSurfaceCombat(config SurfaceCombatConfig) error {
 	}
 	if config.MaxForward < config.CruiseSpeed {
 		return fmt.Errorf("maximum forward speed must not be below cruise speed")
+	}
+	if err := validateNonNegative("surface entry grace", config.EntryGraceSeconds); err != nil {
+		return err
 	}
 	if config.InitialAttackers < 0 || config.MaxAttackers < config.InitialAttackers {
 		return fmt.Errorf("attacker counts are invalid")

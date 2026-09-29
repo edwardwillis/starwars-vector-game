@@ -26,6 +26,11 @@ type Frame struct {
 	MissionPhase       string
 	View               string
 	Realism            int
+	PlayerShield       int
+	Collisions         int
+	SurfaceAttackers   int
+	HostileProjectiles int
+	SurfaceEntryGrace  float64
 	ActiveTiles        int
 	Features           int
 	Candidates         int
@@ -82,7 +87,7 @@ func NewCSV(path string) (*Recorder, error) {
 	}
 	if err := recorder.writer.Write([]string{
 		"elapsed_s", "interval_s", "frames", "draw_ms_avg", "draw_ms_max", "updates_avg", "update_ms_avg", "update_ms_per_update_avg", "actual_fps_avg", "actual_tps_avg",
-		"flow", "mission_phase", "view", "realism",
+		"flow", "mission_phase", "view", "realism", "player_shield", "collisions_total", "surface_attackers", "hostile_projectiles", "surface_entry_grace_s",
 		"active_tiles_avg", "features_avg", "candidates_avg", "depth_domains_avg",
 		"depth_faces_avg", "depth_triangles_avg", "depth_pixels_tested_avg", "depth_pixels_written_avg", "line_depth_samples_avg",
 		"prepare_ms_avg", "background_ms_avg", "depth_raster_ms_avg", "geometry_ms_avg", "surface_ms_avg", "opaque_submit_ms_avg", "vector_submit_ms_avg", "overlay_ms_avg",
@@ -147,7 +152,7 @@ func (r *Recorder) writeSample(now time.Time) {
 		formatFloat(now.Sub(r.started).Seconds()), formatFloat(now.Sub(r.last).Seconds()), strconv.Itoa(r.frames),
 		formatFloat(float64(r.drawSum) / float64(time.Millisecond) / frames), formatFloat(float64(r.drawMax) / float64(time.Millisecond)),
 		formatFloat(float64(r.sums.updateCalls) / frames), formatFloat(float64(r.sums.updateDuration) / float64(time.Millisecond) / frames), formatFloat(durationPerCall(r.sums.updateDuration, r.sums.updateCalls)), formatFloat(r.sums.actualFPS / frames), formatFloat(r.sums.actualTPS / frames),
-		r.latest.Flow, r.latest.MissionPhase, r.latest.View, strconv.Itoa(r.latest.Realism),
+		r.latest.Flow, r.latest.MissionPhase, r.latest.View, strconv.Itoa(r.latest.Realism), strconv.Itoa(r.latest.PlayerShield), strconv.Itoa(r.latest.Collisions), strconv.Itoa(r.latest.SurfaceAttackers), strconv.Itoa(r.latest.HostileProjectiles), formatFloat(r.latest.SurfaceEntryGrace),
 		formatFloat(float64(r.sums.activeTiles) / frames), formatFloat(float64(r.sums.features) / frames), formatFloat(float64(r.sums.candidates) / frames), formatFloat(float64(r.sums.depthDomains) / frames),
 		formatFloat(float64(r.sums.depthFaces) / frames), formatFloat(float64(r.sums.depthTriangles) / frames), formatFloat(float64(r.sums.depthTested) / frames), formatFloat(float64(r.sums.depthWritten) / frames), formatFloat(float64(r.sums.lineSamples) / frames),
 		formatFloat(float64(r.sums.prepareDuration) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.backgroundDuration) / float64(time.Millisecond) / frames), formatFloat(r.sums.depthMS / frames), formatFloat(r.sums.geometryMS / frames), formatFloat(float64(r.sums.surfaceDuration) / float64(time.Millisecond) / frames), formatFloat(r.sums.opaqueMS / frames), formatFloat(r.sums.vectorMS / frames), formatFloat(float64(r.sums.overlayDuration) / float64(time.Millisecond) / frames),

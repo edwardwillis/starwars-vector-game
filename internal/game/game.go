@@ -68,21 +68,6 @@ type surfaceEffect struct {
 	remaining float64
 }
 
-// surfaceEntryProjection is a navigation-only view of an already-authored
-// exterior-to-surface transition. Its corners are in exterior world space;
-// it has no simulation, collision, depth, or occlusion role.
-type surfaceEntryProjection struct {
-	corners   [4]math3d.Vec3
-	intensity float64
-}
-
-const (
-	surfaceEntryProjectionRange       = 480.0
-	surfaceEntryProjectionFullRange   = 340.0
-	surfaceEntryProjectionMinHeading  = 0.55
-	surfaceEntryProjectionFullHeading = 0.90
-)
-
 // Feature damage is authoritative to the bound environment, not the streamed
 // tile or the current camera. It survives tile eviction and regeneration.
 type featureDamageState struct {
@@ -110,19 +95,37 @@ var laserInterceptionMesh = modelpkg.Prepare(modelpkg.Transform(
 	math3d.Scaling(0.35, 0.35, 0.35),
 ))
 
+var fighterImpactMesh = modelpkg.Prepare(modelpkg.Model{
+	Verts: []math3d.Vec3{
+		{}, {X: 1.35}, {}, {X: -1.35},
+		{}, {Y: 1.35}, {}, {Y: -1.35},
+		{}, {Z: 1.35}, {}, {Z: -1.35},
+		{}, {X: 0.85, Y: 0.85}, {}, {X: -0.85, Y: 0.85},
+		{}, {X: 0.85, Y: -0.85}, {}, {X: -0.85, Y: -0.85},
+	},
+	Edges: []modelpkg.Edge{
+		{A: 0, B: 1, Kind: modelpkg.EdgeDecorative}, {A: 2, B: 3, Kind: modelpkg.EdgeDecorative},
+		{A: 4, B: 5, Kind: modelpkg.EdgeDecorative}, {A: 6, B: 7, Kind: modelpkg.EdgeDecorative},
+		{A: 8, B: 9, Kind: modelpkg.EdgeDecorative}, {A: 10, B: 11, Kind: modelpkg.EdgeDecorative},
+		{A: 12, B: 13, Kind: modelpkg.EdgeDecorative}, {A: 14, B: 15, Kind: modelpkg.EdgeDecorative},
+		{A: 16, B: 17, Kind: modelpkg.EdgeDecorative}, {A: 18, B: 19, Kind: modelpkg.EdgeDecorative},
+	},
+})
+
 var installationShardMesh = modelpkg.Cube(0.35)
 
 // surfaceEncounterState is authoritative fixed-tick state for one bound
 // environment instance. It is independent of which visual tiles survive the
 // render stream, so encounter timing does not change with camera or LOD.
 type surfaceEncounterState struct {
-	started       bool
-	participant   scene.ObjectID
-	nextWaveAt    float64
-	wave          int
-	missionPhase  sim.MissionPhase
-	cannonReadyAt map[string]float64
-	cannonAim     map[string]cannonAimState
+	started         bool
+	participant     scene.ObjectID
+	nextWaveAt      float64
+	attackEnabledAt float64
+	wave            int
+	missionPhase    sim.MissionPhase
+	cannonReadyAt   map[string]float64
+	cannonAim       map[string]cannonAimState
 }
 
 type cannonAimState struct {
@@ -143,6 +146,7 @@ type localEnvironment struct {
 
 type environmentTransition struct {
 	objectID      scene.ObjectID
+	source        scene.FrameID
 	destination   scene.FrameID
 	anchor        string
 	duration      float64
@@ -446,6 +450,12 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 		}
 		definition, hasAppearance := g.appearanceRegistry.ForObject(object.Definition, object.Appearance)
 		if hasAppearance && definition.Kind == "vector-billboard" {
+			if g.hideHostBillboardDuringTransition(object) {
+				// The destination local environment is now the visual truth. Do
+				// not draw (or use for star occlusion) its orbital presentation
+				// over the surface-roll transition.
+				continue
+			}
 			prepared.candidates = append(prepared.candidates, preparedCandidate{
 				object: object, billboard: definition.Billboard, isBillboard: true,
 				analyticSphere: definition.PointOccluder == "sphere",
@@ -504,6 +514,17 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 		g.pipeline.Stats.CandidatesPrepared = len(prepared.candidates)
 	}
 	return prepared
+}
+
+// hideHostBillboardDuringTransition performs the visual handoff from an
+// exterior host presentation to its destination local environment. The player
+// remains in the exterior simulation frame until transfer completes, so this
+// must be decided from the camera's controlled transition rather than frame
+// membership alone. It applies only to billboard artwork; physical local
+// environment geometry continues through the normal prepared-frame pipeline.
+func (g *Game) hideHostBillboardDuringTransition(object scene.Object) bool {
+	transition, runtime, ok := g.viewTransitionEnvironment()
+	return ok && transition.destination == runtime.bound.FrameID && object.ID == runtime.bound.HostID
 }
 
 // portalPass is an opening expressed in the active frame. The same authored
@@ -1027,6 +1048,7 @@ type Game struct {
 	controlsPinned           bool
 	realismLevel             int
 	hyperspaceArrival        *hyperspaceArrival
+	outcomePresentation      *yavinOutcomePresentation
 	telemetry                *telemetry.Recorder
 	telemetryUpdateDuration  time.Duration
 	telemetryUpdateCalls     int
@@ -1549,6 +1571,7 @@ func (g *Game) enterTerminalMissionFlow() {
 	g.quitPrompt = false
 	g.controlsRemaining = 0
 	g.flow = flowOutcome
+	g.beginYavinOutcomePresentation()
 	// Keep the mouse-flight preference for a later retry, but release the
 	// external cursor while a keyboard/mouse shell is being shown.
 	ebiten.SetCursorMode(ebiten.CursorModeVisible)
@@ -1967,26 +1990,31 @@ func (g *Game) updateEnvironmentTransitions() error {
 				if err != nil {
 					return err
 				}
-				if transition.Duration <= 0 {
-					if err := g.completeEnvironmentTransition(environmentTransition{
-						objectID: object.ID, destination: destination, anchor: transition.Name, motion: object.Motion,
-						previousMode: g.viewCamera.Mode, preservePose: transition.PreservePose, entryOffset: transition.EntryOffset,
-					}, transition.EntryPose); err != nil {
-						return err
-					}
-					continue
-				}
 				sourceFramePose, err := g.world.FramePose(source)
 				if err != nil {
 					return err
 				}
+				entryPose, err := g.destinationTransitionPose(object.ID, destination, transition)
+				if err != nil {
+					return err
+				}
+				if transition.Duration <= 0 {
+					if err := g.completeEnvironmentTransition(environmentTransition{
+						objectID: object.ID, source: source, destination: destination, anchor: transition.Name, motion: object.Motion,
+						worldVelocity: sourceFramePose.Orientation.Rotate(object.Motion.Velocity), previousMode: g.viewCamera.Mode,
+						preservePose: transition.PreservePose, entryOffset: transition.EntryOffset,
+					}, entryPose); err != nil {
+						return err
+					}
+					continue
+				}
 				g.transitions[object.ID] = environmentTransition{
-					objectID: object.ID, destination: destination, anchor: transition.Name,
-					duration: transition.Duration, startPose: object.Pose,
-					targetPose: kinematics.Compose(framePose, transition.EntryPose), entryPose: transition.EntryPose, motion: object.Motion,
+					objectID: object.ID, source: source, destination: destination, anchor: transition.Name,
+					duration: transition.Duration, startPose: kinematics.Compose(sourceFramePose, object.Pose),
+					targetPose: kinematics.Compose(framePose, entryPose), entryPose: entryPose, motion: object.Motion,
 					worldVelocity: sourceFramePose.Orientation.Rotate(object.Motion.Velocity),
 					previousMode:  g.viewCamera.Mode,
-					rollRadians:   math.Pi,
+					rollRadians:   transition.RollRadians,
 					preservePose:  transition.PreservePose,
 					entryOffset:   transition.EntryOffset,
 				}
@@ -2015,6 +2043,25 @@ func (g *Game) updateEnvironmentTransitions() error {
 	return nil
 }
 
+// destinationTransitionPose resolves a doorway target before the frame
+// transfer occurs. Preserved-doorway transitions keep the lane chosen by the
+// pilot while optionally adopting the destination space's level orientation.
+func (g *Game) destinationTransitionPose(objectID scene.ObjectID, destination scene.FrameID, transition environment.Transition) (kinematics.Pose, error) {
+	entry := transition.EntryPose
+	if !transition.PreservePose {
+		return entry, nil
+	}
+	pose, err := g.world.PoseInFrame(objectID, destination)
+	if err != nil {
+		return kinematics.Pose{}, err
+	}
+	pose.Position = pose.Position.Add(transition.EntryOffset)
+	if transition.AlignOrientation {
+		pose.Orientation = transition.EntryPose.Orientation.Normalize()
+	}
+	return pose, nil
+}
+
 func (g *Game) advanceEnvironmentTransitions(seconds float64, skip bool) {
 	for id, transition := range g.transitions {
 		transition.elapsed += seconds
@@ -2026,15 +2073,20 @@ func (g *Game) advanceEnvironmentTransitions(seconds float64, skip bool) {
 		// Smoothstep gives the roll and approach a gentle start and finish.
 		eased := amount * amount * (3 - 2*amount)
 		if object := g.objectByID(id); object != nil {
-			object.Pose.Position = transition.startPose.Position.Add(transition.targetPose.Position.Sub(transition.startPose.Position).Scale(eased))
-			alignment := math3d.Slerp(transition.startPose.Orientation, transition.targetPose.Orientation, eased)
+			worldPose := kinematics.Pose{
+				Position:    transition.startPose.Position.Add(transition.targetPose.Position.Sub(transition.startPose.Position).Scale(eased)),
+				Orientation: math3d.Slerp(transition.startPose.Orientation, transition.targetPose.Orientation, eased),
+			}
 			// Roll through the requested half-turn for cinematic feedback, then
 			// settle back to the declared entry orientation. This keeps the
 			// fighter upright when surface flight begins instead of leaving it
 			// inverted after the presentation roll.
 			rollAmount := transition.rollRadians * math.Sin(math.Pi*eased)
 			roll := math3d.QuaternionFromAxisAngle(math3d.Vec3{Z: 1}, rollAmount)
-			object.Pose.Orientation = alignment.Mul(roll).Normalize()
+			worldPose.Orientation = worldPose.Orientation.Mul(roll).Normalize()
+			if sourcePose, err := g.world.FramePose(transition.source); err == nil {
+				object.Pose = kinematics.Relative(sourcePose, worldPose)
+			}
 		}
 		if amount < 1 {
 			g.transitions[id] = transition
@@ -2059,23 +2111,23 @@ func (g *Game) completeEnvironmentTransition(transition environmentTransition, f
 	if object == nil {
 		return fmt.Errorf("transition object %d disappeared", transition.objectID)
 	}
-	transferredVelocity := object.Motion.Velocity
-	if transition.preservePose {
-		object.Pose.Position = object.Pose.Position.Add(transition.entryOffset)
-	} else {
-		object.Pose = finalLocalPose
-	}
+	object.Pose = finalLocalPose
 	object.Motion = transition.motion
-	if transition.preservePose {
-		object.Motion.Velocity = transferredVelocity
+	if transition.duration > 0 {
+		// A timed transition ends at an authored, level entry pose. Carrying
+		// the player's last pre-cinematic turn rate into that pose immediately
+		// pitches, yaws, or rolls the craft away from the intended flight lane
+		// on its first local-environment tick. Preserve linear momentum, but
+		// require fresh control input after the handoff.
+		object.Motion.YawRate = 0
+		object.Motion.PitchRate = 0
+		object.Motion.RollRate = 0
 	}
 	if transition.objectID == g.viewCamera.TargetID && g.surfaceRuntime(normalizedObjectFrame(*object)) != nil {
 		object.Motion.Speed = max(object.Motion.Speed, g.profile.Surface.CruiseSpeed)
 	}
-	if !transition.preservePose {
-		if framePose, err := g.world.FramePose(transition.destination); err == nil {
-			object.Motion.Velocity = framePose.Orientation.Conjugate().Rotate(transition.worldVelocity)
-		}
+	if framePose, err := g.world.FramePose(transition.destination); err == nil {
+		object.Motion.Velocity = framePose.Orientation.Conjugate().Rotate(transition.worldVelocity)
 	}
 	if transition.objectID == g.viewCamera.TargetID {
 		g.viewCamera.Mode = transition.previousMode
@@ -2471,9 +2523,11 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 		}
 		if nearest.ID != 0 {
 			remove[projectile.ID] = true
+			impactPoint := start.Add(projectile.Pose.Position.Sub(start).Scale(nearestTime))
 			if nearest.ID == fighterID {
 				if !playerShieldHit {
 					playerShieldHit = true
+					g.spawnFighterLaserImpact(projectile.Frame, impactPoint)
 					// Damage is applied once per simulation tick for a paired volley.
 					if g.applyShieldDamage(g.profile.Player.Shield.LaserDamage) {
 						destroyed[nearest.ID] = nearest
@@ -2481,6 +2535,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 					}
 				}
 			} else if nearest.Destructible {
+				g.spawnFighterLaserImpact(projectile.Frame, impactPoint)
 				destroyed[nearest.ID] = nearest
 			}
 			if owner == fighterID {
@@ -2504,8 +2559,19 @@ func (g *Game) resolveSolidCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 		if !first.Physical || destroyed[first.ID].ID != 0 {
 			continue
 		}
+		// A controlled transition has already established the object's authored
+		// handoff path. In particular, the Death Star approach volume sits just
+		// above the host's broad orbital collision sphere; resolving that coarse
+		// sphere on the trigger tick would damage the player before the local
+		// surface frame takes ownership.
+		if _, transitioning := g.transitions[first.ID]; transitioning {
+			continue
+		}
 		for _, second := range g.objects[firstIndex+1:] {
 			if !second.Physical || destroyed[second.ID].ID != 0 || !sameFrame(first, second) {
+				continue
+			}
+			if _, transitioning := g.transitions[second.ID]; transitioning {
 				continue
 			}
 			firstStart := previous[first.ID]
@@ -2788,6 +2854,32 @@ func (g *Game) spawnLaserInterception(frame scene.FrameID, point math3d.Vec3) {
 	}
 	g.objects = append(g.objects, spark)
 	g.surfaceEffects[id] = surfaceEffect{remaining: 0.12}
+}
+
+// spawnFighterLaserImpact is a short presentation-only burst for a confirmed
+// laser strike. It appears before the target's existing disintegration so a
+// destruction reads as an impact rather than an unexplained breakup.
+func (g *Game) spawnFighterLaserImpact(frame scene.FrameID, point math3d.Vec3) {
+	if len(g.surfaceEffects) >= 24 {
+		return
+	}
+	id := g.nextObjectID
+	g.nextObjectID++
+	burst := scene.Object{
+		ID: id, Name: "fighter laser impact", Definition: "builtin/fighter-laser-impact", Frame: frame,
+		Pose:  kinematics.Pose{Position: point, Orientation: math3d.IdentityQuaternion()},
+		Parts: []scene.Part{{Name: "impact burst", Mesh: fighterImpactMesh, Color: color.RGBA{R: 255, G: 144, B: 48, A: 255}, LineWidth: 1.7}},
+		// The burst is presentation-only: it must never become a target,
+		// collision candidate, or source of further destruction fragments.
+		CollisionRole: scene.CollisionNone,
+		Physical:      false,
+		Hittable:      false,
+		Targetable:    false,
+		Destructible:  false,
+		VisualRadius:  1.8,
+	}
+	g.objects = append(g.objects, burst)
+	g.surfaceEffects[id] = surfaceEffect{remaining: 0.24}
 }
 
 func (g *Game) updateSurfaceEffects(seconds float64) {
@@ -3361,6 +3453,7 @@ func (g *Game) beginSurfaceEncounter(frame scene.FrameID, participant scene.Obje
 	runtime.encounter.started = true
 	runtime.encounter.participant = participant
 	runtime.encounter.nextWaveAt = g.simulationTime + g.profile.Surface.ReinforcementDelay
+	runtime.encounter.attackEnabledAt = g.simulationTime + g.profile.Surface.EntryGraceSeconds
 	g.moveAttackersToSurface(runtime, participant, g.profile.Surface.InitialAttackers)
 }
 
@@ -3457,8 +3550,11 @@ func (g *Game) moveAttackersToSurface(runtime *localEnvironment, participantID s
 		ids = ids[:requested]
 	}
 	offsets := [...]math3d.Vec3{
-		{Y: 7, Z: 52}, {X: -24, Y: 9, Z: 40}, {X: 24, Y: 8, Z: 44},
-		{X: -15, Y: 12, Z: -36}, {X: 18, Y: 10, Z: -42},
+		// The opening screen enters behind the player in a readable chase
+		// formation. They can close and attack after the entry grace period,
+		// rather than meeting the surface handoff head-on.
+		{X: -24, Y: 9, Z: -64}, {X: 24, Y: 8, Z: -58}, {Y: 7, Z: -72},
+		{X: -40, Y: 12, Z: -48}, {X: 42, Y: 10, Z: -52},
 	}
 	g.world.Objects = g.objects
 	moved := 0
@@ -3476,9 +3572,10 @@ func (g *Game) moveAttackersToSurface(runtime *localEnvironment, participantID s
 		object.Pose.Orientation = orientationToward(direction)
 		object.Motion = kinematics.Motion{Speed: g.profile.Surface.CruiseSpeed + 0.2*float64(index)}
 		g.controllerTargets[id] = participant.ID
-		if starter, ok := g.controllers[id].(control.EngagementStarter); ok {
-			starter.EngageNow()
-		}
+		// Surface entry is a handoff, not an instant point-blank ambush. Let the
+		// existing pursuit controller establish its normal attack timing after it
+		// joins the local environment instead of forcing a volley on the first
+		// player-controlled seconds of flight.
 		moved++
 	}
 	g.objects = g.world.Objects
@@ -3509,6 +3606,9 @@ type activeCannon struct {
 
 func (g *Game) updateSurfaceCannons(runtime *localEnvironment) {
 	if runtime == nil || g.profile.Surface.MaxActiveCannons == 0 {
+		return
+	}
+	if g.simulationTime < runtime.encounter.attackEnabledAt {
 		return
 	}
 	hostTeam := scene.TeamEmpire
@@ -3758,11 +3858,20 @@ func (g *Game) updateAutonomous(seconds float64) {
 		}
 		object.Motion = control.ApplyWithLimits(object.Motion, decision.Flight, limits, seconds)
 		if controllerTarget.ID != 0 {
-			if decision.Fire {
+			if decision.Fire && g.surfaceWeaponsEnabled(*object) {
 				g.fireAutonomousLaser(*object, controllerTarget)
 			}
 		}
 	}
+}
+
+// surfaceWeaponsEnabled keeps the first seconds of a local surface encounter
+// controllable without freezing pursuers or introducing combat exceptions into
+// the controller itself. Once the profile-owned entry grace ends, existing
+// fighter and cannon behavior resumes unchanged.
+func (g *Game) surfaceWeaponsEnabled(object scene.Object) bool {
+	runtime := g.surfaceRuntime(normalizedObjectFrame(object))
+	return runtime == nil || !runtime.encounter.started || g.simulationTime >= runtime.encounter.attackEnabledAt
 }
 
 // applySurfaceGuidance composes local terrain constraints around a strategy's
@@ -4421,115 +4530,6 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	}
 	vector.StrokeLine(screen, muzzleTops[start][0], muzzleTops[start][1], cx-5, cy, 3, beamColor, true)
 	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
-}
-
-// yavinSurfaceEntryProjection derives the navigation plane directly from the
-// active Death Star surface transition. It deliberately does not make a
-// transition more permissive: the existing trigger and mission evidence stay
-// authoritative.
-func (g *Game) yavinSurfaceEntryProjection() (surfaceEntryProjection, bool) {
-	if g.world == nil || g.world.Mission.ID != yavinMissionID ||
-		(g.world.Mission.Phase != sim.MissionOrbitalBattle && g.world.Mission.Phase != sim.MissionApproach) ||
-		g.hyperspaceArrival != nil {
-		return surfaceEntryProjection{}, false
-	}
-	player := g.objectByID(g.world.Mission.PlayerID)
-	if player == nil || normalizedObjectFrame(*player) != scene.ExteriorFrame {
-		return surfaceEntryProjection{}, false
-	}
-	if _, transitioning := g.transitions[player.ID]; transitioning {
-		return surfaceEntryProjection{}, false
-	}
-	hostPose, err := g.world.WorldPose(g.world.Mission.HostID)
-	if err != nil {
-		return surfaceEntryProjection{}, false
-	}
-	toDeathStar := hostPose.Position.Sub(player.Pose.Position)
-	distance := toDeathStar.Length()
-	if distance <= 1e-6 || distance >= surfaceEntryProjectionRange {
-		return surfaceEntryProjection{}, false
-	}
-	heading := player.Pose.Forward().Dot(toDeathStar.Scale(1 / distance))
-	if heading <= surfaceEntryProjectionMinHeading {
-		return surfaceEntryProjection{}, false
-	}
-	rangeFade := (surfaceEntryProjectionRange - distance) / (surfaceEntryProjectionRange - surfaceEntryProjectionFullRange)
-	headingFade := (heading - surfaceEntryProjectionMinHeading) / (surfaceEntryProjectionFullHeading - surfaceEntryProjectionMinHeading)
-	intensity := max(0, min(1, min(rangeFade, headingFade)))
-	// Smooth the two gates independently of simulation progress so the plane
-	// fades rather than popping as the player changes heading or range.
-	intensity = intensity * intensity * (3 - 2*intensity)
-	for _, runtime := range g.environments {
-		if runtime.bound.HostID != g.world.Mission.HostID || runtime.bound.Definition.Name != environment.DeathStarTrenchName {
-			continue
-		}
-		for _, transition := range runtime.bound.Definition.Transitions {
-			if transition.Name != "approach" || runtime.bound.ResolveFrame(transition.Source) != scene.ExteriorFrame {
-				continue
-			}
-			destination := runtime.bound.ResolveFrame(transition.Destination)
-			framePose, err := g.world.FramePose(destination)
-			if err != nil {
-				return surfaceEntryProjection{}, false
-			}
-			center, half := transition.Trigger.Center, transition.Trigger.HalfExtents
-			localCorners := [4]math3d.Vec3{
-				{X: center.X - half.X, Y: center.Y, Z: center.Z - half.Z},
-				{X: center.X + half.X, Y: center.Y, Z: center.Z - half.Z},
-				{X: center.X + half.X, Y: center.Y, Z: center.Z + half.Z},
-				{X: center.X - half.X, Y: center.Y, Z: center.Z + half.Z},
-			}
-			projection := surfaceEntryProjection{intensity: intensity}
-			for index, corner := range localCorners {
-				projection.corners[index] = framePose.Matrix().TransformPoint(corner)
-			}
-			return projection, true
-		}
-	}
-	return surfaceEntryProjection{}, false
-}
-
-// drawSurfaceEntryProjection is intentionally a small post-world overlay. It
-// projects the authoritative transition volume but does not submit a world
-// object, raster depth, test visibility, or alter the scene in any way.
-func (g *Game) drawSurfaceEntryProjection(screen *ebiten.Image) {
-	if g.viewCamera.Mode != camera.Cockpit || g.viewCamera.TargetID != fighterID {
-		return
-	}
-	portal, active := g.yavinSurfaceEntryProjection()
-	if !active || portal.intensity <= 0 {
-		return
-	}
-	var points [4]render.Point
-	for index, corner := range portal.corners {
-		point, visible := g.pipeline.ProjectPointUnclipped(corner)
-		if !visible {
-			return
-		}
-		points[index] = point
-	}
-	var path vector.Path
-	path.MoveTo(float32(points[0].X), float32(points[0].Y))
-	for _, point := range points[1:] {
-		path.LineTo(float32(point.X), float32(point.Y))
-	}
-	path.Close()
-	fill := &vector.DrawPathOptions{AntiAlias: true}
-	fill.ColorScale.ScaleWithColor(color.RGBA{R: 48, G: 188, B: 255, A: uint8(math.Round(3 + 12*portal.intensity))})
-	vector.FillPath(screen, &path, nil, fill)
-	border := &vector.DrawPathOptions{AntiAlias: true}
-	border.ColorScale.ScaleWithColor(color.RGBA{R: 96, G: 224, B: 255, A: uint8(math.Round(72 + 156*portal.intensity))})
-	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: 1.5 + float32(portal.intensity)}, border)
-	centerX, centerY := 0.0, 0.0
-	for _, point := range points {
-		centerX += point.X
-		centerY += point.Y
-	}
-	centerX /= float64(len(points))
-	centerY /= float64(len(points))
-	if centerX >= 0 && centerX <= ScreenWidth && centerY >= 0 && centerY <= ScreenHeight {
-		drawVectorText(screen, float32(centerX), float32(centerY), "SURFACE ENTRY", color.RGBA{R: 96, G: 224, B: 255, A: uint8(math.Round(100 + 130*portal.intensity))})
-	}
 }
 
 func (g *Game) drawMissionTargetingComputer(screen *ebiten.Image) {
@@ -5473,7 +5473,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
 	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
-	g.drawSurfaceEntryProjection(screen)
 	if g.telemetry != nil {
 		overlayStarted := time.Now()
 		defer func() { timings.overlays = time.Since(overlayStarted) }()
@@ -5484,9 +5483,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.mouseFlight {
 		g.drawMouseReticle(screen)
 	}
-	if g.playerDestroyed {
+	if g.playerDestroyed && g.flow == flowPlaying {
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
+	}
+	if g.flow == flowOutcome {
+		g.drawYavinOutcomePresentation(screen)
 	}
 	if g.controlsVisible() {
 		ebitenutil.DebugPrintAt(screen, controlsText(!g.playerDestroyed), 16, 16)
@@ -5527,6 +5529,7 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 	if g.viewCamera != nil {
 		viewMode = g.viewCamera.Mode.String()
 	}
+	shield, surfaceAttackers, hostileProjectiles, surfaceEntryGrace := g.surfaceCombatTelemetry()
 	g.telemetry.Observe(telemetry.Frame{
 		At:                 time.Now(),
 		DrawDuration:       drawDuration,
@@ -5542,6 +5545,11 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 		MissionPhase:       phase,
 		View:               viewMode,
 		Realism:            g.realismLevel + 1,
+		PlayerShield:       shield,
+		Collisions:         g.collisions,
+		SurfaceAttackers:   surfaceAttackers,
+		HostileProjectiles: hostileProjectiles,
+		SurfaceEntryGrace:  surfaceEntryGrace,
 		ActiveTiles:        g.renderStats.ActiveEnvironmentTiles,
 		Features:           g.renderStats.EnvironmentInstancesPrepared,
 		Candidates:         g.renderStats.CandidatesPrepared,
@@ -5558,6 +5566,35 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 		OutputEdges:        g.renderStats.OutputEdges,
 		RenderJobs:         g.renderStats.RenderJobs,
 	})
+}
+
+// surfaceCombatTelemetry returns cheap run-state counters for post-hoc local
+// environment balancing. It is called only while a CSV recorder is active, so
+// ordinary rendering and simulation do not pay for these diagnostic walks.
+func (g *Game) surfaceCombatTelemetry() (shield, attackers, hostileProjectiles int, entryGrace float64) {
+	shield = g.shieldStrength
+	player := g.objectByID(fighterID)
+	if player == nil {
+		return shield, attackers, hostileProjectiles, entryGrace
+	}
+	frame := normalizedObjectFrame(*player)
+	runtime := g.surfaceRuntime(frame)
+	if runtime == nil || !runtime.encounter.started {
+		return shield, attackers, hostileProjectiles, entryGrace
+	}
+	entryGrace = max(0, runtime.encounter.attackEnabledAt-g.simulationTime)
+	for id := range g.controllers {
+		object := g.objectByID(id)
+		if object != nil && object.Team != scene.TeamNeutral && object.Team != player.Team && normalizedObjectFrame(*object) == frame {
+			attackers++
+		}
+	}
+	for _, object := range g.objects {
+		if object.CollisionRole == scene.CollisionProjectile && object.Team != scene.TeamNeutral && object.Team != player.Team && normalizedObjectFrame(object) == frame {
+			hostileProjectiles++
+		}
+	}
+	return shield, attackers, hostileProjectiles, entryGrace
 }
 
 func (g *Game) drawQuitPrompt(screen *ebiten.Image) {
@@ -5827,13 +5864,44 @@ func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboar
 	lines := g.billboardLines(billboard, reveal, object.Definition)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.BillboardObjects++
-		g.pipeline.Stats.BillboardLines += len(lines)
+		g.pipeline.Stats.BillboardLines += len(lines) + len(billboard.Foreground)
 	}
 	batchCount := g.drawBillboardLines(screen, lines, center.X, center.Y, projectedRadius)
+	batchCount += g.drawBillboardOpaqueEllipses(screen, billboard.OpaqueEllipses, center.X, center.Y, projectedRadius)
+	batchCount += g.drawBillboardLines(screen, billboard.Foreground, center.X, center.Y, projectedRadius)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.BillboardBatches += batchCount
 	}
 	return true
+}
+
+// drawBillboardOpaqueEllipses supplies small authored physical backings such
+// as the Death Star superlaser dish. It is intentionally separate from the
+// analytic occluder path: these ellipses are local presentation features, not
+// a broad background fill or a substitute for scene depth.
+func (g *Game) drawBillboardOpaqueEllipses(screen *ebiten.Image, ellipses []appearance.BillboardEllipse, centerX, centerY, radius float64) int {
+	for _, ellipse := range ellipses {
+		const segments = 24
+		cosine, sine := math.Cos(ellipse.Rotation), math.Sin(ellipse.Rotation)
+		var path vector.Path
+		for index := 0; index <= segments; index++ {
+			angle := 2 * math.Pi * float64(index) / segments
+			localX, localY := ellipse.RadiusX*math.Cos(angle), ellipse.RadiusY*math.Sin(angle)
+			x := ellipse.Center.X + localX*cosine - localY*sine
+			y := ellipse.Center.Y + localX*sine + localY*cosine
+			screenX, screenY := float32(centerX+x*radius), float32(centerY-y*radius)
+			if index == 0 {
+				path.MoveTo(screenX, screenY)
+			} else {
+				path.LineTo(screenX, screenY)
+			}
+		}
+		path.Close()
+		draw := &vector.DrawPathOptions{AntiAlias: true}
+		draw.ColorScale.ScaleWithColor(ellipse.Color)
+		vector.FillPath(screen, &path, nil, draw)
+	}
+	return len(ellipses)
 }
 
 // billboardVisualRadius derives a camera-facing billboard's angular size from

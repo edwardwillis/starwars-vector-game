@@ -74,3 +74,13 @@ func TestFixedPoseDoesNotFollowMovingTarget(t *testing.T) {
 		t.Fatalf("cleared fixed camera retained view %+v", got)
 	}
 }
+
+func TestFixLookingAtCentersTargetInFrontOfCamera(t *testing.T) {
+	camera := New(1)
+	target := math3d.Vec3{X: 4, Y: 2, Z: -9}
+	camera.FixLookingAt(math3d.Vec3{X: 4, Y: 2, Z: 6}, target, math3d.Vec3{Y: 1})
+	viewPoint := camera.View(nil).TransformPoint(target)
+	if math.Abs(viewPoint.X) > 1e-9 || math.Abs(viewPoint.Y) > 1e-9 || viewPoint.Z >= 0 {
+		t.Fatalf("look-at target=%+v, want centered point in front of camera", viewPoint)
+	}
+}

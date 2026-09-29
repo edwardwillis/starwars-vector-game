@@ -74,6 +74,21 @@ func (c *Camera) FixAt(pose kinematics.Pose) {
 	c.Mode = Fixed
 }
 
+// FixLookingAt freezes a world-space view looking from eye at target. It is
+// intended for short, authored presentation beats where neither a cockpit nor
+// a target-relative chase anchor expresses the required composition.
+func (c *Camera) FixLookingAt(eye, target, up math3d.Vec3) {
+	if target.Sub(eye).Length() <= 1e-9 {
+		return
+	}
+	if up.Length() <= 1e-9 {
+		up = math3d.Vec3{Y: 1}
+	}
+	c.fixedView = lookAt(eye, target, up)
+	c.hasFixed = true
+	c.Mode = Fixed
+}
+
 func (c *Camera) ClearFixedView() {
 	c.fixedView = math3d.Mat4{}
 	c.hasFixed = false

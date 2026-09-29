@@ -22,12 +22,24 @@ type Detail struct {
 	Line      Line
 }
 
+// BillboardEllipse is a normalized local opaque backing behind foreground
+// vector artwork. It is intentionally limited to small authored features
+// such as a recessed dish, not broad screen-space background masking.
+type BillboardEllipse struct {
+	Center           Point
+	RadiusX, RadiusY float64
+	Rotation         float64
+	Color            color.RGBA
+}
+
 // Billboard is normalized, camera-facing vector artwork. Detail thresholds
 // are expressed as a 0..1 reveal amount derived from projected object size.
 type Billboard struct {
-	Name    string
-	Base    []Line
-	Details []Detail
+	Name           string
+	Base           []Line
+	Details        []Detail
+	Foreground     []Line
+	OpaqueEllipses []BillboardEllipse
 	// NearDepth, FarDepth, and FarScale optionally tune the apparent scale of
 	// very large billboarded bodies. At and inside NearDepth the artwork uses
 	// its physical projected radius; at and beyond FarDepth it uses FarScale.
@@ -68,6 +80,7 @@ func (billboard Billboard) Lines(reveal float64) []Line {
 			lines = append(lines, detail.Line)
 		}
 	}
+	lines = append(lines, billboard.Foreground...)
 	return lines
 }
 
@@ -95,6 +108,11 @@ func (registry *Registry) Register(definition Definition) error {
 	}
 	if definition.Kind == "vector-billboard" && (definition.Billboard.Name == "" || len(definition.Billboard.Base) == 0) {
 		return fmt.Errorf("vector billboard appearance requires base artwork")
+	}
+	for _, ellipse := range definition.Billboard.OpaqueEllipses {
+		if ellipse.RadiusX <= 0 || ellipse.RadiusY <= 0 {
+			return fmt.Errorf("billboard opaque ellipse requires positive radii")
+		}
 	}
 	if _, exists := registry.definitions[definition.Name]; exists {
 		return fmt.Errorf("appearance %q already registered", definition.Name)
