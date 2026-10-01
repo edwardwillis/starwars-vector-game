@@ -15,6 +15,12 @@ const tieInterceptorCannonLength = 0.52
 const tieInterceptorCannonMuzzleZ = 3.18
 const tieInterceptorCoreForwardZ = 0.45
 const tieInterceptorWindowLocalZ = 0.58
+const tieRearReactorRadius = 0.36
+const tieRearReactorLength = 0.14
+const tieRearReactorCenterZ = -0.54
+const tieRearReactorDomeRadius = 0.30
+const tieRearReactorHubDepth = 0.10
+const tieRearReactorSides = 10
 
 // Authored placement constants shared with combat anchors and camera poses.
 const (
@@ -112,11 +118,48 @@ func tieInterceptorCoreParts() (Model, Model) {
 	// give the central pod the characteristic front-view silhouette. The upper
 	// and lower panel pairs attach at the ends of these side struts rather than
 	// converging as four independent spokes.
-	parts = append(parts, Transform(cylinder(0.36, 0.14, 10), math3d.Translation(0, 0, -0.54+tieInterceptorCoreForwardZ)))
+	parts = append(parts, Transform(tieRearReactorAssembly(), math3d.Translation(0, 0, tieRearReactorCenterZ+tieInterceptorCoreForwardZ)))
 	for _, angle := range []float64{0, math.Pi} {
 		parts = append(parts, Transform(tieInterceptorPylon(), math3d.Translation(0, 0, tieInterceptorCoreForwardZ).Mul(math3d.RotationZ(angle))))
 	}
 	return cockpit, Merge(parts...)
+}
+
+// tieRearReactorAssembly is the shallow circular Solar Ionization Reactor
+// collar shared by the standard fighter and Interceptor command pods. Keeping
+// the authored assembly in one place prevents their rear silhouettes drifting
+// apart through independent approximations.
+func tieRearReactorAssembly() Model {
+	return Merge(
+		cylinder(tieRearReactorRadius, tieRearReactorLength, tieRearReactorSides),
+		tieRearReactorDome(),
+	)
+}
+
+// tieRearReactorDome forms the shallow rear face of the reactor collar. Its
+// radial framing rises from a broad ring to one recessed centre point, exposing the
+// characteristic detail while preserving the collar's blended attachment to
+// the spherical command pod.
+func tieRearReactorDome() Model {
+	baseZ := -tieRearReactorLength/2 - 0.003
+	hubZ := baseZ - tieRearReactorHubDepth
+	mesh := Model{}
+	for segment := range tieRearReactorSides {
+		angle := 2 * math.Pi * float64(segment) / tieRearReactorSides
+		sine, cosine := math.Sincos(angle)
+		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: tieRearReactorDomeRadius * cosine, Y: tieRearReactorDomeRadius * sine, Z: baseZ})
+	}
+	hub := len(mesh.Verts)
+	mesh.Verts = append(mesh.Verts, math3d.Vec3{Z: hubZ})
+	for segment := range tieRearReactorSides {
+		next := (segment + 1) % tieRearReactorSides
+		mesh.Edges = append(mesh.Edges,
+			Edge{A: segment, B: next, Kind: EdgeStructural},
+			Edge{A: segment, B: hub, Kind: EdgeStructural},
+		)
+		mesh.Faces = append(mesh.Faces, Face{Vertices: []int{segment, next, hub}})
+	}
+	return OrientOutward(mesh)
 }
 
 func tieInterceptorPylon() Model {

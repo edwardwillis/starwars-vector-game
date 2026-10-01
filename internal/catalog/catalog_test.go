@@ -23,19 +23,30 @@ func TestTIEFighterReturnsValidMultipartObject(t *testing.T) {
 	if err := fighter.Validate(); err != nil {
 		t.Fatalf("TIEFighter returned an invalid object: %v", err)
 	}
-	if len(fighter.Parts) != 4 {
-		t.Fatalf("TIEFighter returned %d parts, want 4", len(fighter.Parts))
+	if len(fighter.Parts) != 7 {
+		t.Fatalf("TIEFighter returned %d parts, want 7", len(fighter.Parts))
 	}
-	if fighter.Parts[0].Color == fighter.Parts[3].Color || fighter.Parts[1].Color == fighter.Parts[3].Color || fighter.Parts[2].Color == fighter.Parts[3].Color {
-		t.Fatal("fighter hull and window use the same color")
+	window := fighter.Parts[len(fighter.Parts)-1]
+	for _, part := range fighter.Parts[:len(fighter.Parts)-1] {
+		if part.Color == window.Color {
+			t.Fatal("fighter hull and window use the same color")
+		}
+	}
+	if fighter.Parts[0].SelfOcclusion != scene.SelfOcclusionInterior || !fighter.Parts[1].SelfOccluding || fighter.Parts[1].SelfOcclusion != scene.SelfOcclusionAll {
+		t.Fatalf("fighter cockpit/pylon policies=%v/%v, want interior cockpit and full pylon occlusion", fighter.Parts[0].SelfOcclusion, fighter.Parts[1].SelfOcclusion)
+	}
+	if !fighter.Parts[2].SelfOccluding || fighter.Parts[2].SelfOcclusion != scene.SelfOcclusionAll {
+		t.Fatalf("fighter reactor policy=%v, want full occlusion", fighter.Parts[2].SelfOcclusion)
 	}
 	if fighter.CollisionRole != scene.CollisionSolid || fighter.CollisionRadius <= 0 ||
 		!fighter.Physical || !fighter.Hittable || !fighter.Destructible ||
 		fighter.DestructionStage != scene.DestructionIntact {
 		t.Fatalf("fighter has incorrect collision metadata")
 	}
-	if fighter.Parts[0].VisibleInCockpit || fighter.Parts[1].VisibleInCockpit || fighter.Parts[2].VisibleInCockpit || fighter.Parts[3].VisibleInCockpit {
-		t.Fatal("fighter hull or windscreen is visible from inside the cockpit")
+	for _, part := range fighter.Parts {
+		if part.VisibleInCockpit {
+			t.Fatalf("fighter part %q is visible from inside the cockpit", part.Name)
+		}
 	}
 	for _, name := range []string{
 		"center", "cockpit", "chase",
@@ -74,6 +85,56 @@ func TestTIEInterceptorReturnsValidMultipartObject(t *testing.T) {
 	}
 }
 
+func TestTIEAdvancedX1StartsAsCockpitAndFuselageCheckpoint(t *testing.T) {
+	fighter := TIEAdvancedX1(1, kinematics.Pose{})
+	if err := fighter.Validate(); err != nil {
+		t.Fatalf("TIE Advanced x1 returned an invalid object: %v", err)
+	}
+	if fighter.Definition != TIEAdvancedX1Name || len(fighter.Parts) != 9 {
+		t.Fatalf("x1 definition=%q parts=%d, want cockpit, reactor collar, quarter-disks, roots, two opaque arrays, laser barrels, and rear strut checkpoint", fighter.Definition, len(fighter.Parts))
+	}
+	if fighter.Parts[0].Name != "shared TIE command pod" || fighter.Parts[1].Name != "plain rear reactor collar" || fighter.Parts[2].Name != "primary central fuselage" || fighter.Parts[3].Name != "advanced wedge wing roots" || fighter.Parts[4].Name != "port folded solar array" || fighter.Parts[5].Name != "starboard folded solar array" || fighter.Parts[6].Name != "twin under-cockpit laser barrels" || fighter.Parts[7].Name != "centreline rear strut" || fighter.Parts[8].Name != "cockpit window" {
+		t.Fatalf("x1 checkpoint parts=%q, %q, %q, %q, %q, %q, %q, %q, and %q, want shared pod, plain collar, quarter-disks, wedge roots, arrays, barrels, rear strut, and window", fighter.Parts[0].Name, fighter.Parts[1].Name, fighter.Parts[2].Name, fighter.Parts[3].Name, fighter.Parts[4].Name, fighter.Parts[5].Name, fighter.Parts[6].Name, fighter.Parts[7].Name, fighter.Parts[8].Name)
+	}
+	for _, parts := range [][]scene.Part{fighter.Parts[1:4], fighter.Parts[4:6], fighter.Parts[6:8]} {
+		for _, part := range parts {
+			if part.SelfOccluding || part.SelfOcclusion != scene.SelfOcclusionInterior {
+				t.Fatalf("x1 structural part %q uses unstable self-occlusion policy", part.Name)
+			}
+		}
+	}
+	for _, array := range fighter.Parts[4:6] {
+		if !array.Surface.Opaque() || array.SelfOccluding || array.SelfOcclusion != scene.SelfOcclusionInterior {
+			t.Fatalf("solar-array opacity/occlusion=%+v/%v/%v, want opaque independent shells with stable interior self-occlusion", array.Surface, array.SelfOccluding, array.SelfOcclusion)
+		}
+	}
+	for _, name := range []string{"center", "cockpit", "chase"} {
+		if _, ok := fighter.Anchor(name); !ok {
+			t.Fatalf("x1 checkpoint is missing %q", name)
+		}
+	}
+	for _, name := range []string{"muzzle-upper-left", "muzzle-upper-right"} {
+		anchor, ok := fighter.Anchor(name)
+		if !ok || anchor.Position.Y >= 0 || anchor.Position.Z <= 0 {
+			t.Fatalf("x1 cannon anchor %q=%+v/%v, want a forward under-cockpit muzzle", name, anchor, ok)
+		}
+	}
+}
+
+func TestTIEAdvancedX1SpecificationReflectsCurrentModel(t *testing.T) {
+	specification, ok := SpecificationFor(TIEAdvancedX1Name)
+	if !ok {
+		t.Fatal("TIE Advanced x1 specification is not registered")
+	}
+	if specification.Type != "ADVANCED SPACE SUPERIORITY FIGHTER" ||
+		specification.Description != "ELONGATED REAR FUSELAGE" ||
+		specification.Description2 != "BENT SOLAR-ARRAY WINGS" ||
+		specification.Length != "5.8 METERS" ||
+		specification.Weapons != "2 FORWARD LASER CANNONS" {
+		t.Fatalf("x1 technical data is stale: %+v", specification)
+	}
+}
+
 func TestIntactFightersProvideBackingForFilledScenery(t *testing.T) {
 	fighters := []struct {
 		object scene.Object
@@ -82,7 +143,8 @@ func TestIntactFightersProvideBackingForFilledScenery(t *testing.T) {
 		{XWing(1, kinematics.Pose{}), "cockpit window"},
 		{TIEFighter(2, kinematics.Pose{}), "windscreen"},
 		{TIEInterceptor(3, kinematics.Pose{}), "cockpit window"},
-		{MillenniumFalcon(4, kinematics.Pose{}), "cockpit windscreen"},
+		{TIEAdvancedX1(4, kinematics.Pose{}), "cockpit window"},
+		{MillenniumFalcon(5, kinematics.Pose{}), "cockpit windscreen"},
 	}
 	for _, fighter := range fighters {
 		if err := fighter.object.Validate(); err != nil {
@@ -251,6 +313,22 @@ func TestTIEInterceptorPolygonsAreFinalVisualDebris(t *testing.T) {
 	}
 }
 
+func TestTIEAdvancedX1PolygonsAreFinalVisualDebris(t *testing.T) {
+	for component := range 3 {
+		count := TIEAdvancedX1PolygonCount(component)
+		if count == 0 {
+			t.Fatalf("x1 component %d has no constituent polygons", component)
+		}
+		polygon := TIEAdvancedX1Polygon(1, component, 0, kinematics.Pose{})
+		if err := polygon.Validate(); err != nil {
+			t.Fatalf("x1 component %d polygon is invalid: %v", component, err)
+		}
+		if polygon.CollisionRole != scene.CollisionDebris || polygon.Physical || polygon.Hittable || polygon.Destructible || polygon.DestructionStage != scene.DestructionPolygon {
+			t.Fatalf("x1 component %d polygon has incorrect metadata", component)
+		}
+	}
+}
+
 func TestTIEFighterInstancesShareImmutableGeometry(t *testing.T) {
 	first := TIEFighter(1, kinematics.Pose{})
 	second := TIEFighter(2, kinematics.Pose{})
@@ -312,6 +390,9 @@ func TestLaserBoltStylesDistinguishRebelAndImperialFire(t *testing.T) {
 func TestTIEInterceptorUsesImperialLaserStyle(t *testing.T) {
 	if style := LaserBoltStyleForShooter(TIEInterceptorName); style.Appearance != ImperialLaserBoltAppearance {
 		t.Fatalf("interceptor style=%q, want imperial", style.Appearance)
+	}
+	if style := LaserBoltStyleForShooter(TIEAdvancedX1Name); style.Appearance != ImperialLaserBoltAppearance {
+		t.Fatalf("x1 style=%q, want imperial", style.Appearance)
 	}
 }
 

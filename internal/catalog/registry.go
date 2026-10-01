@@ -102,6 +102,7 @@ func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	_ = r.Register(Definition{Name: TIEFighterName, Create: TIEFighter, CreateFragment: TIEFighterFragment, PolygonCount: TIEFighterPolygonCount, CreatePolygon: TIEFighterPolygon})
 	_ = r.Register(Definition{Name: TIEInterceptorName, Create: TIEInterceptor, CreateFragment: TIEInterceptorFragment, PolygonCount: TIEInterceptorPolygonCount, CreatePolygon: TIEInterceptorPolygon})
+	_ = r.Register(Definition{Name: TIEAdvancedX1Name, Create: TIEAdvancedX1, CreateFragment: TIEAdvancedX1Fragment, PolygonCount: TIEAdvancedX1PolygonCount, CreatePolygon: TIEAdvancedX1Polygon})
 	_ = r.Register(Definition{Name: XWingName, Create: XWing, CreateFragment: XWingFragment, PolygonCount: XWingPolygonCount, CreatePolygon: XWingPolygon})
 	_ = r.Register(Definition{Name: MillenniumFalconName, Create: MillenniumFalcon, CreateFragment: MillenniumFalconFragment, PolygonCount: MillenniumFalconPolygonCount, CreatePolygon: MillenniumFalconPolygon})
 	_ = r.Register(Definition{Name: LaserBoltName, Create: LaserBolt})

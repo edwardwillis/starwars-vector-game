@@ -45,6 +45,7 @@ var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
 type flightMode int
 
 const swarmInterceptorSlots = 2
+const swarmAdvancedSlot = swarmInterceptorSlots
 
 const transitionEnvironmentTileRadius = 2
 
@@ -1120,16 +1121,14 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	controllers := make(map[scene.ObjectID]control.Strategy, gameProfile.Swarm.Count)
 	for index, pose := range autonomousFighterPoses(gameProfile.Swarm.InitialPositions) {
 		id := scene.ObjectID(index + 2)
-		definition := gameProfile.Swarm.Object
-		if definition == catalog.TIEFighterName && index < swarmInterceptorSlots {
-			definition = catalog.TIEInterceptorName
-		}
+		definition := imperialSwarmDefinition(gameProfile.Swarm.Object, index, gameProfile.Swarm.Count)
 		autonomous, err := catalogRegistry.Create(definition, id, pose)
 		if err != nil {
 			return nil, fmt.Errorf("create swarm object: %w", err)
 		}
 		autonomous.Motion.Speed = gameProfile.Swarm.InitialSpeed + float64(index)*gameProfile.Swarm.SpeedStep
 		autonomous.Team = gameProfile.Swarm.Team
+		nameVaderX1(&autonomous)
 		objects = append(objects, autonomous)
 		controller, err := registry.Create(gameProfile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, gameProfile.Swarm.Pursuit)
 		if err != nil {
@@ -1223,9 +1222,39 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	return game, nil
 }
 
+// imperialSwarmDefinition keeps normal Imperial screens mixed: two Interceptors
+// lead larger formations, while the next standard TIE slot is Vader's unique
+// Advanced x1. A three-ship Cadet screen instead retains two standard TIEs so
+// its basic enemy silhouette remains present alongside Vader. Custom swarm
+// definitions remain untouched.
+func imperialSwarmDefinition(base string, index, count int) string {
+	if base != catalog.TIEFighterName {
+		return base
+	}
+	if count <= swarmAdvancedSlot+1 {
+		if index == swarmAdvancedSlot {
+			return catalog.TIEAdvancedX1Name
+		}
+		return base
+	}
+	if index < swarmInterceptorSlots {
+		return catalog.TIEInterceptorName
+	}
+	if index == swarmAdvancedSlot {
+		return catalog.TIEAdvancedX1Name
+	}
+	return base
+}
+
+func nameVaderX1(fighter *scene.Object) {
+	if fighter.Definition == catalog.TIEAdvancedX1Name {
+		fighter.Name = "Darth Vader's TIE Advanced x1"
+	}
+}
+
 func (g *Game) createShowcaseObjects() []scene.Object {
-	objects := make([]scene.Object, 0, 4)
-	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.MillenniumFalconName} {
+	objects := make([]scene.Object, 0, 5)
+	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.TIEAdvancedX1Name, catalog.MillenniumFalconName} {
 		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
 			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
 		})
@@ -3338,6 +3367,7 @@ func (g *Game) spawnAutonomousFighter(definition string) {
 	}
 	fighter.Motion.Speed = g.profile.Swarm.InitialSpeed + g.profile.Swarm.SpeedStep*float64(g.respawnSequence%uint64(max(1, g.profile.Swarm.Count)))
 	fighter.Team = g.profile.Swarm.Team
+	nameVaderX1(&fighter)
 	controller, err := g.controllerRegistry.Create(g.profile.Swarm.Controller, uint64(id)*0x9e3779b97f4a7c15, g.profile.Swarm.Pursuit)
 	if err != nil {
 		return

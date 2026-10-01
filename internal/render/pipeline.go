@@ -311,14 +311,7 @@ func (p Pipeline) RenderPrepared(geometry *PreparedGeometry, depth *DepthBuffer,
 // and returns visible intervals. Sampling keeps final drawing vector-based while
 // allowing a line to disappear only where it passes behind another surface.
 func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer, owner uint64, baseBias float64, mode SelfOcclusionMode, mesh model.Model, verts []math3d.Vec3, edge model.Edge, stats *Stats) []Line {
-	sampleOwner := owner
 	selfSample := mode == SelfOcclusionAll || (mode == SelfOcclusionInterior && interiorSelfOcclusionEdge(mesh, verts, edge))
-	if selfSample {
-		// Owner zero includes this part's own depth. Interior mode reaches this
-		// path only for interior shared edges; silhouettes and boundaries keep
-		// the normal other-object query.
-		sampleOwner = 0
-	}
 	sampleRadius := 1
 	if selfSample && mode == SelfOcclusionInterior {
 		// Interior mode is used for shared structural edges, where a neighboring
@@ -353,12 +346,22 @@ func visibleDepthSegments(line Line, depthA, depthB float64, depth *DepthBuffer,
 		// error should not make that structural edge sparkle or disappear.
 		bias := math.Max(baseBias, lineDepth*0.006)
 		if selfSample && mode == SelfOcclusionInterior {
-			// Interior mode is reserved for authored crease strokes. Preserve
-			// those when a neighboring coplanar face lands on the same sample;
-			// fully opaque compound solids use only the small normal tolerance.
-			bias = math.Max(bias, lineDepth*0.10)
+			// Interior mode must preserve a crease against its own coplanar face,
+			// but that generous tolerance must never leak through another opaque
+			// part. Query the owning part with the nearest sample, then use the
+			// larger allowance only when this edge's own surface is actually the
+			// nearest one. A cockpit behind a TIE solar panel therefore receives
+			// the normal strict foreign-surface test.
+			occluderDepth, occluderOwner := depth.nearestOwnedAt(x, y, sampleRadius)
+			if occluderOwner == owner {
+				bias = math.Max(bias, lineDepth*0.10)
+			}
+			return occluderDepth+bias >= lineDepth
 		}
-		return depth.nearestOtherAt(x, y, sampleRadius, sampleOwner)+bias >= lineDepth
+		if selfSample {
+			return depth.nearestOtherAt(x, y, sampleRadius, 0)+bias >= lineDepth
+		}
+		return depth.nearestOtherAt(x, y, sampleRadius, owner)+bias >= lineDepth
 	}
 	segments := make([]Line, 0, samples)
 	runStart := 0.0

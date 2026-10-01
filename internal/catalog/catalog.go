@@ -23,43 +23,58 @@ var (
 	// remains the responsibility of the shared CPU depth pass.
 	fighterSurface = scene.SurfaceMaterial{Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{A: 255}}
 
-	tieFighterGeometry            = model.TIEFighterGeometryData()
-	tieFighterCore                = model.Transform(tieFighterGeometry.Core, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterLeftFoil            = model.Transform(tieFighterGeometry.LeftFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterRightFoil           = model.Transform(tieFighterGeometry.RightFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterWindow              = model.Transform(tieFighterGeometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	tieFighterDebris              = transformTIEFighterFragments(tieFighterGeometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
-	xWingGeometry                 = model.XWingGeometryData()
-	xWingFoilAssemblies           = xWingGeometry.Foils
-	xWingWindow                   = xWingGeometry.Window
-	xWingDebris                   = xWingGeometry.Fragments
-	laserBoltRays                 = model.LaserBoltRays()
-	laserBoltTips                 = model.LaserBoltBranches()
-	protonTorpedoGeometry         = model.ProtonTorpedo()
-	tieFighterPolygonShards       = buildTIEFighterPolygonShards()
-	tieInterceptorGeometry        = model.TIEInterceptorGeometryData()
-	tieInterceptorCockpit         = model.Transform(tieInterceptorGeometry.Cockpit, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPylons          = model.Transform(tieInterceptorGeometry.Pylons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorWindow          = model.Transform(tieInterceptorGeometry.Window, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPanels          = transformTIEInterceptorParts(tieInterceptorGeometry.Panels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorEndPanels       = transformTIEInterceptorEndPanels(tieInterceptorGeometry.EndPanels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorCannons         = transformTIEInterceptorParts(tieInterceptorGeometry.Cannons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorDebris          = transformTIEInterceptorFragments(tieInterceptorGeometry.Fragments, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
-	tieInterceptorPolygonShards   = buildTIEInterceptorPolygonShards()
-	millenniumFalconStations      = model.MillenniumFalconStationsData()
-	millenniumFalconGeometry      = model.MillenniumFalconGeometryData()
-	millenniumFalconHullCore      = model.Transform(millenniumFalconGeometry.HullCore, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconLeftMandible  = model.Transform(millenniumFalconGeometry.LeftMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconRightMandible = model.Transform(millenniumFalconGeometry.RightMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconCargoRamp     = model.Transform(millenniumFalconGeometry.CargoRamp, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconCorridor      = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconWindow        = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconTurrets       = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconHyperdrive    = model.Transform(millenniumFalconGeometry.Hyperdrive, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconDetails       = model.Transform(millenniumFalconGeometry.Details, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconDebris        = transformMillenniumFalconFragments(millenniumFalconGeometry.Fragments, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
-	millenniumFalconPolygonShards = buildMillenniumFalconPolygonShards()
-	deathStarGeometry             = model.DeathStar(300)
+	tieFighterGeometry               = model.TIEFighterGeometryData()
+	tieFighterCockpit                = model.Transform(tieFighterGeometry.Cockpit, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterPylons                 = model.Transform(tieFighterGeometry.Pylons, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterReactor                = model.Transform(tieFighterGeometry.Reactor, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterLeftFoil               = model.Transform(tieFighterGeometry.LeftFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterRightFoil              = model.Transform(tieFighterGeometry.RightFoil, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterCannons                = model.Transform(tieFighterGeometry.Cannons, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterWindow                 = model.Transform(tieFighterGeometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterDebris                 = transformTIEFighterFragments(tieFighterGeometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	xWingGeometry                    = model.XWingGeometryData()
+	xWingFoilAssemblies              = xWingGeometry.Foils
+	xWingWindow                      = xWingGeometry.Window
+	xWingDebris                      = xWingGeometry.Fragments
+	laserBoltRays                    = model.LaserBoltRays()
+	laserBoltTips                    = model.LaserBoltBranches()
+	protonTorpedoGeometry            = model.ProtonTorpedo()
+	tieFighterPolygonShards          = buildTIEFighterPolygonShards()
+	tieInterceptorGeometry           = model.TIEInterceptorGeometryData()
+	tieInterceptorCockpit            = model.Transform(tieInterceptorGeometry.Cockpit, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPylons             = model.Transform(tieInterceptorGeometry.Pylons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorWindow             = model.Transform(tieInterceptorGeometry.Window, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPanels             = transformTIEInterceptorParts(tieInterceptorGeometry.Panels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorEndPanels          = transformTIEInterceptorEndPanels(tieInterceptorGeometry.EndPanels, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorCannons            = transformTIEInterceptorParts(tieInterceptorGeometry.Cannons, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorDebris             = transformTIEInterceptorFragments(tieInterceptorGeometry.Fragments, math3d.Scaling(tieInterceptorScale, tieInterceptorScale, tieInterceptorScale))
+	tieInterceptorPolygonShards      = buildTIEInterceptorPolygonShards()
+	tieAdvancedX1Geometry            = model.TIEAdvancedX1GeometryData()
+	tieAdvancedX1Cockpit             = model.Transform(tieAdvancedX1Geometry.Cockpit, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Reactor             = model.Transform(tieAdvancedX1Geometry.Reactor, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Fuselage            = model.Transform(tieAdvancedX1Geometry.Fuselage, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Pylons              = model.Transform(tieAdvancedX1Geometry.Pylons, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1PortSolarArray      = model.Transform(tieAdvancedX1Geometry.PortSolarArray, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1StarboardSolarArray = model.Transform(tieAdvancedX1Geometry.StarboardSolarArray, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Cannons             = model.Transform(tieAdvancedX1Geometry.Cannons, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1RearStrut           = model.Transform(tieAdvancedX1Geometry.RearStrut, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Window              = model.Transform(tieAdvancedX1Geometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1Debris              = transformTIEAdvancedX1Fragments(tieAdvancedX1Geometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieAdvancedX1PolygonShards       = buildTIEAdvancedX1PolygonShards()
+	millenniumFalconStations         = model.MillenniumFalconStationsData()
+	millenniumFalconGeometry         = model.MillenniumFalconGeometryData()
+	millenniumFalconHullCore         = model.Transform(millenniumFalconGeometry.HullCore, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconLeftMandible     = model.Transform(millenniumFalconGeometry.LeftMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconRightMandible    = model.Transform(millenniumFalconGeometry.RightMandible, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconCargoRamp        = model.Transform(millenniumFalconGeometry.CargoRamp, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconCorridor         = model.Transform(millenniumFalconGeometry.Corridor, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconWindow           = model.Transform(millenniumFalconGeometry.Window, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconTurrets          = model.Transform(millenniumFalconGeometry.Turrets, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconHyperdrive       = model.Transform(millenniumFalconGeometry.Hyperdrive, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconDetails          = model.Transform(millenniumFalconGeometry.Details, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconDebris           = transformMillenniumFalconFragments(millenniumFalconGeometry.Fragments, math3d.Scaling(millenniumFalconScale, millenniumFalconScale, millenniumFalconScale))
+	millenniumFalconPolygonShards    = buildMillenniumFalconPolygonShards()
+	deathStarGeometry                = model.DeathStar(300)
 )
 
 const tieFighterScale = 0.72
@@ -73,6 +88,7 @@ const (
 	CubeName                    = "builtin/cube"
 	TIEFighterName              = "builtin/tie-fighter"
 	TIEInterceptorName          = "builtin/tie-interceptor"
+	TIEAdvancedX1Name           = "builtin/tie-advanced-x1"
 	XWingName                   = "builtin/x-wing"
 	MillenniumFalconName        = "builtin/millennium-falcon"
 	LaserBoltName               = "builtin/laser-bolt"
@@ -108,6 +124,8 @@ func SpecificationFor(definition string) (Specification, bool) {
 		return Specification{Title: "IMPERIAL TIE FIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "PRIMARY IMPERIAL SPACE", Description2: "SUPERIORITY FIGHTER", Length: "6.3 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "1200 KM PER HOUR", Hyperdrive: "NO", Weapons: "2 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
 	case TIEInterceptorName:
 		return Specification{Title: "IMPERIAL TIE INTERCEPTOR", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "FAST IMPERIAL INTERCEPTOR", Description2: "FOR HIGH-SPEED PURSUIT", Length: "9.6 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "111 MGLT", Hyperdrive: "NO", Weapons: "4 SFS L-S9.3 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
+	case TIEAdvancedX1Name:
+		return Specification{Title: "TIE ADVANCED X1", Type: "ADVANCED SPACE SUPERIORITY FIGHTER", Role: "DARTH VADER'S PERSONAL FIGHTER", Description: "ELONGATED REAR FUSELAGE", Description2: "BENT SOLAR-ARRAY WINGS", Length: "5.8 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "1200 KM PER HOUR", Hyperdrive: "YES", Weapons: "2 FORWARD LASER CANNONS", Ordnance: "NONE", Shields: "YES"}, true
 	case MillenniumFalconName:
 		// Baseline values combine the official Databank length, the official
 		// Ships of the Galaxy weapon fit, and the UCS/blueprint reference for
@@ -164,12 +182,13 @@ func xWingAnchors(assemblies []model.XWingFoilAssembly) map[string]kinematics.Po
 }
 
 func tieFighterAnchors() map[string]kinematics.Pose {
+	muzzles := model.TIEFighterCannonMuzzles()
 	return map[string]kinematics.Pose{
 		"center":             {Orientation: math3d.IdentityQuaternion()},
 		"cockpit":            {Position: math3d.Vec3{Y: -0.05, Z: -0.22}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
 		"chase":              {Position: math3d.Vec3{Y: 0.8, Z: -3}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
-		"muzzle-upper-left":  {Position: math3d.Vec3{X: -0.42, Y: 0.18, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
-		"muzzle-upper-right": {Position: math3d.Vec3{X: 0.42, Y: 0.18, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
+		"muzzle-upper-left":  {Position: muzzles[0], Orientation: math3d.IdentityQuaternion()},
+		"muzzle-upper-right": {Position: muzzles[1], Orientation: math3d.IdentityQuaternion()},
 		"muzzle-lower-left":  {Position: math3d.Vec3{X: -0.42, Y: -0.28, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
 		"muzzle-lower-right": {Position: math3d.Vec3{X: 0.42, Y: -0.28, Z: 0.82}, Orientation: math3d.IdentityQuaternion()},
 	}
@@ -202,6 +221,17 @@ func tieInterceptorAnchors() map[string]kinematics.Pose {
 		anchors[name] = kinematics.Pose{Position: position, Orientation: math3d.IdentityQuaternion()}
 	}
 	return anchors
+}
+
+func tieAdvancedX1Anchors() map[string]kinematics.Pose {
+	muzzles := model.TIEAdvancedX1CannonMuzzles()
+	return map[string]kinematics.Pose{
+		"center":             {Orientation: math3d.IdentityQuaternion()},
+		"cockpit":            {Position: math3d.Vec3{Y: -0.05, Z: -0.22}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+		"chase":              {Position: math3d.Vec3{Y: 0.8, Z: -3}, Orientation: math3d.QuaternionFromYawPitchRoll(math.Pi, 0, 0)},
+		"muzzle-upper-left":  {Position: muzzles[0], Orientation: math3d.IdentityQuaternion()},
+		"muzzle-upper-right": {Position: muzzles[1], Orientation: math3d.IdentityQuaternion()},
+	}
 }
 
 // Cube returns a styled cube object suitable for pipeline demonstrations and
@@ -383,12 +413,9 @@ func TIEFighterPolygon(id scene.ObjectID, component, polygon int, pose kinematic
 // cockpit window.
 func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 	parts := []scene.Part{
-		{
-			Name:      "cockpit and pylons",
-			Mesh:      tieFighterCore,
-			Color:     vectorGreen,
-			LineWidth: standardLineWidth,
-		},
+		{Name: "command pod", Mesh: tieFighterCockpit, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "wing pylons", Mesh: tieFighterPylons, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
+		{Name: "solar ionization reactor", Mesh: tieFighterReactor, Color: vectorGreen, LineWidth: standardLineWidth, SelfOccluding: true, SelfOcclusion: scene.SelfOcclusionAll},
 		{
 			Name:      "left solar-panel foil",
 			Mesh:      tieFighterLeftFoil,
@@ -401,6 +428,7 @@ func TIEFighter(id scene.ObjectID, pose kinematics.Pose) scene.Object {
 			Color:     vectorGreen,
 			LineWidth: standardLineWidth,
 		},
+		{Name: "twin under-cockpit laser barrels", Mesh: tieFighterCannons, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
 		{
 			Name:      "windscreen",
 			Mesh:      tieFighterWindow,
@@ -499,6 +527,94 @@ func TIEInterceptorPolygon(id scene.ObjectID, component, polygon int, pose kinem
 		ID: id, Name: "TIE Interceptor polygon shard", Definition: TIEInterceptorName, Pose: pose,
 		Parts:         []scene.Part{{Name: "polygon", Mesh: template.mesh, Color: template.color, LineWidth: standardLineWidth}},
 		CollisionRole: scene.CollisionDebris, CollisionRadius: 0.15, DestructionStage: scene.DestructionPolygon,
+	}
+}
+
+func transformTIEAdvancedX1Fragments(source [3]model.Model, transform math3d.Mat4) [3]model.Model {
+	var result [3]model.Model
+	for index, fragment := range source {
+		result[index] = model.Transform(fragment, transform)
+	}
+	return result
+}
+
+// TIEAdvancedX1Fragment returns one of Vader's x1's port, central, or
+// starboard breakup components.
+func TIEAdvancedX1Fragment(id scene.ObjectID, index int, pose kinematics.Pose) scene.Object {
+	if index < 0 || index >= len(tieAdvancedX1Debris) {
+		panic("catalog: TIE Advanced x1 fragment index out of range")
+	}
+	parts := []scene.Part{{Name: "fragment-hull", Mesh: tieAdvancedX1Debris[index], Color: vectorGreen, LineWidth: standardLineWidth}}
+	if index == 1 {
+		parts = append(parts, scene.Part{Name: "fragment-window", Mesh: tieAdvancedX1Window, Color: windowAmber, LineWidth: standardLineWidth})
+	}
+	return scene.Object{
+		ID: id, Name: "TIE Advanced x1 debris", Definition: TIEAdvancedX1Name, Pose: pose,
+		Parts:         parts,
+		CollisionRole: scene.CollisionDebris, CollisionRadius: 1.25,
+		Hittable: true, Destructible: true, DestructionStage: scene.DestructionComponent,
+	}
+}
+
+func buildTIEAdvancedX1PolygonShards() [3][]polygonShardTemplate {
+	var shards [3][]polygonShardTemplate
+	for component := range tieAdvancedX1Debris {
+		for _, polygon := range tieAdvancedX1Debris[component].PolygonModels() {
+			shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: vectorGreen})
+		}
+		if component == 1 {
+			for _, polygon := range tieAdvancedX1Window.PolygonModels() {
+				shards[component] = append(shards[component], polygonShardTemplate{mesh: polygon, color: windowAmber})
+			}
+		}
+	}
+	return shards
+}
+
+func TIEAdvancedX1PolygonCount(component int) int {
+	if component < 0 || component >= len(tieAdvancedX1PolygonShards) {
+		return 0
+	}
+	return len(tieAdvancedX1PolygonShards[component])
+}
+
+func TIEAdvancedX1Polygon(id scene.ObjectID, component, polygon int, pose kinematics.Pose) scene.Object {
+	if component < 0 || component >= len(tieAdvancedX1PolygonShards) || polygon < 0 || polygon >= len(tieAdvancedX1PolygonShards[component]) {
+		panic("catalog: TIE Advanced x1 polygon index out of range")
+	}
+	template := tieAdvancedX1PolygonShards[component][polygon]
+	return scene.Object{
+		ID: id, Name: "TIE Advanced x1 polygon shard", Definition: TIEAdvancedX1Name, Pose: pose,
+		Parts:         []scene.Part{{Name: "polygon", Mesh: template.mesh, Color: template.color, LineWidth: standardLineWidth}},
+		CollisionRole: scene.CollisionDebris, CollisionRadius: 0.15, DestructionStage: scene.DestructionPolygon,
+	}
+}
+
+// TIEAdvancedX1 is the cockpit-and-rear-body reconstruction checkpoint. Two
+// shallow quarter-disks join dedicated wedge-shaped lateral roots to a plain
+// centreline rear strut. The arrays have primary rectangles and their four
+// inward-angled extensions, but frames, engine outlets, armament, and surface
+// detail remain out of scope.
+func TIEAdvancedX1(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	parts := []scene.Part{
+		{Name: "shared TIE command pod", Mesh: tieAdvancedX1Cockpit, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "plain rear reactor collar", Mesh: tieAdvancedX1Reactor, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "primary central fuselage", Mesh: tieAdvancedX1Fuselage, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "advanced wedge wing roots", Mesh: tieAdvancedX1Pylons, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		// The two manifold shells have separate depth owners. Each keeps its own
+		// silhouette edges, while the nearer wing still hides the opposite wing.
+		{Name: "port folded solar array", Mesh: tieAdvancedX1PortSolarArray, Color: vectorGreen, LineWidth: standardLineWidth, Surface: fighterSurface, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "starboard folded solar array", Mesh: tieAdvancedX1StarboardSolarArray, Color: vectorGreen, LineWidth: standardLineWidth, Surface: fighterSurface, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "twin under-cockpit laser barrels", Mesh: tieAdvancedX1Cannons, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "centreline rear strut", Mesh: tieAdvancedX1RearStrut, Color: vectorGreen, LineWidth: standardLineWidth, SelfOcclusion: scene.SelfOcclusionInterior},
+		{Name: "cockpit window", Mesh: tieAdvancedX1Window, Color: windowAmber, LineWidth: standardLineWidth, Surface: windowGlass},
+	}
+	return scene.Object{
+		ID: id, Name: "TIE Advanced x1", Definition: TIEAdvancedX1Name, Team: scene.TeamEmpire, Pose: pose,
+		Parts: withFighterSurface(parts), Anchors: tieAdvancedX1Anchors(),
+		CollisionRole: scene.CollisionSolid, CollisionRadius: 2.5,
+		Physical: true, Hittable: true, Targetable: true, Destructible: true,
+		DestructionStage: scene.DestructionIntact, VisualRadius: 2.5,
 	}
 }
 
@@ -620,7 +736,7 @@ func imperialLaserBoltStyle() ProjectileStyle {
 // LaserBoltStyleForShooter selects the faction visual convention. Unknown
 // definitions use the Rebel style until they choose a style explicitly.
 func LaserBoltStyleForShooter(shooterDefinition string) ProjectileStyle {
-	if shooterDefinition == TIEFighterName || shooterDefinition == TIEInterceptorName {
+	if shooterDefinition == TIEFighterName || shooterDefinition == TIEInterceptorName || shooterDefinition == TIEAdvancedX1Name {
 		return imperialLaserBoltStyle()
 	}
 	return rebelLaserBoltStyle()

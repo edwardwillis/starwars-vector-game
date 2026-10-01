@@ -77,6 +77,24 @@ func TestDefaultRegistryCreatesTIEInterceptorLifecycleObjects(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryCreatesTIEAdvancedX1CockpitCheckpoint(t *testing.T) {
+	registry := DefaultRegistry()
+	object, err := registry.Create(TIEAdvancedX1Name, 18, kinematics.Pose{})
+	if err != nil || object.Definition != TIEAdvancedX1Name {
+		t.Fatalf("create x1: %v, definition=%q", err, object.Definition)
+	}
+	fragment, err := registry.CreateFragment(TIEAdvancedX1Name, 19, 0, kinematics.Pose{})
+	if err != nil || fragment.Definition != TIEAdvancedX1Name {
+		t.Fatalf("create x1 fragment: %v, definition=%q", err, fragment.Definition)
+	}
+	if count, err := registry.PolygonCount(TIEAdvancedX1Name, 0); err != nil || count == 0 {
+		t.Fatalf("x1 polygon count=%d, err=%v", count, err)
+	}
+	if _, err := registry.CreatePolygon(TIEAdvancedX1Name, 20, 0, 0, kinematics.Pose{}); err != nil {
+		t.Fatalf("create x1 polygon: %v", err)
+	}
+}
+
 func TestRegistryRejectsUnknownAndDuplicateDefinitions(t *testing.T) {
 	r := NewRegistry()
 	def := Definition{Name: "test/object", Create: TIEFighter}

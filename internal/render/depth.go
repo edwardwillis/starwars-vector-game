@@ -72,22 +72,28 @@ func (buffer *DepthBuffer) depthAtPixel(x, y int) float64 {
 	return buffer.Values[y*buffer.Width+x]
 }
 
-// nearestAt returns the closest finite sample in a small neighborhood. Vector
-// edges frequently lie exactly on polygon boundaries, where a single-pixel
-// depth raster can otherwise leave alternating holes as the camera moves.
-func (buffer *DepthBuffer) nearestAt(x, y, radius int) float64 {
+// nearestOwnedAt returns the closest depth sample and the part that wrote it.
+// Compound solids use this to distinguish a line's own coplanar surface from
+// a genuinely nearer part that must occlude it.
+func (buffer *DepthBuffer) nearestOwnedAt(x, y, radius int) (float64, uint64) {
 	x, y = buffer.screenToBuffer(x, y)
 	radius = buffer.screenRadiusToBuffer(radius)
 	nearest := math.Inf(1)
+	owner := uint64(0)
 	for offsetY := -radius; offsetY <= radius; offsetY++ {
 		for offsetX := -radius; offsetX <= radius; offsetX++ {
-			value := buffer.depthAtPixel(x+offsetX, y+offsetY)
+			px, py := x+offsetX, y+offsetY
+			if px < 0 || py < 0 || px >= buffer.Width || py >= buffer.Height {
+				continue
+			}
+			index := py*buffer.Width + px
+			value := buffer.Values[index]
 			if value < nearest {
-				nearest = value
+				nearest, owner = value, buffer.Owners[index]
 			}
 		}
 	}
-	return nearest
+	return nearest, owner
 }
 
 func (buffer *DepthBuffer) nearestOtherAt(x, y, radius int, owner uint64) float64 {

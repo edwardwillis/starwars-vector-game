@@ -165,6 +165,47 @@ func TestMillenniumFalconCompositeHullUsesSelfDepth(t *testing.T) {
 	}
 }
 
+func TestTIEFighterFoilOccludesCockpitAtDistance(t *testing.T) {
+	pipeline := NewPipeline(960, 540, math.Pi/2, 0.1, 100)
+	pipeline.Stages = []Stage{BackfaceStage(), HiddenLineStage(), DepthCueStage()}
+	cockpit := model.TIEFighterCockpit()
+	foil := model.TIEFighterFoil(-1)
+	// Rotate the TIE side-on: its negative-X foil is then the near,
+	// camera-facing panel. Cover the nearby oblique angles as well, because
+	// this is where a showcase orbit makes the cockpit overlap the foil.
+	for _, yaw := range []float64{1.0, 1.2, 1.4, math.Pi / 2} {
+		world := math3d.Translation(0, 0, -50).Mul(math3d.RotationY(yaw))
+		preparedFoil := pipeline.PrepareGeometry(foil, world, true)
+		if len(preparedFoil.Triangles) == 0 {
+			t.Fatalf("yaw %.2f: near TIE foil produced no camera-facing triangles", yaw)
+		}
+		withoutDepth := pipeline.Render(cockpit, world)
+		// Gameplay uses a half-resolution CPU depth surface, so validate the
+		// actual visibility configuration rather than a full-resolution ideal.
+		depth := NewScaledDepthBuffer(960, 540, 0.5)
+		pipeline.RasterizeDepthOwned(foil, world, depth, 2)
+		withFoilDepth := pipeline.RenderWithDepthPolicy(cockpit, world, depth, 1, SelfOcclusionInterior)
+		lineLength := func(lines []Line) float64 {
+			total := 0.0
+			for _, line := range lines {
+				total += math.Hypot(line.X2-line.X1, line.Y2-line.Y1)
+			}
+			return total
+		}
+		if yaw == math.Pi/2 {
+			if lineLength(withFoilDepth) > lineLength(withoutDepth)*0.1 {
+				t.Fatalf("side-on near TIE foil left too much cockpit line visible: without=%.2f with=%.2f", lineLength(withoutDepth), lineLength(withFoilDepth))
+			}
+		}
+		if len(withoutDepth) == 0 {
+			t.Fatalf("yaw %.2f: TIE cockpit produced no visible lines", yaw)
+		}
+		if len(withFoilDepth) >= len(withoutDepth) {
+			t.Fatalf("yaw %.2f: near TIE foil did not occlude cockpit: without=%d with=%d", yaw, len(withoutDepth), len(withFoilDepth))
+		}
+	}
+}
+
 func TestInteriorSelfOcclusionPreservesManifoldEdges(t *testing.T) {
 	verts := []math3d.Vec3{{X: -1, Z: -5}, {X: 1, Z: -5}, {Y: 1, Z: -5}, {X: 2, Z: -5}}
 	mesh := model.Model{

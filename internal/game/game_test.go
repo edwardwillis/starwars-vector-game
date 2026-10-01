@@ -980,6 +980,23 @@ func TestPreparedDepthDomainsStayLocalUnlessProfileRequestsSceneDepth(t *testing
 	}
 }
 
+func TestTIEFighterCoreActivatesLocalSelfOcclusion(t *testing.T) {
+	fighter := catalog.TIEFighter(91, kinematics.Pose{Position: math3d.Vec3{Z: -8}})
+	g := newDepthRequirementTestGame(fighter)
+	prepared := g.prepareGameplayFrame()
+	if len(prepared.domains) != 1 || prepared.domains[0].id != objectDepthGroup(fighter.ID) {
+		t.Fatalf("TIE depth domains=%v, want local fighter domain", prepared.domains)
+	}
+	if len(prepared.candidates) != len(fighter.Parts) || prepared.candidates[0].selfOcclusion != render.SelfOcclusionInterior || prepared.candidates[1].selfOcclusion != render.SelfOcclusionAll {
+		t.Fatalf("TIE cockpit/pylon policies=%v/%v candidates=%d, want interior cockpit and full pylons over %d parts", prepared.candidates[0].selfOcclusion, prepared.candidates[1].selfOcclusion, len(prepared.candidates), len(fighter.Parts))
+	}
+	for index, candidate := range prepared.candidates {
+		if candidate.domain != objectDepthGroup(fighter.ID) {
+			t.Fatalf("TIE part %d omitted from core depth domain: %+v", index, candidate)
+		}
+	}
+}
+
 func TestGameplayPreparedGeometryIsNotRecomputedByConsumers(t *testing.T) {
 	object := depthTestObject(1, scene.ExteriorFrame, math3d.Vec3{Z: -5}, true)
 	g := newDepthRequirementTestGame(object)
@@ -1302,6 +1319,66 @@ func TestInitialSwarmIsDistantAndAheadOfPlayer(t *testing.T) {
 		if player.Pose.Forward().Dot(offset.Normalize()) < 0.75 {
 			t.Fatalf("player is not initially aimed toward swarm fighter %d", id)
 		}
+	}
+}
+
+func TestInitialImperialFleetIncludesDarthVadersTIEAdvancedX1(t *testing.T) {
+	g := New()
+	advanced := 0
+	for id := range g.controllers {
+		fighter := g.objectByID(id)
+		if fighter == nil || fighter.Definition != catalog.TIEAdvancedX1Name {
+			continue
+		}
+		advanced++
+		if fighter.Name != "Darth Vader's TIE Advanced x1" || fighter.Team != scene.TeamEmpire {
+			t.Fatalf("Vader's fleet fighter=%+v, want named Imperial TIE Advanced x1", *fighter)
+		}
+	}
+	if advanced != 1 {
+		t.Fatalf("Imperial attack fleet has %d TIE Advanced x1 fighters, want exactly one", advanced)
+	}
+}
+
+func TestCadetSwarmRetainsStandardTIEFightersAlongsideVader(t *testing.T) {
+	g, err := NewWithProfile(profile.Cadet())
+	if err != nil {
+		t.Fatalf("create Cadet game: %v", err)
+	}
+	standard, advanced := 0, 0
+	for id := range g.controllers {
+		fighter := g.objectByID(id)
+		if fighter == nil {
+			continue
+		}
+		switch fighter.Definition {
+		case catalog.TIEFighterName:
+			standard++
+		case catalog.TIEAdvancedX1Name:
+			advanced++
+		}
+	}
+	if standard != 2 || advanced != 1 {
+		t.Fatalf("Cadet swarm has %d standard TIEs and %d x1s, want two standard TIE fighters and Vader's one x1", standard, advanced)
+	}
+}
+
+func TestDarthVadersTIEAdvancedX1DisintegratesIntoThreeComponents(t *testing.T) {
+	g := New()
+	var vader *scene.Object
+	for id := range g.controllers {
+		fighter := g.objectByID(id)
+		if fighter != nil && fighter.Definition == catalog.TIEAdvancedX1Name {
+			vader = fighter
+			break
+		}
+	}
+	if vader == nil {
+		t.Fatal("Imperial fleet is missing Vader's TIE Advanced x1")
+	}
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{vader.ID: *vader}, nil)
+	if len(g.debris) != 3 {
+		t.Fatalf("destroyed TIE Advanced x1 made %d debris components, want 3", len(g.debris))
 	}
 }
 
@@ -1899,7 +1976,7 @@ func TestSweptFighterCollisionDisintegratesBothObjectsOnce(t *testing.T) {
 	player := g.objectByID(fighterID)
 	autonomous := g.objectByID(2)
 	for id := scene.ObjectID(3); id <= scene.ObjectID(g.profile.Swarm.Count+1); id++ {
-		g.objectByID(id).Pose.Position = math3d.Vec3{X: 100 + float64(id)*5}
+		g.objectByID(id).Pose.Position = math3d.Vec3{X: 100 + float64(id)*10}
 	}
 	player.Pose.Position = math3d.Vec3{X: 2}
 	autonomous.Pose.Position = math3d.Vec3{X: -2}
