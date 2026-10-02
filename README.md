@@ -104,12 +104,11 @@ from a clean session.
 
 The current Windows x64 beta is published as a GitHub prerelease:
 
-- [Download Battle of Yavin Beta 1](https://github.com/edwardwillis/starwars-vector-game/releases/tag/v0.4.0-beta.1)
+- [Download Battle of Yavin Beta 2](https://github.com/edwardwillis/starwars-vector-game/releases/tag/v0.4.0-beta.2)
 
-Download and extract `StarWarsVectorGame-v0.4.0-beta.1-win64.zip`, then run
-`starwars-vector.exe`. The accompanying `.sha256` file can be used to verify
-the ZIP download. This is an unsigned beta executable, so Windows SmartScreen
-may require an explicit confirmation before it runs.
+Download `starwars-vector.exe` from the release assets, then run it. This is
+an unsigned beta executable, so Windows SmartScreen may require an explicit
+confirmation before it runs.
 
 For post-run performance analysis, the optional development telemetry flag
 writes buffered one-second CSV samples. It is off by default and records the
