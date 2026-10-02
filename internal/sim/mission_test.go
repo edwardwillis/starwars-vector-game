@@ -37,6 +37,32 @@ func TestMissionCommandsEnforceYavinObjectiveOrder(t *testing.T) {
 	}
 }
 
+func TestMissionDeadlinesAreFixedTickAndBoundToTheirObjectiveWindows(t *testing.T) {
+	player := catalog.XWing(1, kinematics.Pose{})
+	world, err := New([]scene.Object{player})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := world.Apply(StartMission{ID: "battle-of-yavin", PlayerID: player.ID, ApproachDeadlineTick: 600}); err != nil {
+		t.Fatal(err)
+	}
+	if got := world.Mission.Progress.ApproachDeadlineTick; got != 600 {
+		t.Fatalf("approach deadline=%d, want 600", got)
+	}
+	if err := world.Apply(
+		AdvanceMission{To: MissionApproach, Reason: "test"},
+		AdvanceMission{To: MissionSurfaceAssault, Reason: "surface-entry", AssaultDeadlineTick: 1200},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := world.Mission.Progress.AssaultDeadlineTick; got != 1200 {
+		t.Fatalf("assault deadline=%d, want 1200", got)
+	}
+	if err := world.Apply(AdvanceMission{To: MissionTrenchRun, Reason: "test", AssaultDeadlineTick: 1800}); err == nil {
+		t.Fatal("trench transition accepted a replacement assault deadline")
+	}
+}
+
 func TestMissionFailureIsIdempotentAndResettable(t *testing.T) {
 	player := catalog.XWing(1, kinematics.Pose{})
 	world, err := New([]scene.Object{player})

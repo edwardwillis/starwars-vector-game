@@ -248,6 +248,10 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.detailLevels = fresh.detailLevels
 	g.shieldStrength = fresh.shieldStrength
 	g.shieldQuietTime = fresh.shieldQuietTime
+	g.combatFeedback = fresh.combatFeedback
+	g.combatFeedbackUntil = fresh.combatFeedbackUntil
+	g.combatFeedbackColor = fresh.combatFeedbackColor
+	g.impactFlashUntil = fresh.impactFlashUntil
 	g.destructionViewRemaining = fresh.destructionViewRemaining
 	g.destructionVictim = fresh.destructionVictim
 	g.controlsRemaining = 0
@@ -569,6 +573,10 @@ func missionResultReason(reason string) string {
 		return "YOUR FIGHTER WAS DESTROYED"
 	case escapeDeadlineExceeded:
 		return "ESCAPE WINDOW EXPIRED"
+	case approachDeadlineExceeded:
+		return "DEATH STAR ASSAULT WINDOW EXPIRED"
+	case assaultDeadlineExceeded:
+		return "DEATH STAR ATTACK WINDOW EXPIRED"
 	case exhaustAttackExpended:
 		return "TORPEDO ATTACK FAILED"
 	case "":

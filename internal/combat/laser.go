@@ -30,10 +30,13 @@ type LaserConfig struct {
 
 func DefaultLaserConfig() LaserConfig {
 	return LaserConfig{
-		Speed:                LaserSpeed,
-		SpinRate:             LaserSpinRate,
-		Lifetime:             LaserLifetime,
-		InterceptionDistance: 0.55,
+		Speed:    LaserSpeed,
+		SpinRate: LaserSpinRate,
+		Lifetime: LaserLifetime,
+		// A deliberately generous swept envelope lets a player shoot down an
+		// incoming bolt without changing the actual hit volumes of fighters or
+		// scenery. Difficulty profiles tighten this assistance from Cadet upward.
+		InterceptionDistance: 0.9,
 	}
 }
 

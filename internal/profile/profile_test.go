@@ -77,6 +77,9 @@ func TestLaserInterceptionAssistanceTightensWithDifficulty(t *testing.T) {
 		ace.Combat.Laser.InterceptionDistance > nightmare.Combat.Laser.InterceptionDistance) {
 		t.Fatalf("interception distances do not tighten with difficulty: cadet=%v pilot=%v ace=%v nightmare=%v", cadet.Combat.Laser.InterceptionDistance, pilot.Combat.Laser.InterceptionDistance, ace.Combat.Laser.InterceptionDistance, nightmare.Combat.Laser.InterceptionDistance)
 	}
+	if pilot.Combat.Laser.InterceptionDistance != 0.9 {
+		t.Fatalf("pilot interception distance=%v, want forgiving 0.9", pilot.Combat.Laser.InterceptionDistance)
+	}
 }
 
 func TestBuiltinResolvesStableNames(t *testing.T) {
@@ -151,6 +154,8 @@ func TestValidateRejectsInvalidConfiguration(t *testing.T) {
 		{name: "same combat team", mutate: func(profile *GameProfile) { profile.Swarm.Team = profile.Player.Team }},
 		{name: "invalid surface speed", mutate: func(profile *GameProfile) { profile.Surface.MaxForward = 0 }},
 		{name: "invalid surface entry grace", mutate: func(profile *GameProfile) { profile.Surface.EntryGraceSeconds = -1 }},
+		{name: "invalid approach deadline", mutate: func(profile *GameProfile) { profile.Yavin.ApproachDeadlineSeconds = 0 }},
+		{name: "invalid assault deadline", mutate: func(profile *GameProfile) { profile.Yavin.AssaultDeadlineSeconds = 0 }},
 		{name: "invalid escape deadline", mutate: func(profile *GameProfile) { profile.Yavin.EscapeDeadlineSeconds = 0 }},
 	}
 	for _, test := range tests {

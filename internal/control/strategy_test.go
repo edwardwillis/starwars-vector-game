@@ -24,6 +24,19 @@ func TestPursuitTurnsTowardTargetAndAccelerates(t *testing.T) {
 	}
 }
 
+func TestCoordinatedTurnRollBanksThenLevels(t *testing.T) {
+	config := DefaultPursuitConfig()
+	turnRate := coordinatedTurnRollRate(math3d.IdentityQuaternion(), 0.5, config)
+	if turnRate >= 0 {
+		t.Fatalf("positive yaw produced roll rate %v, want a negative bank into the turn", turnRate)
+	}
+	banked := math3d.QuaternionFromYawPitchRoll(0, 0, -0.35)
+	levelRate := coordinatedTurnRollRate(banked, 0, config)
+	if levelRate <= 0 {
+		t.Fatalf("banked fighter received roll rate %v, want recovery toward level flight", levelRate)
+	}
+}
+
 func TestPursuitIsDeterministicForSeed(t *testing.T) {
 	first := NewPursuit(99, DefaultPursuitConfig())
 	second := NewPursuit(99, DefaultPursuitConfig())
@@ -131,6 +144,27 @@ func TestPursuitAttackRunSelectsRadiusAndRequestsFire(t *testing.T) {
 	controller.Step(testContext(self, target, 0.01))
 	if !controller.AttackIntent() {
 		t.Fatal("aligned controller did not request fire during its attack run")
+	}
+}
+
+func TestPursuitAttackMakesDirectRollingPassThenBreaksAway(t *testing.T) {
+	config := DefaultPursuitConfig()
+	config.WanderStrength = 0
+	config.AttackMinGap, config.AttackMaxGap = 0, 0
+	config.AttackMinTime, config.AttackMaxTime = 2, 2
+	config.AttackMinRadius, config.AttackMaxRadius = 5, 5
+	controller := NewPursuit(79, config)
+	self := scene.Object{Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}}
+	target := scene.Object{Pose: kinematics.Pose{Position: math3d.Vec3{Z: 10}}}
+
+	direct := controller.Step(testContext(self, target, 0.01))
+	if !controller.attacking || controller.attackBreakTime != 0 || direct.RollRate == 0 || math.Abs(direct.YawRate) > 1e-9 {
+		t.Fatalf("attack pass=%+v state=%+v, want a direct slow-roll approach", direct, *controller)
+	}
+	self.Pose.Position = math3d.Vec3{Z: 6}
+	breakAway := controller.Step(testContext(self, target, 0.01))
+	if controller.attackBreakTime <= 0 || math.Abs(breakAway.YawRate) < 0.01 {
+		t.Fatalf("close pass=%+v state=%+v, want a lateral break", breakAway, *controller)
 	}
 }
 

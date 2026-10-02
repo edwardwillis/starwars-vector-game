@@ -65,6 +65,14 @@ type MissionState struct {
 // constitutes an observation, while the simulation preserves the ordered
 // state that snapshots and later authoritative hosts need to reproduce.
 type MissionProgress struct {
+	// ApproachDeadlineTick bounds the initial orbital push through arrival at
+	// the Death Star. AssaultDeadlineTick begins once the player reaches the
+	// surface and carries through the trench run and exhaust-port attack.
+	// Like the escape deadline, both are fixed-tick state for reproducible
+	// mission outcomes independent of rendering or presentation timing.
+	ApproachDeadlineTick uint64
+	AssaultDeadlineTick  uint64
+
 	// OrbitalInitialHostDistance and OrbitalClosestHostDistance let an
 	// approach rule require real closure on the mission host without using a
 	// kill quota.  They are measured in the player's current simulation frame.
@@ -90,9 +98,10 @@ type MissionEvent struct {
 }
 
 type StartMission struct {
-	ID       string
-	PlayerID scene.ObjectID
-	HostID   scene.ObjectID
+	ID                   string
+	PlayerID             scene.ObjectID
+	HostID               scene.ObjectID
+	ApproachDeadlineTick uint64
 }
 
 func (command StartMission) Apply(world *World) error {
@@ -110,17 +119,22 @@ func (command StartMission) Apply(world *World) error {
 			return fmt.Errorf("mission host %d not found", command.HostID)
 		}
 	}
+	if command.ApproachDeadlineTick != 0 && command.ApproachDeadlineTick <= world.Tick {
+		return fmt.Errorf("approach deadline must be after current tick")
+	}
 	world.Mission = MissionState{
 		ID: command.ID, Phase: MissionOrbitalBattle, PlayerID: command.PlayerID, HostID: command.HostID,
 		StartedTick: world.Tick, PhaseStartedTick: world.Tick, Revision: 1,
+		Progress: MissionProgress{ApproachDeadlineTick: command.ApproachDeadlineTick},
 	}
 	world.appendMissionEvent(MissionInactive, MissionOrbitalBattle, "launch")
 	return nil
 }
 
 type AdvanceMission struct {
-	To     MissionPhase
-	Reason string
+	To                  MissionPhase
+	Reason              string
+	AssaultDeadlineTick uint64
 }
 
 // BeginEscape records the only valid transition into the post-attack escape
@@ -154,6 +168,15 @@ func (command AdvanceMission) Apply(world *World) error {
 	}
 	if command.To != mission.Phase+1 || command.To > MissionSucceeded {
 		return fmt.Errorf("invalid mission transition %s -> %s", mission.Phase, command.To)
+	}
+	if command.AssaultDeadlineTick != 0 {
+		if command.To != MissionSurfaceAssault {
+			return fmt.Errorf("assault deadline may only begin at surface assault")
+		}
+		if command.AssaultDeadlineTick <= world.Tick {
+			return fmt.Errorf("assault deadline must be after current tick")
+		}
+		mission.Progress.AssaultDeadlineTick = command.AssaultDeadlineTick
 	}
 	world.setMissionPhase(command.To, command.Reason)
 	return nil

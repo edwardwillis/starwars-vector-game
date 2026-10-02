@@ -32,6 +32,7 @@ var (
 	tieFighterCannons                = model.Transform(tieFighterGeometry.Cannons, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
 	tieFighterWindow                 = model.Transform(tieFighterGeometry.Window, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
 	tieFighterDebris                 = transformTIEFighterFragments(tieFighterGeometry.Fragments, math3d.Scaling(tieFighterScale, tieFighterScale, tieFighterScale))
+	tieFighterWreckageWheel          = model.TIEWreckageWheel()
 	xWingGeometry                    = model.XWingGeometryData()
 	xWingFoilAssemblies              = xWingGeometry.Foils
 	xWingWindow                      = xWingGeometry.Window
@@ -87,6 +88,7 @@ const millenniumFalconScale = 1.0
 const (
 	CubeName                    = "builtin/cube"
 	TIEFighterName              = "builtin/tie-fighter"
+	TIEWreckageWheelName        = "builtin/tie-wreckage-wheel"
 	TIEInterceptorName          = "builtin/tie-interceptor"
 	TIEAdvancedX1Name           = "builtin/tie-advanced-x1"
 	XWingName                   = "builtin/x-wing"
@@ -122,6 +124,8 @@ func SpecificationFor(definition string) (Specification, bool) {
 		return Specification{Title: "ALLIANCE X WING STARFIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "REBEL ALLIANCE", Description: "VERSATILE ALLIANCE FIGHTER", Description2: "FOR FAST TORPEDO RUNS", Length: "12.5 METERS", Crew: "1 PILOT AND ASTROMECH", Passengers: "NONE", MaxSpeed: "1050 KM PER HOUR", Hyperdrive: "YES", Weapons: "4 LASER CANNONS", Ordnance: "2 PROTON TORPEDO LAUNCHERS", Shields: "YES"}, true
 	case TIEFighterName:
 		return Specification{Title: "IMPERIAL TIE FIGHTER", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "PRIMARY IMPERIAL SPACE", Description2: "SUPERIORITY FIGHTER", Length: "6.3 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "1200 KM PER HOUR", Hyperdrive: "NO", Weapons: "2 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
+	case TIEWreckageWheelName:
+		return Specification{Title: "TIE WRECKAGE WHEEL", Type: "TEMPORARY GEOMETRY INSPECTION", Role: "DEFINITELY NOT IMPERIAL ISSUE", Description: "UNAUTHORISED GROUND VEHICLE", Description2: "COMPONENT IN TIE WRECKAGE", Length: "0.8 METERS", Crew: "NONE", Passengers: "NONE", MaxSpeed: "DEPENDS ON SLOPE", Hyperdrive: "NO", Weapons: "NONE", Ordnance: "NONE", Shields: "NO"}, true
 	case TIEInterceptorName:
 		return Specification{Title: "IMPERIAL TIE INTERCEPTOR", Type: "SPACE SUPERIORITY STARFIGHTER", Role: "GALACTIC EMPIRE", Description: "FAST IMPERIAL INTERCEPTOR", Description2: "FOR HIGH-SPEED PURSUIT", Length: "9.6 METERS", Crew: "1 PILOT", Passengers: "NONE", MaxSpeed: "111 MGLT", Hyperdrive: "NO", Weapons: "4 SFS L-S9.3 LASER CANNONS", Ordnance: "NONE", Shields: "NO"}, true
 	case TIEAdvancedX1Name:
@@ -347,6 +351,28 @@ func TIEFighterFragment(id scene.ObjectID, index int, pose kinematics.Pose) scen
 		Hittable:         true,
 		Destructible:     true,
 		DestructionStage: scene.DestructionComponent,
+	}
+}
+
+// TIEFighterWreckageWheel adds a small, obviously non-Imperial wheel to a
+// standard TIE fighter's final breakup debris. It is visual-only and bypasses
+// the normal fragment-to-polygon lifecycle.
+func TIEFighterWreckageWheel(id scene.ObjectID, pose kinematics.Pose) scene.Object {
+	return scene.Object{
+		ID: id, Name: "TIE fighter wreckage wheel", Definition: TIEWreckageWheelName, Pose: pose,
+		Parts: []scene.Part{{
+			Name:          "completely standard Imperial wheel",
+			Mesh:          tieFighterWreckageWheel,
+			Color:         vectorGreen,
+			LineWidth:     standardLineWidth,
+			Surface:       fighterSurface,
+			SelfOccluding: true,
+			SelfOcclusion: scene.SelfOcclusionAll,
+		}},
+		CollisionRole:    scene.CollisionDebris,
+		CollisionRadius:  0.4,
+		DestructionStage: scene.DestructionPolygon,
+		VisualRadius:     0.4,
 	}
 }
 

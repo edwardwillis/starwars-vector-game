@@ -149,14 +149,15 @@ type Pursuit struct {
 	avoidanceCooldown  float64
 	avoidanceYaw       float64
 	avoidancePitch     float64
-	avoidanceRoll      float64
 	avoidanceObject    scene.ObjectID
 	attacking          bool
 	attackGap          float64
 	attackTime         float64
 	attackRadius       float64
-	attackAngle        float64
 	attackDirection    float64
+	attackBreakTime    float64
+	attackBreakVector  math3d.Vec3
+	attackRollRate     float64
 	attackFireGap      float64
 	attackFire         bool
 }
@@ -186,12 +187,8 @@ func (p *Pursuit) AttackIntent() bool {
 // EngageNow preserves the controller's normal attack-run behavior but removes
 // its initial idle gap. The next decision begins a deterministic attack arc.
 func (p *Pursuit) EngageNow() {
-	p.attacking = true
 	p.excursion = false
-	p.attackTime = p.randomRange(p.config.AttackMinTime, p.config.AttackMaxTime)
-	p.attackRadius = p.randomRange(p.config.AttackMinRadius, p.config.AttackMaxRadius)
-	p.attackAngle = p.randomRange(0, 2*math.Pi)
-	p.attackDirection = signOrRandom(p.randomSigned(), 1)
+	p.beginAttack()
 	p.attackFireGap = 0
 }
 
@@ -223,13 +220,12 @@ func (p *Pursuit) stepMotion(context Context) kinematics.Motion {
 
 	toTarget := target.Pose.Position.Add(p.targetOffset).Sub(self.Pose.Position)
 	if p.attacking {
-		p.attackAngle += p.attackDirection * p.config.MaxSpeed / max(0.1, p.attackRadius) * seconds * max(1, context.MotionScale)
-		arcOffset := math3d.Vec3{
-			X: math.Cos(p.attackAngle) * p.attackRadius,
-			Y: math.Sin(p.attackAngle*0.7) * p.attackRadius * 0.22,
-			Z: math.Sin(p.attackAngle) * p.attackRadius,
+		// An attack begins as a direct pass. Once close, the selected lateral
+		// break point produces a near-miss rather than an artificial orbit.
+		toTarget = target.Pose.Position.Sub(self.Pose.Position)
+		if p.attackBreakTime > 0 {
+			toTarget = target.Pose.Position.Add(p.attackBreakVector.Scale(p.attackRadius * 0.8)).Sub(self.Pose.Position)
 		}
-		toTarget = target.Pose.Position.Add(arcOffset).Sub(self.Pose.Position)
 	} else if p.excursion {
 		toTarget = p.excursionDirection
 	}
@@ -251,14 +247,36 @@ func (p *Pursuit) stepMotion(context Context) kinematics.Motion {
 	motion.Speed = moveToward(motion.Speed, desiredSpeed, p.config.Acceleration*seconds)
 	motion.YawRate = clamp(yawError*p.config.TurnGain+p.wanderYaw, -p.config.MaxYawRate, p.config.MaxYawRate)
 	motion.PitchRate = clamp(pitchError*p.config.TurnGain+p.wanderPitch, -p.config.MaxPitchRate, p.config.MaxPitchRate)
-	motion.RollRate = clamp(-motion.YawRate*0.7, -p.config.MaxRollRate, p.config.MaxRollRate)
+	motion.RollRate = coordinatedTurnRollRate(self.Pose.Orientation, motion.YawRate, p.config)
+	if p.attacking && p.attackBreakTime <= 0 {
+		// Keep the direct attack pass alive visually even when no yaw correction
+		// is needed; the break itself returns to coordinated banked steering.
+		motion.RollRate = p.attackRollRate
+	}
 	if p.avoidanceTime > 0 {
 		fade := min(1, p.avoidanceTime/0.2)
 		motion.YawRate = blend(motion.YawRate, p.avoidanceYaw, 0.95*fade)
 		motion.PitchRate = blend(motion.PitchRate, p.avoidancePitch, 0.85*fade)
-		motion.RollRate = blend(motion.RollRate, p.avoidanceRoll, 0.95*fade)
+		avoidanceBank := coordinatedTurnRollRate(self.Pose.Orientation, p.avoidanceYaw, p.config)
+		motion.RollRate = blend(motion.RollRate, avoidanceBank, 0.95*fade)
 	}
 	return motion
+}
+
+// coordinatedTurnRollRate banks into a yaw command, but uses the same local
+// roll feedback as player auto-leveling to settle at a readable bank angle
+// rather than continuously barrel-rolling through a long turn.
+func coordinatedTurnRollRate(orientation math3d.Quaternion, yawRate float64, config PursuitConfig) float64 {
+	if config.MaxRollRate <= 0 {
+		return 0
+	}
+	levelRate := AutoLevelRollRate(orientation, math3d.Vec3{Y: 1}, AutoLevelConfig{
+		Enabled: true, CorrectionGain: 2, MaxRollRate: config.MaxRollRate, AngleDeadzone: 0.01,
+	})
+	// A fully committed turn settles around a 20-degree bank with the feedback
+	// above. The sign matches the existing TIE roll convention: positive yaw
+	// produces a negative roll into the turn.
+	return clamp(-yawRate*1.1+levelRate, -config.MaxRollRate, config.MaxRollRate)
 }
 
 func intentForMotion(current, desired kinematics.Motion, config PursuitConfig, seconds float64) Intent {
@@ -276,14 +294,25 @@ func intentForMotion(current, desired kinematics.Motion, config PursuitConfig, s
 func (p *Pursuit) updateAttack(self, target scene.Object, seconds float64) {
 	p.attackFire = false
 	if p.attacking {
-		p.attackTime -= seconds
-		p.attackFireGap -= seconds
-		if p.attackTime <= 0 {
-			p.attacking = false
-			p.attackGap = p.randomRange(p.config.AttackMinGap, p.config.AttackMaxGap)
-			p.targetOffset = p.randomOffset()
-			return
+		if p.attackBreakVector == (math3d.Vec3{}) {
+			p.selectAttackBreak(self, target)
 		}
+		if p.attackBreakTime > 0 {
+			p.attackBreakTime -= seconds
+			if p.attackBreakTime <= 0 {
+				p.finishAttack()
+				return
+			}
+		} else {
+			p.attackTime -= seconds
+			if target.Pose.Position.Sub(self.Pose.Position).Length() <= p.attackRadius {
+				p.attackBreakTime = 0.7
+			} else if p.attackTime <= 0 {
+				p.finishAttack()
+				return
+			}
+		}
+		p.attackFireGap -= seconds
 		toTarget := target.Pose.Position.Sub(self.Pose.Position)
 		distance := toTarget.Length()
 		if p.attackFireGap <= 0 && distance <= p.config.AttackRange {
@@ -299,13 +328,40 @@ func (p *Pursuit) updateAttack(self, target scene.Object, seconds float64) {
 	if p.attackGap > 0 {
 		return
 	}
-	p.attacking = true
 	p.excursion = false
+	p.beginAttack()
+	p.attackFireGap = p.randomRange(0, p.config.AttackFireMaxGap)
+}
+
+func (p *Pursuit) beginAttack() {
+	p.attacking = true
 	p.attackTime = p.randomRange(p.config.AttackMinTime, p.config.AttackMaxTime)
 	p.attackRadius = p.randomRange(p.config.AttackMinRadius, p.config.AttackMaxRadius)
-	p.attackAngle = p.randomRange(0, 2*math.Pi)
 	p.attackDirection = signOrRandom(p.randomSigned(), 1)
-	p.attackFireGap = p.randomRange(0, p.config.AttackFireMaxGap)
+	p.attackBreakTime = 0
+	p.attackBreakVector = math3d.Vec3{}
+	p.attackRollRate = p.attackDirection * p.config.MaxRollRate * 0.28
+}
+
+func (p *Pursuit) selectAttackBreak(self, target scene.Object) {
+	right := self.Pose.Orientation.Normalize().Rotate(math3d.Vec3{X: 1}).Normalize()
+	if right == (math3d.Vec3{}) {
+		right = math3d.Vec3{X: 1}
+	}
+	// A small upward component makes a close pass read as a deliberate flight
+	// path instead of a perfectly planar sidestep.
+	p.attackBreakVector = right.Scale(p.attackDirection).Add(math3d.Vec3{Y: 0.18}).Normalize()
+	if p.attackBreakVector == (math3d.Vec3{}) {
+		p.attackBreakVector = target.Pose.Position.Sub(self.Pose.Position).Normalize()
+	}
+}
+
+func (p *Pursuit) finishAttack() {
+	p.attacking = false
+	p.attackBreakTime = 0
+	p.attackBreakVector = math3d.Vec3{}
+	p.attackGap = p.randomRange(p.config.AttackMinGap, p.config.AttackMaxGap)
+	p.targetOffset = p.randomOffset()
 }
 
 func (p *Pursuit) updateAvoidance(context Context) {
@@ -383,7 +439,6 @@ func (p *Pursuit) beginAvoidance(self, threat scene.Object) {
 	if math.Abs(localThreat.Y) > 0.12 || p.randomUnit() > 0.45 {
 		p.avoidancePitch = pitchSign * p.config.MaxPitchRate * p.randomRange(0.5, 0.75)
 	}
-	p.avoidanceRoll = -yawSign * p.config.MaxRollRate * p.randomRange(0.7, 0.95)
 	p.avoidanceTime = p.randomRange(p.config.AvoidanceMinTime, p.config.AvoidanceMaxTime)
 	p.avoidanceObject = threat.ID
 }

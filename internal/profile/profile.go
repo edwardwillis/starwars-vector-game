@@ -140,8 +140,10 @@ type SurfaceCombatConfig struct {
 // tuned per difficulty. It is concrete Yavin data, not a generic scripting
 // system for future missions.
 type YavinConfig struct {
-	EscapeDeadlineSeconds float64
-	EscapeSafeClearance   float64
+	ApproachDeadlineSeconds float64
+	AssaultDeadlineSeconds  float64
+	EscapeDeadlineSeconds   float64
+	EscapeSafeClearance     float64
 }
 
 type ObjectPlacement struct {
@@ -249,11 +251,14 @@ func Pilot() GameProfile {
 		Starfield: StarfieldConfig{Count: 500, Radius: 40, Seed: 42, Mode: StarfieldModeSkyfield},
 		Targeting: TargetingConfig{AimRadius: 190, AimConvergence: 30},
 		Combat: CombatConfig{
-			Laser:         combat.DefaultLaserConfig(),
-			Torpedo:       combat.DefaultTorpedoConfig(),
-			FireInterval:  0.12,
-			FireWindow:    1.5,
-			MaxFireEvents: 3,
+			Laser:        combat.DefaultLaserConfig(),
+			Torpedo:      combat.DefaultTorpedoConfig(),
+			FireInterval: 0.12,
+			FireWindow:   1.5,
+			// X-wing volleys fire two bolts from a muzzle pair. Four concurrent
+			// volleys therefore allow eight player bolts in flight, enough to
+			// defend against a small attacking formation.
+			MaxFireEvents: 4,
 			BeamTime:      0.08,
 		},
 		Player: PlayerConfig{
@@ -311,7 +316,7 @@ func Pilot() GameProfile {
 			CannonTraverseSpeed: 2.4, CannonYawLimit: 1.55, CannonPitchLimit: 1.5, CannonFireTolerance: 0.09,
 			MinimumAltitude: 5.5, TerrainLookAhead: 18, GuidanceStrength: 0.85,
 		},
-		Yavin: YavinConfig{EscapeDeadlineSeconds: 45, EscapeSafeClearance: 110},
+		Yavin: YavinConfig{ApproachDeadlineSeconds: 120, AssaultDeadlineSeconds: 120, EscapeDeadlineSeconds: 45, EscapeSafeClearance: 110},
 		World: WorldConfig{Objects: []ObjectPlacement{{
 			Definition: "builtin/death-star",
 			Appearance: "builtin/death-star-arcade-billboard",
@@ -347,7 +352,7 @@ func Cadet() GameProfile {
 	profile.Surface.CannonFireMinGap = 1.2
 	profile.Surface.CannonFireMaxGap = 2.0
 	profile.Yavin.EscapeDeadlineSeconds = 60
-	profile.Combat.Laser.InterceptionDistance = 0.72
+	profile.Combat.Laser.InterceptionDistance = 1.2
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -373,7 +378,7 @@ func Ace() GameProfile {
 	profile.Surface.CannonFireMinGap = 0.65
 	profile.Surface.CannonFireMaxGap = 1.15
 	profile.Yavin.EscapeDeadlineSeconds = 40
-	profile.Combat.Laser.InterceptionDistance = 0.44
+	profile.Combat.Laser.InterceptionDistance = 0.65
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -405,7 +410,7 @@ func Nightmare() GameProfile {
 	profile.Surface.CannonFireMinGap = 0.45
 	profile.Surface.CannonFireMaxGap = 0.9
 	profile.Yavin.EscapeDeadlineSeconds = 35
-	profile.Combat.Laser.InterceptionDistance = 0.34
+	profile.Combat.Laser.InterceptionDistance = 0.5
 	syncSwarmFlight(&profile)
 	return profile
 }
@@ -706,6 +711,12 @@ func validateSurfaceCombat(config SurfaceCombatConfig) error {
 }
 
 func validateYavin(config YavinConfig) error {
+	if err := validatePositive("approach deadline", config.ApproachDeadlineSeconds); err != nil {
+		return err
+	}
+	if err := validatePositive("assault deadline", config.AssaultDeadlineSeconds); err != nil {
+		return err
+	}
 	if err := validatePositive("escape deadline", config.EscapeDeadlineSeconds); err != nil {
 		return err
 	}

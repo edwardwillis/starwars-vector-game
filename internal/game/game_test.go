@@ -34,6 +34,14 @@ func TestLayoutUsesLogicalResolution(t *testing.T) {
 	}
 }
 
+func TestTrenchTargetRailsConvergeAtTheExhaustPort(t *testing.T) {
+	far := trenchTargetRailHalfSpan(260)
+	near := trenchTargetRailHalfSpan(0)
+	if near >= far || near <= 0 {
+		t.Fatalf("trench rails near=%v far=%v, want positive convergence", near, far)
+	}
+}
+
 func TestRenderDiagnosticsRequireHUDOrTelemetry(t *testing.T) {
 	g := New()
 	if g.renderDiagnosticsEnabled() {
@@ -1340,6 +1348,109 @@ func TestInitialImperialFleetIncludesDarthVadersTIEAdvancedX1(t *testing.T) {
 	}
 }
 
+func TestMissionPhaseDirectivesAreActionable(t *testing.T) {
+	for _, phase := range []sim.MissionPhase{
+		sim.MissionOrbitalBattle, sim.MissionApproach, sim.MissionSurfaceAssault,
+		sim.MissionTrenchRun, sim.MissionExhaustPortAttack, sim.MissionEscape,
+	} {
+		title, detail := missionPhaseDirective(phase)
+		if title == "" || detail == "" || title == "MISSION STATUS" || detail == "AWAITING ORDERS" {
+			t.Fatalf("phase %s directive=%q / %q, want an actionable instruction", phase, title, detail)
+		}
+	}
+}
+
+func TestYavinMissionDeadlinesExpireAtTheirFixedTicks(t *testing.T) {
+	approach := New()
+	if err := approach.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	approachDeadline := approach.world.Mission.Progress.ApproachDeadlineTick
+	if approachDeadline == 0 {
+		t.Fatal("Yavin launch did not set an approach deadline")
+	}
+	approach.world.Tick = approachDeadline
+	if err := approach.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if approach.world.Mission.Phase != sim.MissionFailed || approach.world.Mission.Reason != approachDeadlineExceeded {
+		t.Fatalf("expired approach mission=%+v", approach.world.Mission)
+	}
+
+	assault := New()
+	if err := assault.startYavinMission(true); err != nil {
+		t.Fatal(err)
+	}
+	assaultDeadline := assault.world.Mission.Progress.AssaultDeadlineTick
+	if assault.world.Mission.Phase != sim.MissionSurfaceAssault || assaultDeadline == 0 {
+		t.Fatalf("surface start did not set assault deadline: %+v", assault.world.Mission)
+	}
+	assault.world.Tick = assaultDeadline
+	if err := assault.updateYavinMission(); err != nil {
+		t.Fatal(err)
+	}
+	if assault.world.Mission.Phase != sim.MissionFailed || assault.world.Mission.Reason != assaultDeadlineExceeded {
+		t.Fatalf("expired assault mission=%+v", assault.world.Mission)
+	}
+}
+
+func TestYavinMissionDeadlineSelectsTheActiveObjectiveWindow(t *testing.T) {
+	approach := sim.MissionState{Phase: sim.MissionApproach, Progress: sim.MissionProgress{ApproachDeadlineTick: 60}}
+	if label, deadline := yavinMissionDeadline(approach); label != "ASSAULT CLOCK" || deadline != 60 {
+		t.Fatalf("approach deadline=%q/%d", label, deadline)
+	}
+	attack := sim.MissionState{Phase: sim.MissionTrenchRun, Progress: sim.MissionProgress{AssaultDeadlineTick: 120}}
+	if label, deadline := yavinMissionDeadline(attack); label != "ATTACK CLOCK" || deadline != 120 {
+		t.Fatalf("attack deadline=%q/%d", label, deadline)
+	}
+}
+
+func TestCombatFeedbackExpiresFromSimulationTime(t *testing.T) {
+	g := New()
+	g.simulationTime = 12
+	g.setCombatFeedback("TARGET DESTROYED", color.RGBA{R: 96, G: 255, B: 128, A: 255})
+	if text, active := g.activeCombatFeedback(); !active || text != "TARGET DESTROYED" {
+		t.Fatalf("active feedback=%q/%t, want target-destroyed feedback", text, active)
+	}
+	g.simulationTime = g.combatFeedbackUntil
+	if _, active := g.activeCombatFeedback(); active {
+		t.Fatal("combat feedback remained active at its expiry time")
+	}
+}
+
+func TestShieldHitStartsAndFadesImpactFlash(t *testing.T) {
+	g := New()
+	g.simulationTime = 12
+	g.applyShieldDamage(1)
+	if got := g.impactFlashOpacity(); got != 96 {
+		t.Fatalf("impact flash opacity=%d, want 96 immediately after a hit", got)
+	}
+	g.simulationTime += impactFlashDuration / 2
+	if got := g.impactFlashOpacity(); got == 0 || got >= 96 {
+		t.Fatalf("impact flash opacity=%d halfway through flash, want a fading non-zero value", got)
+	}
+	g.simulationTime += impactFlashDuration
+	if got := g.impactFlashOpacity(); got != 0 {
+		t.Fatalf("impact flash opacity=%d after expiry, want 0", got)
+	}
+}
+
+func TestMissionDirectorOpacityFadesAfterFiveSeconds(t *testing.T) {
+	for _, test := range []struct {
+		elapsed float64
+		want    float64
+	}{
+		{0, 1},
+		{missionDirectorVisibleSeconds, 1},
+		{missionDirectorVisibleSeconds + missionDirectorFadeSeconds/2, .5},
+		{missionDirectorVisibleSeconds + missionDirectorFadeSeconds, 0},
+	} {
+		if got := missionDirectorOpacity(test.elapsed); math.Abs(got-test.want) > 1e-9 {
+			t.Fatalf("opacity at %.2fs=%v, want %v", test.elapsed, got, test.want)
+		}
+	}
+}
+
 func TestCadetSwarmRetainsStandardTIEFightersAlongsideVader(t *testing.T) {
 	g, err := NewWithProfile(profile.Cadet())
 	if err != nil {
@@ -1435,6 +1546,31 @@ func TestDisintegrationFragmentsUseOwnPivotAndInheritFlightPath(t *testing.T) {
 	if !offCentreSource {
 		t.Fatal("all component fragments lost their catalog source origins")
 	}
+}
+
+func TestStandardTIEDestructionSpinsOffOneWreckageWheel(t *testing.T) {
+	g := New()
+	if err := catalog.TIEFighterWreckageWheel(901, kinematics.Pose{Orientation: math3d.IdentityQuaternion()}).Validate(); err != nil {
+		t.Fatalf("TIE wreckage wheel is not a valid scene object: %v", err)
+	}
+	tie := catalog.TIEFighter(900, kinematics.Pose{Orientation: math3d.IdentityQuaternion()})
+	tie.Motion = kinematics.Motion{Speed: 4.2, Velocity: math3d.Vec3{X: 0.2, Y: -0.1, Z: 0.3}}
+	g.spawnDisintegration(tie)
+	if len(g.debris) != 4 {
+		t.Fatalf("standard TIE spawned %d debris objects, want three fragments plus one wheel", len(g.debris))
+	}
+	for id, transient := range g.debris {
+		object := g.objectByID(id)
+		if object == nil || object.Name != "TIE fighter wreckage wheel" {
+			continue
+		}
+		if transient.stage != scene.DestructionPolygon || object.Motion.RollRate != 11 ||
+			object.Motion.YawRate == 0 || object.Motion.PitchRate == 0 || object.Motion.Velocity == tie.Motion.Velocity {
+			t.Fatalf("wheel=%+v transient=%+v, want angled, spinning final debris", *object, transient)
+		}
+		return
+	}
+	t.Fatal("standard TIE destruction did not spawn its wreckage wheel")
 }
 
 func TestRecenteringFragmentPreservesWorldGeometry(t *testing.T) {
@@ -1555,7 +1691,7 @@ func TestFireLaserSpawnsTrackedBolt(t *testing.T) {
 	}
 }
 
-func TestFireRateAllowsOnlyThreeVolleysInRollingWindow(t *testing.T) {
+func TestFireRateAllowsOnlyConfiguredVolleysInRollingWindow(t *testing.T) {
 	g := New()
 	for volley := range g.profile.Combat.MaxFireEvents {
 		if volley > 0 {
@@ -1569,7 +1705,7 @@ func TestFireRateAllowsOnlyThreeVolleysInRollingWindow(t *testing.T) {
 	g.simulationTime += g.profile.Combat.FireInterval
 	g.fireCooldown = 0
 	if g.fireLaser() {
-		t.Fatal("fourth volley was allowed inside the 1.5-second window")
+		t.Fatal("extra volley was allowed inside the rolling fire window")
 	}
 	g.simulationTime = g.profile.Combat.FireWindow
 	if !g.fireLaser() {

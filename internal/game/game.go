@@ -47,6 +47,13 @@ type flightMode int
 const swarmInterceptorSlots = 2
 const swarmAdvancedSlot = swarmInterceptorSlots
 
+const missionDirectorVisibleSeconds = 5.0
+const missionDirectorFadeSeconds = 0.65
+const missionDirectorVanishY = 34.0
+const impactFlashDuration = 0.16
+
+var xWingDashboardInstrumentColor = color.RGBA{R: 120, G: 76, B: 42, A: 170}
+
 const transitionEnvironmentTileRadius = 2
 
 type autonomousRespawn struct {
@@ -1029,6 +1036,7 @@ type Game struct {
 	viewContext              view.Context
 	visibleObjectIDs         map[scene.ObjectID]bool
 	whitePixel               *ebiten.Image
+	cockpitMask              *ebiten.Image
 	textureRegistry          *render.TextureRegistry
 	textureImages            map[string]*ebiten.Image
 	starVertices             []ebiten.Vertex
@@ -1043,6 +1051,10 @@ type Game struct {
 	detailLevels             map[scene.ObjectID]scene.DetailTier
 	shieldStrength           int
 	shieldQuietTime          float64
+	combatFeedback           string
+	combatFeedbackUntil      float64
+	combatFeedbackColor      color.RGBA
+	impactFlashUntil         float64
 	destructionViewRemaining float64
 	destructionVictim        scene.Object
 	controlsRemaining        float64
@@ -1253,8 +1265,8 @@ func nameVaderX1(fighter *scene.Object) {
 }
 
 func (g *Game) createShowcaseObjects() []scene.Object {
-	objects := make([]scene.Object, 0, 5)
-	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.TIEAdvancedX1Name, catalog.MillenniumFalconName} {
+	objects := make([]scene.Object, 0, 6)
+	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.TIEAdvancedX1Name, catalog.MillenniumFalconName, catalog.TIEWreckageWheelName} {
 		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
 			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
 		})
@@ -1265,6 +1277,12 @@ func (g *Game) createShowcaseObjects() []scene.Object {
 			// remains readable inside the selector frame.
 			if definition == catalog.MillenniumFalconName {
 				scale = 0.68
+			}
+			// The wreckage wheel is intentionally tiny in gameplay. Enlarge it
+			// only in this temporary showcase entry so its low-poly shape can be
+			// reviewed before it returns to debris duty.
+			if definition == catalog.TIEWreckageWheelName {
+				scale = 3.5
 			}
 			for partIndex := range object.Parts {
 				object.Parts[partIndex].Mesh = modelpkg.Transform(object.Parts[partIndex].Mesh, math3d.Scaling(scale, scale, scale))
@@ -1627,7 +1645,10 @@ func (g *Game) startYavinMission(surfaceStart bool) error {
 			break
 		}
 	}
-	if err := g.world.Apply(sim.StartMission{ID: yavinMissionID, PlayerID: fighterID, HostID: hostID}); err != nil {
+	if err := g.world.Apply(sim.StartMission{
+		ID: yavinMissionID, PlayerID: fighterID, HostID: hostID,
+		ApproachDeadlineTick: g.yavinDeadlineTick(g.profile.Yavin.ApproachDeadlineSeconds),
+	}); err != nil {
 		return err
 	}
 	if err := g.initializeYavinOrbitalProgress(); err != nil {
@@ -1636,7 +1657,7 @@ func (g *Game) startYavinMission(surfaceStart bool) error {
 	if surfaceStart {
 		if err := g.world.Apply(
 			sim.AdvanceMission{To: sim.MissionApproach, Reason: "surface-development-start"},
-			sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "surface-entry"},
+			sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "surface-entry", AssaultDeadlineTick: g.yavinDeadlineTick(g.profile.Yavin.AssaultDeadlineSeconds)},
 		); err != nil {
 			return err
 		}
@@ -1677,6 +1698,9 @@ func (g *Game) updateYavinMission() error {
 	if player == nil || g.playerDestroyed {
 		return g.world.Apply(sim.FailMission{Reason: "fighter-destroyed"})
 	}
+	if reason := g.yavinDeadlineFailure(*player); reason != "" {
+		return g.world.Apply(sim.FailMission{Reason: reason})
+	}
 	previous, known := g.missionLastPosition[player.ID]
 	if !known {
 		previous = player.Pose.Position
@@ -1701,7 +1725,10 @@ func (g *Game) updateYavinMission() error {
 		if g.deathStarSurfaceRuntime(frame) == nil {
 			return nil
 		}
-		return g.world.Apply(sim.AdvanceMission{To: sim.MissionSurfaceAssault, Reason: "surface-entry"})
+		return g.world.Apply(sim.AdvanceMission{
+			To: sim.MissionSurfaceAssault, Reason: "surface-entry",
+			AssaultDeadlineTick: g.yavinDeadlineTick(g.profile.Yavin.AssaultDeadlineSeconds),
+		})
 	case sim.MissionSurfaceAssault:
 		if g.deathStarSurfaceRuntime(frame) == nil || !environment.DeathStarTrenchEntryContains(player.Pose.Position) || player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) <= 0.2 {
 			return nil
@@ -1730,6 +1757,34 @@ func (g *Game) updateYavinMission() error {
 	default:
 		return nil
 	}
+}
+
+func (g *Game) yavinDeadlineTick(seconds float64) uint64 {
+	if g.world == nil || g.profile.Simulation.TickSeconds <= 0 || seconds <= 0 {
+		return 0
+	}
+	return g.world.Tick + uint64(math.Ceil(seconds/g.profile.Simulation.TickSeconds))
+}
+
+func (g *Game) yavinDeadlineFailure(player scene.Object) string {
+	mission := g.world.Mission
+	// A hyperspace or portal transition is presentation-owned; its fixed-tick
+	// movement must not consume a player-action objective window.
+	if _, transitioning := g.transitions[player.ID]; transitioning {
+		return ""
+	}
+	var deadline uint64
+	var reason string
+	switch mission.Phase {
+	case sim.MissionOrbitalBattle, sim.MissionApproach:
+		deadline, reason = mission.Progress.ApproachDeadlineTick, approachDeadlineExceeded
+	case sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack:
+		deadline, reason = mission.Progress.AssaultDeadlineTick, assaultDeadlineExceeded
+	}
+	if deadline > 0 && g.world.Tick >= deadline {
+		return reason
+	}
+	return ""
 }
 
 func (g *Game) activeMissionProtonTorpedo() bool {
@@ -2571,6 +2626,7 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 				if _, autonomous := g.controllers[nearest.ID]; autonomous {
 					g.kills++
 					g.awardMissionScore(sim.ScoreFighterKill)
+					g.setCombatFeedback("TARGET DESTROYED", color.RGBA{R: 96, G: 255, B: 128, A: 255})
 				}
 			}
 		}
@@ -2741,6 +2797,8 @@ const (
 	exhaustAttackWrongCourse = "attack-wrong-approach"
 	exhaustAttackExpended    = "attack-torpedoes-expended"
 	escapeDeadlineExceeded   = "escape-deadline-exceeded"
+	approachDeadlineExceeded = "approach-deadline-exceeded"
+	assaultDeadlineExceeded  = "assault-deadline-exceeded"
 )
 
 type exhaustAttackEnvelope struct {
@@ -2845,6 +2903,7 @@ func (g *Game) resolveExhaustPortAttack(projectile scene.Object, hit collision.H
 	if deadlineTicks == 0 {
 		return
 	}
+	g.setCombatFeedback("DIRECT HIT - BREAK AWAY", color.RGBA{R: 255, G: 224, B: 48, A: 255})
 	_ = g.world.Apply(sim.BeginEscape{DeadlineTick: g.world.Tick + deadlineTicks, Reason: "exhaust-port-hit"})
 }
 
@@ -3160,6 +3219,35 @@ func (g *Game) spawnDisintegration(object scene.Object) {
 			stage:          scene.DestructionComponent,
 			sourceOrigin:   sourceOrigin,
 		}
+	}
+	if object.Definition == catalog.TIEFighterName {
+		g.spawnTIEFighterWreckageWheel(object, inheritedVelocity)
+	}
+}
+
+func (g *Game) spawnTIEFighterWreckageWheel(object scene.Object, inheritedVelocity math3d.Vec3) {
+	// The lateral/upward kick makes the wheel peel away at a visibly different
+	// angle from the three real components, while its large roll rate sells the
+	// intentionally incongruous gag at vector-game scale.
+	localOffset := math3d.Vec3{X: -0.15, Y: 0.32, Z: 0.48}
+	pose := object.Pose
+	pose.Position = pose.Position.Add(object.Pose.Orientation.Rotate(localOffset))
+	pose.Orientation = pose.Orientation.Mul(math3d.QuaternionFromYawPitchRoll(0.45, -0.35, 0.7))
+	wheel := catalog.TIEFighterWreckageWheel(g.nextObjectID, pose)
+	g.nextObjectID++
+	wheel.Motion = kinematics.Motion{
+		Velocity:  inheritedVelocity.Add(object.Pose.Orientation.Rotate(math3d.Vec3{X: -0.3, Y: 1.25, Z: 1.55})),
+		YawRate:   2.5,
+		PitchRate: -3.5,
+		RollRate:  11,
+	}
+	wheel.Frame = object.Frame
+	wheel.Team = object.Team
+	g.objects = append(g.objects, wheel)
+	g.debris[wheel.ID] = destructionTransient{
+		remaining:    g.profile.Simulation.DisintegrationTime,
+		rootObjectID: object.ID,
+		stage:        scene.DestructionPolygon,
 	}
 }
 
@@ -4186,6 +4274,7 @@ func (g *Game) fireProtonTorpedo() bool {
 	g.owners[spawn.Object.ID] = spawn.OwnerID
 	g.torpedoesRemaining--
 	g.torpedoCooldown = g.profile.Combat.Torpedo.Cooldown
+	g.setCombatFeedback("PROTON TORPEDO LAUNCHED", color.RGBA{R: 255, G: 208, B: 48, A: 255})
 	g.viewCamera.TargetID = fighterID
 	g.viewCamera.Mode = camera.Cockpit
 	return true
@@ -4338,7 +4427,23 @@ func (g *Game) applyShieldDamage(amount int) bool {
 	}
 	g.shieldStrength -= amount
 	g.shieldQuietTime = 0
+	g.impactFlashUntil = g.simulationTime + impactFlashDuration
+	g.setCombatFeedback(fmt.Sprintf("SHIELDS HIT -%d", amount), color.RGBA{R: 255, G: 80, B: 64, A: 255})
 	return g.shieldStrength < 0
+}
+
+func (g *Game) impactFlashOpacity() uint8 {
+	remaining := g.impactFlashUntil - g.simulationTime
+	if remaining <= 0 {
+		return 0
+	}
+	return uint8(math.Round(96 * min(1, remaining/impactFlashDuration)))
+}
+
+func (g *Game) drawImpactFlash(screen *ebiten.Image) {
+	if opacity := g.impactFlashOpacity(); opacity > 0 {
+		vector.DrawFilledRect(screen, 0, 0, ScreenWidth, ScreenHeight, color.RGBA{R: 255, G: 32, B: 24, A: opacity}, false)
+	}
 }
 
 func (g *Game) updateShield(seconds float64) {
@@ -4508,12 +4613,21 @@ func navigationInputPressed() bool {
 func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	cyan := color.RGBA{R: 40, G: 255, B: 224, A: 255}
 	amber := color.RGBA{R: 255, G: 176, B: 32, A: 255}
+	layout := cockpit.Fallback()
+	if target := g.objectByID(g.viewCamera.TargetID); target != nil {
+		if candidate, ok := g.cockpitRegistry.ForDefinition(target.Definition); ok {
+			layout = candidate
+		}
+	}
+	g.drawCockpitWindshield(screen, layout.Windshield)
 	cx, cy, targetInRange := g.cockpitTarget()
 	g.drawShieldIndicator(screen)
-	g.drawSpeedIndicator(screen)
-	g.drawThreatIndicator(screen)
+	if layout.Definition == catalog.XWingName {
+		g.drawXWingDashboard(screen, xWingDashboardInstrumentColor)
+	} else {
+		g.drawSpeedIndicator(screen)
+	}
 	g.drawTargetableIndicator(screen)
-	g.drawMissionTargetingComputer(screen)
 	targetColor := color.Color(cyan)
 	if !targetInRange {
 		targetColor = amber
@@ -4534,15 +4648,6 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 
 	// Perspective wireframe cannons: red recessed housings surround three blue
 	// barrel rails, echoing the layered vector assemblies of the arcade cockpit.
-	layout, exists := g.cockpitRegistry.ForDefinition("builtin/tie-fighter")
-	if target := g.objectByID(g.viewCamera.TargetID); target != nil {
-		if candidate, ok := g.cockpitRegistry.ForDefinition(target.Definition); ok {
-			layout, exists = candidate, true
-		}
-	}
-	if !exists {
-		layout = cockpit.Fallback()
-	}
 	cannons := layout.Cannons
 	muzzleTops := make([][2]float32, len(cannons))
 	for index, cannon := range cannons {
@@ -4562,47 +4667,228 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	vector.StrokeLine(screen, muzzleTops[start+1][0], muzzleTops[start+1][1], cx+5, cy, 3, beamColor, true)
 }
 
-func (g *Game) drawMissionTargetingComputer(screen *ebiten.Image) {
-	if g.viewCamera.TargetID != fighterID || g.world == nil || g.world.Mission.ID != yavinMissionID || g.world.Mission.Phase == sim.MissionInactive {
-		return
-	}
-	const left, top, width, height = float32(305), float32(474), float32(350), float32(42)
-	computerColor := color.RGBA{R: 64, G: 180, B: 176, A: 190}
-	mission := g.world.Mission
-	var computerPath vector.Path
-	for _, line := range [][4]float32{
-		{left, top, left + width, top}, {left + width, top, left + width, top + height},
-		{left + width, top + height, left, top + height}, {left, top + height, left, top},
-	} {
-		computerPath.MoveTo(line[0], line[1])
-		computerPath.LineTo(line[2], line[3])
-	}
-	status := fmt.Sprintf("%s  T%d", mission.Phase.String(), g.torpedoesRemaining)
-	if mission.Phase == sim.MissionExhaustPortAttack {
-		if readiness := g.exhaustPortReadiness(); readiness == "" {
-			status = "TORPEDO LOCK READY"
-		} else {
-			status = missionFeedbackText(readiness)
+func (g *Game) drawCockpitWindshield(screen *ebiten.Image, windshield cockpit.Windshield) {
+	if windshield.OpaqueColor.A > 0 {
+		for _, polygon := range windshield.OpaquePolygons {
+			g.drawCockpitOpaqueMask(screen, polygon, windshield.OpaqueColor)
 		}
-	} else if mission.Phase == sim.MissionEscape {
-		status = fmt.Sprintf("ESCAPE %02d", int(math.Ceil(g.escapeSecondsRemaining())))
-	} else if feedback := missionFeedbackText(mission.Reason); feedback != "" {
-		status = feedback
 	}
-	appendVectorTextPath(&computerPath, left+width/2-18, top+15, status)
-	computerDraw := &vector.DrawPathOptions{AntiAlias: true}
-	computerDraw.ColorScale.ScaleWithColor(computerColor)
-	vector.StrokePath(screen, &computerPath, &vector.StrokeOptions{Width: 1.5}, computerDraw)
-	target, ok := g.missionObjectiveTarget()
-	if !ok {
+	if windshield.OpaqueOutlineColor.A > 0 && windshield.OpaqueOutlineWidth > 0 {
+		for _, segment := range windshield.OpaqueOutlineSegments {
+			vector.StrokeLine(
+				screen,
+				segment.FromX*ScreenWidth, segment.FromY*ScreenHeight,
+				segment.ToX*ScreenWidth, segment.ToY*ScreenHeight,
+				windshield.OpaqueOutlineWidth, windshield.OpaqueOutlineColor, true,
+			)
+		}
+	}
+	for _, segment := range windshield.Segments {
+		if windshield.LineWidth <= 0 || windshield.Color.A == 0 {
+			break
+		}
+		vector.StrokeLine(
+			screen,
+			segment.FromX*ScreenWidth, segment.FromY*ScreenHeight,
+			segment.ToX*ScreenWidth, segment.ToY*ScreenHeight,
+			windshield.LineWidth, windshield.Color, true,
+		)
+	}
+	for _, segment := range windshield.InstrumentSegments {
+		if windshield.InstrumentLineWidth <= 0 || windshield.InstrumentColor.A == 0 {
+			break
+		}
+		vector.StrokeLine(
+			screen,
+			segment.FromX*ScreenWidth, segment.FromY*ScreenHeight,
+			segment.ToX*ScreenWidth, segment.ToY*ScreenHeight,
+			windshield.InstrumentLineWidth, windshield.InstrumentColor, true,
+		)
+	}
+}
+
+// drawCockpitOpaqueMask fills one closed cockpit contour on an isolated mask and
+// composites it afterward. This keeps concave outlines independent from world
+// rendering and from any other cockpit artwork.
+func (g *Game) drawCockpitOpaqueMask(screen *ebiten.Image, polygon cockpit.FramePolygon, fillColor color.RGBA) {
+	if len(polygon.Points) < 3 {
 		return
 	}
-	directionX, directionY := objectiveArrowDirection(g.pipeline.View.TransformPoint(target))
-	arrowX, arrowY := left+width-24, top+height/2
-	red := color.RGBA{R: 224, G: 58, B: 48, A: 175}
-	drawCockpitArrow(screen,
-		arrowX-float32(directionX)*7, arrowY-float32(directionY)*7,
-		arrowX+float32(directionX)*11, arrowY+float32(directionY)*11, red)
+	if g.cockpitMask == nil || g.cockpitMask.Bounds().Dx() != ScreenWidth || g.cockpitMask.Bounds().Dy() != ScreenHeight {
+		g.cockpitMask = ebiten.NewImage(ScreenWidth, ScreenHeight)
+	}
+	g.cockpitMask.Clear()
+	var path vector.Path
+	for index, point := range polygon.Points {
+		x, y := point.X*ScreenWidth, point.Y*ScreenHeight
+		if index == 0 {
+			path.MoveTo(x, y)
+		} else {
+			path.LineTo(x, y)
+		}
+	}
+	path.Close()
+	draw := &vector.DrawPathOptions{AntiAlias: true}
+	draw.ColorScale.ScaleWithColor(fillColor)
+	vector.FillPath(g.cockpitMask, &path, nil, draw)
+	// Using the mask as a source flushes its single vector fill before the mask
+	// is composited. No other path can affect this closed opaque region.
+	screen.DrawImage(g.cockpitMask, nil)
+}
+
+// drawMissionDirector keeps the next required player action visible in every
+// camera mode. The cockpit targeting computer remains the precise guidance
+// display; this compact panel is the readable mission-level instruction for a
+// first Cadet run, including when the player briefly follows another fighter.
+func (g *Game) drawMissionDirector(screen *ebiten.Image) {
+	if g.flow != flowPlaying || g.world == nil || g.world.Mission.ID != yavinMissionID {
+		return
+	}
+	mission := g.world.Mission
+	if mission.Phase == sim.MissionInactive || mission.Phase == sim.MissionSucceeded || mission.Phase == sim.MissionFailed {
+		return
+	}
+	g.drawMissionDeadline(screen, mission)
+	opacity := missionDirectorOpacity(g.missionPhaseElapsed(mission))
+	title, detail := missionPhaseDirective(mission.Phase)
+	primary := color.RGBA{R: 64, G: 220, B: 255, A: 255}
+	detailColor := color.RGBA{R: 128, G: 232, B: 208, A: 255}
+	if mission.Phase == sim.MissionExhaustPortAttack {
+		primary = color.RGBA{R: 255, G: 208, B: 48, A: 255}
+		if readiness := g.exhaustPortReadiness(); readiness == "" {
+			detail = "TORPEDO LOCK READY - PRESS T"
+		} else {
+			detail = missionFeedbackText(readiness)
+		}
+	}
+	if mission.Phase == sim.MissionEscape {
+		primary = color.RGBA{R: 255, G: 112, B: 64, A: 255}
+		detail = fmt.Sprintf("CLEAR THE BLAST - %02d SECONDS", int(math.Ceil(g.escapeSecondsRemaining())))
+	}
+	if feedback, active := g.activeCombatFeedback(); active {
+		detail, detailColor = feedback, g.combatFeedbackColor
+		opacity = 1
+	}
+	if opacity <= 0 {
+		return
+	}
+	primary, detailColor = withOpacity(primary, opacity), withOpacity(detailColor, opacity)
+	crawl := missionDirectorCrawlProgress(g.missionPhaseElapsed(mission))
+	if _, active := g.activeCombatFeedback(); active {
+		// A fresh combat confirmation starts at the readable end of the same
+		// crawl instead of inheriting an older objective's distance.
+		crawl = 0
+	}
+	drawMissionDirectorCrawl(screen, title, detail, crawl, primary, detailColor)
+}
+
+func (g *Game) drawMissionDeadline(screen *ebiten.Image, mission sim.MissionState) {
+	if g.xWingDashboardActive() {
+		return
+	}
+	_, deadline := yavinMissionDeadline(mission)
+	if deadline == 0 || g.world == nil {
+		return
+	}
+	seconds := 0
+	if g.world.Tick < deadline && g.profile.Simulation.TickSeconds > 0 {
+		seconds = int(math.Ceil(float64(deadline-g.world.Tick) * g.profile.Simulation.TickSeconds))
+	}
+	clockColor := color.RGBA{R: 64, G: 220, B: 255, A: 255}
+	if seconds <= 10 {
+		clockColor = color.RGBA{R: 255, G: 80, B: 64, A: 255}
+	}
+	drawVectorText(screen, float32(ScreenWidth-42), 28, fmt.Sprintf("%02d:%02d", seconds/60, seconds%60), clockColor)
+}
+
+func (g *Game) xWingDashboardActive() bool {
+	if g.viewCamera.Mode != camera.Cockpit {
+		return false
+	}
+	target := g.objectByID(g.viewCamera.TargetID)
+	return target != nil && target.Definition == catalog.XWingName
+}
+
+func yavinMissionDeadline(mission sim.MissionState) (string, uint64) {
+	switch mission.Phase {
+	case sim.MissionOrbitalBattle, sim.MissionApproach:
+		return "ASSAULT CLOCK", mission.Progress.ApproachDeadlineTick
+	case sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack:
+		return "ATTACK CLOCK", mission.Progress.AssaultDeadlineTick
+	default:
+		return "", 0
+	}
+}
+
+func (g *Game) missionPhaseElapsed(mission sim.MissionState) float64 {
+	if g.world == nil || g.profile.Simulation.TickSeconds <= 0 || g.world.Tick < mission.PhaseStartedTick {
+		return 0
+	}
+	return float64(g.world.Tick-mission.PhaseStartedTick) * g.profile.Simulation.TickSeconds
+}
+
+func missionDirectorOpacity(elapsed float64) float64 {
+	if elapsed <= missionDirectorVisibleSeconds {
+		return 1
+	}
+	if elapsed >= missionDirectorVisibleSeconds+missionDirectorFadeSeconds {
+		return 0
+	}
+	return 1 - (elapsed-missionDirectorVisibleSeconds)/missionDirectorFadeSeconds
+}
+
+func missionDirectorCrawlProgress(elapsed float64) float64 {
+	return max(0, min(1, elapsed/(missionDirectorVisibleSeconds+missionDirectorFadeSeconds)))
+}
+
+func withOpacity(value color.RGBA, opacity float64) color.RGBA {
+	value.A = uint8(math.Round(float64(value.A) * max(0, min(1, opacity))))
+	return value
+}
+
+// drawMissionDirectorCrawl projects the objective toward a screen-space
+// vanishing point. The shared vector glyphs shrink and drift upward together,
+// creating an original sparse vector homage to a receding title crawl without
+// introducing textures or a second text renderer.
+func drawMissionDirectorCrawl(screen *ebiten.Image, title, detail string, progress float64, titleColor, detailColor color.RGBA) {
+	const titleTop, detailTop = float32(128), float32(154)
+	scale := float32(1 - 0.82*max(0, min(1, progress)))
+	drawPerspectiveVectorText(screen, float32(ScreenWidth/2), titleTop, title, float32(missionDirectorVanishY), scale, titleColor)
+	drawPerspectiveVectorText(screen, float32(ScreenWidth/2), detailTop, detail, float32(missionDirectorVanishY), scale, detailColor)
+}
+
+// missionPhaseDirective supplies action-oriented copy rather than exposing
+// internal phase names or transition reasons to the player.
+func missionPhaseDirective(phase sim.MissionPhase) (title, detail string) {
+	switch phase {
+	case sim.MissionOrbitalBattle:
+		return "BREAK THROUGH IMPERIAL DEFENCES", "ENGAGE FIGHTERS - CLOSE ON DEATH STAR"
+	case sim.MissionApproach:
+		return "APPROACH THE DEATH STAR", "FOLLOW THE GUIDANCE MARKER"
+	case sim.MissionSurfaceAssault:
+		return "FIND THE EXHAUST TRENCH", "FOLLOW GUIDANCE MARKER TO SURFACE"
+	case sim.MissionTrenchRun:
+		return "FLY THE TRENCH", "HOLD COURSE THROUGH THE CHECKPOINTS"
+	case sim.MissionExhaustPortAttack:
+		return "TARGET THE EXHAUST PORT", "LINE UP FOR A PROTON TORPEDO RUN"
+	case sim.MissionEscape:
+		return "ESCAPE THE BLAST", "LEAVE THE TRENCH AND BREAK AWAY"
+	default:
+		return "MISSION STATUS", "AWAITING ORDERS"
+	}
+}
+
+func (g *Game) setCombatFeedback(text string, lineColor color.RGBA) {
+	if text == "" {
+		return
+	}
+	g.combatFeedback = text
+	g.combatFeedbackColor = lineColor
+	g.combatFeedbackUntil = g.simulationTime + 1.35
+}
+
+func (g *Game) activeCombatFeedback() (string, bool) {
+	return g.combatFeedback, g.combatFeedback != "" && g.simulationTime < g.combatFeedbackUntil
 }
 
 func missionFeedbackText(reason string) string {
@@ -4723,6 +5009,173 @@ func (g *Game) drawSpeedIndicator(screen *ebiten.Image) {
 	mlgt := int(math.Round(fighter.Motion.Speed / g.profile.Player.Flight.MaxForward * 100))
 	color := color.RGBA{R: 64, G: 180, B: 160, A: 220}
 	drawVectorText(screen, 850, 505, fmt.Sprintf("SPD %03d MLGT", max(-99, min(999, mlgt))), color)
+}
+
+// drawXWingDashboard uses the opaque lower X-wing coaming for stable,
+// low-cost instrument art. Shield status deliberately remains in its original
+// top-of-screen position as a homage to the arcade presentation.
+func (g *Game) drawXWingDashboard(screen *ebiten.Image, instrumentColor color.RGBA) {
+	const (
+		top    = float32(414)
+		leftX  = float32(322)
+		radarX = float32(ScreenWidth / 2)
+		rightX = float32(638)
+	)
+
+	// Side readouts are deliberately unboxed so the targeting screen owns the
+	// dashboard's visual hierarchy.
+	drawVectorText(screen, leftX, top+9, "SPD", instrumentColor)
+	fighter := g.objectByID(fighterID)
+	mlgt := 0
+	if fighter != nil && g.profile.Player.Flight.MaxForward > 0 {
+		mlgt = int(math.Round(fighter.Motion.Speed / g.profile.Player.Flight.MaxForward * 100))
+	}
+	drawVectorText(screen, leftX, top+29, fmt.Sprintf("%03d", max(-99, min(999, mlgt))), instrumentColor)
+
+	// Centre: space flight uses a contact display; trench phases instead show
+	// the authored trench route and exhaust-port approach rails.
+	if g.xWingTrenchDisplayActive() {
+		g.drawXWingTrenchScreen(screen, radarX, 455, 108, 43)
+	} else {
+		g.drawXWingTargetingScreen(screen, radarX, 455, 108, 43, instrumentColor)
+	}
+
+	// A dash is shown outside a timed Yavin objective rather than leaving stale
+	// digits on the display.
+	drawVectorText(screen, rightX, top+9, "T", instrumentColor)
+	drawVectorText(screen, rightX, top+29, g.xWingDashboardCountdown(), instrumentColor)
+}
+
+func (g *Game) drawXWingTargetingScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32, lineColor color.RGBA) {
+	left, right := centerX-halfWidth, centerX+halfWidth
+	top, bottom := centerY-halfHeight, centerY+halfHeight
+	farHalfWidth, farHalfHeight := float32(27), float32(11)
+	farTop, farBottom := centerY-farHalfHeight, centerY+farHalfHeight
+	for _, line := range [][4]float32{
+		{left, top, right, top}, {right, top, right, bottom},
+		{right, bottom, left, bottom}, {left, bottom, left, top},
+		{left, top, centerX - farHalfWidth, farTop},
+		{right, top, centerX + farHalfWidth, farTop},
+		{right, bottom, centerX + farHalfWidth, farBottom},
+		{left, bottom, centerX - farHalfWidth, farBottom},
+		{centerX - farHalfWidth, farTop, centerX + farHalfWidth, farTop},
+		{centerX + farHalfWidth, farTop, centerX + farHalfWidth, farBottom},
+		{centerX + farHalfWidth, farBottom, centerX - farHalfWidth, farBottom},
+		{centerX - farHalfWidth, farBottom, centerX - farHalfWidth, farTop},
+	} {
+		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.25, lineColor, true)
+	}
+	for _, fraction := range []float32{.38, .68} {
+		leftX := left + (centerX-farHalfWidth-left)*fraction
+		rightX := right + (centerX+farHalfWidth-right)*fraction
+		y := top + (centerY-top)*fraction
+		vector.StrokeLine(screen, leftX, y, rightX, y, 1, lineColor, true)
+		vector.StrokeLine(screen, leftX, 2*centerY-y, rightX, 2*centerY-y, 1, lineColor, true)
+	}
+	vector.DrawFilledCircle(screen, centerX, centerY, 3, lineColor, true)
+	vector.StrokeLine(screen, centerX-8, centerY, centerX+8, centerY, 1, lineColor, true)
+	vector.StrokeLine(screen, centerX, centerY-8, centerX, centerY+8, 1, lineColor, true)
+
+	player := g.objectByID(fighterID)
+	if player == nil {
+		return
+	}
+	const scanRange = 80.0
+	for _, object := range g.objects {
+		if object.ID == player.ID || !object.Targetable || !sameFrame(*player, object) {
+			continue
+		}
+		relative := kinematics.Relative(player.Pose, object.Pose).Position
+		distance := math.Hypot(relative.X, relative.Z)
+		if distance > scanRange {
+			continue
+		}
+		contactColor := color.RGBA{R: 88, G: 196, B: 224, A: 255}
+		if object.Team != player.Team {
+			contactColor = color.RGBA{R: 255, G: 112, B: 48, A: 255}
+		}
+		vector.DrawFilledCircle(screen,
+			centerX+float32(relative.X/scanRange)*(halfWidth-8),
+			centerY-float32(relative.Z/scanRange)*(halfHeight-7),
+			2, contactColor, true)
+	}
+}
+
+func (g *Game) xWingTrenchDisplayActive() bool {
+	if g.world == nil {
+		return false
+	}
+	switch g.world.Mission.Phase {
+	case sim.MissionTrenchRun, sim.MissionExhaustPortAttack:
+		return true
+	default:
+		return false
+	}
+}
+
+// drawXWingTrenchScreen is deliberately schematic: its yellow perspective
+// grid communicates the fixed trench corridor, while red rails give a single
+// unmistakable cue that tightens as the real exhaust port gets nearer.
+func (g *Game) drawXWingTrenchScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32) {
+	yellow := color.RGBA{R: 255, G: 216, B: 48, A: 255}
+	red := color.RGBA{R: 255, G: 64, B: 48, A: 255}
+	left, right := centerX-halfWidth, centerX+halfWidth
+	top, bottom := centerY-halfHeight, centerY+halfHeight
+	farHalfWidth := float32(30)
+	farY := top + 10
+	for _, line := range [][4]float32{
+		{left, top, right, top}, {right, top, right, bottom},
+		{right, bottom, left, bottom}, {left, bottom, left, top},
+	} {
+		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.25, yellow, true)
+	}
+	for _, lane := range []float32{-1, -.5, 0, .5, 1} {
+		vector.StrokeLine(screen,
+			centerX+lane*halfWidth, bottom,
+			centerX+lane*farHalfWidth, farY,
+			1, yellow, true)
+	}
+	for _, fraction := range []float32{.18, .38, .60, .82} {
+		y := bottom - (bottom-farY)*fraction
+		half := halfWidth + (farHalfWidth-halfWidth)*fraction
+		vector.StrokeLine(screen, centerX-half, y, centerX+half, y, 1, yellow, true)
+	}
+
+	distance := g.xWingExhaustPortDistance()
+	halfRail := trenchTargetRailHalfSpan(distance)
+	vector.StrokeLine(screen, centerX-halfRail, top+7, centerX-halfRail, bottom-7, 2, red, true)
+	vector.StrokeLine(screen, centerX+halfRail, top+7, centerX+halfRail, bottom-7, 2, red, true)
+	vector.StrokeLine(screen, centerX-halfRail-5, centerY, centerX-halfRail+3, centerY, 1, red, true)
+	vector.StrokeLine(screen, centerX+halfRail-3, centerY, centerX+halfRail+5, centerY, 1, red, true)
+}
+
+func (g *Game) xWingExhaustPortDistance() float64 {
+	player := g.objectByID(fighterID)
+	if player == nil || normalizedObjectFrame(*player) != environment.DeathStarTrenchFrame {
+		return math.Inf(1)
+	}
+	return player.Pose.Position.Sub(environment.DeathStarExhaustPortPoint()).Length()
+}
+
+func trenchTargetRailHalfSpan(distance float64) float32 {
+	const approachRange = 260.0
+	progress := 1 - min(1, max(0, distance/approachRange))
+	return float32(31 - 22*progress)
+}
+
+func (g *Game) xWingDashboardCountdown() string {
+	if g.world == nil {
+		return "--:--"
+	}
+	_, deadline := yavinMissionDeadline(g.world.Mission)
+	if deadline == 0 || g.profile.Simulation.TickSeconds <= 0 {
+		return "--:--"
+	}
+	seconds := 0
+	if g.world.Tick < deadline {
+		seconds = int(math.Ceil(float64(deadline-g.world.Tick) * g.profile.Simulation.TickSeconds))
+	}
+	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
 }
 
 func (g *Game) drawTargetableIndicator(screen *ebiten.Image) {
@@ -4882,6 +5335,14 @@ func drawVectorText(screen *ebiten.Image, centerX, topY float32, text string, li
 	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: 2}, draw)
 }
 
+func drawPerspectiveVectorText(screen *ebiten.Image, centerX, topY float32, text string, vanishY, scale float32, lineColor color.Color) {
+	var path vector.Path
+	appendPerspectiveVectorTextPath(&path, centerX, topY, text, vanishY, scale)
+	draw := &vector.DrawPathOptions{AntiAlias: true}
+	draw.ColorScale.ScaleWithColor(lineColor)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: max(.65, 2*scale)}, draw)
+}
+
 func appendVectorTextPath(path *vector.Path, centerX, topY float32, text string) {
 	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
 	total := float32(0)
@@ -4901,6 +5362,72 @@ func appendVectorTextPath(path *vector.Path, centerX, topY float32, text string)
 		appendVectorGlyphPath(path, left, topY, letter)
 		left += glyphWidth + glyphGap
 	}
+}
+
+func appendPerspectiveVectorTextPath(path *vector.Path, centerX, topY float32, text string, vanishY, scale float32) {
+	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
+	total := float32(0)
+	for _, letter := range text {
+		if letter == ' ' {
+			total += spaceWidth + glyphGap
+		} else {
+			total += glyphWidth + glyphGap
+		}
+	}
+	left := centerX - (total-glyphGap)/2
+	for _, letter := range text {
+		if letter == ' ' {
+			left += spaceWidth + glyphGap
+			continue
+		}
+		appendPerspectiveVectorGlyphPath(path, left, topY, letter, centerX, vanishY, scale)
+		left += glyphWidth + glyphGap
+	}
+}
+
+func appendPerspectiveVectorGlyphPath(path *vector.Path, left, top float32, letter rune, centerX, vanishY, scale float32) {
+	project := func(x, y float32) (float32, float32) {
+		return centerX + (x-centerX)*scale, vanishY + (y-vanishY)*scale
+	}
+	appendSegment := func(segment [4]float32) {
+		x1, y1 := project(left+segment[0], top+segment[1])
+		x2, y2 := project(left+segment[2], top+segment[3])
+		path.MoveTo(x1, y1)
+		path.LineTo(x2, y2)
+	}
+	if letter >= '0' && letter <= '9' {
+		for _, segment := range vectorDigitPathSegments(left, top, int(letter-'0')) {
+			appendSegment(segment)
+		}
+		return
+	}
+	for _, segment := range vectorGlyphSegments[letter] {
+		appendSegment(segment)
+	}
+}
+
+func vectorDigitPathSegments(left, top float32, value int) [][4]float32 {
+	const width, height = float32(9), float32(14)
+	segments := [...][4]float32{
+		{left + 1.5, top, left + width - 1.5, top},
+		{left + width, top + 1.5, left + width, top + height/2 - 1.5},
+		{left + width, top + height/2 + 1.5, left + width, top + height - 1.5},
+		{left + 1.5, top + height, left + width - 1.5, top + height},
+		{left, top + height/2 + 1.5, left, top + height - 1.5},
+		{left, top + 1.5, left, top + height/2 - 1.5},
+		{left + 1.5, top + height/2, left + width - 1.5, top + height/2},
+	}
+	if value < 0 || value > 9 {
+		return nil
+	}
+	mask := [...]uint8{0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f}[value]
+	result := make([][4]float32, 0, len(segments))
+	for index, segment := range segments {
+		if mask&(1<<index) != 0 {
+			result = append(result, segment)
+		}
+	}
+	return result
 }
 
 func drawVectorGlyph(screen *ebiten.Image, left, top float32, letter rune, lineColor color.Color) {
@@ -4943,6 +5470,7 @@ var vectorGlyphSegments = map[rune][][4]float32{
 	'+': {{4, 2, 4, 8}, {1, 5, 7, 5}},
 	':': {{4, 2, 4, 3}, {4, 8, 4, 9}},
 	'!': {{4, 0, 4, 7}, {4, 10, 4, 10}},
+	'-': {{1, 5, 7, 5}},
 }
 
 func appendVectorGlyphPath(path *vector.Path, left, top float32, letter rune) {
@@ -5503,6 +6031,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
 	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
+	g.drawImpactFlash(screen)
 	if g.telemetry != nil {
 		overlayStarted := time.Now()
 		defer func() { timings.overlays = time.Since(overlayStarted) }()
@@ -5510,6 +6039,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.viewCamera.Mode == camera.Cockpit {
 		g.drawCockpitOverlay(screen)
 	}
+	g.drawMissionDirector(screen)
 	if g.mouseFlight {
 		g.drawMouseReticle(screen)
 	}

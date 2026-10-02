@@ -24,6 +24,14 @@ func TestDefaultRegistryCreatesLifecycleObjects(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryCreatesTIEWreckageWheelForShowcase(t *testing.T) {
+	wheel, err := DefaultRegistry().Create(TIEWreckageWheelName, 4, kinematics.Pose{})
+	if err != nil || wheel.Definition != TIEWreckageWheelName || wheel.Name != "TIE fighter wreckage wheel" ||
+		len(wheel.Parts) != 1 || !wheel.Parts[0].Surface.Opaque() || !wheel.Parts[0].SelfOccluding {
+		t.Fatalf("create TIE wreckage wheel: %v, object=%+v", err, wheel)
+	}
+}
+
 func TestDefaultRegistryCreatesXWingLifecycleObjects(t *testing.T) {
 	r := DefaultRegistry()
 	object, err := r.Create(XWingName, 10, kinematics.Pose{})
