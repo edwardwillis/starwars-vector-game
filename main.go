@@ -15,12 +15,22 @@ func main() {
 	telemetryPath := flag.String("telemetry", "", "write one-second development telemetry samples to this CSV file")
 	recordingPath := flag.String("record", "", "record a canonical Yavin surface-development input trace to this JSON file")
 	recordingTicks := flag.Uint64("record-ticks", 60*60, "active simulation ticks to record (0 records until clean exit)")
+	replayPath := flag.String("replay", "", "replay a completed canonical Yavin surface-development input trace")
 	flag.Parse()
-	selected, err := profile.Builtin(*profileName)
-	if err != nil {
-		log.Fatal(err)
+	if *recordingPath != "" && *replayPath != "" {
+		log.Fatal("-record and -replay cannot be used together")
 	}
-	runningGame, err := game.NewWithProfile(selected)
+	var runningGame *game.Game
+	var err error
+	if *replayPath != "" {
+		runningGame, err = game.NewReplay(*replayPath)
+	} else {
+		selected, profileErr := profile.Builtin(*profileName)
+		if profileErr != nil {
+			log.Fatal(profileErr)
+		}
+		runningGame, err = game.NewWithProfile(selected)
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -38,6 +48,9 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("recording %d active simulation ticks to %s", *recordingTicks, *recordingPath)
+	}
+	if *replayPath != "" {
+		log.Printf("replaying %s", *replayPath)
 	}
 
 	ebiten.SetWindowSize(game.ScreenWidth, game.ScreenHeight)
@@ -57,6 +70,14 @@ func main() {
 	if *recordingPath != "" {
 		if err := runningGame.CloseRecording(); err != nil {
 			log.Printf("close recording: %v", err)
+		}
+	}
+	if *replayPath != "" {
+		ticks, complete, aborted := runningGame.ReplayStatus()
+		if aborted {
+			log.Printf("replay aborted after %d ticks", ticks)
+		} else if complete {
+			log.Printf("replay completed after %d ticks", ticks)
 		}
 	}
 	if runErr != nil {

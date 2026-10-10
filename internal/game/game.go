@@ -1084,6 +1084,7 @@ type Game struct {
 	telemetryUpdateDuration  time.Duration
 	telemetryUpdateCalls     int
 	recording                *gameplayRecorder
+	replay                   *gameplayReplay
 }
 
 var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
@@ -1376,7 +1377,7 @@ func (g *Game) SetTelemetryRecorder(recorder *telemetry.Recorder) {
 // simulation ticks. The recording is published only when CloseRecording is
 // called successfully.
 func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
-	if g.recording != nil {
+	if g.recording != nil || g.replay != nil {
 		return fmt.Errorf("gameplay recording is already active")
 	}
 	if g.flow != flowTitle {
@@ -1411,6 +1412,42 @@ func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
 	return nil
 }
 
+// NewReplay reconstructs the canonical Yavin surface-development session from
+// a completed recording and prepares it to consume recorded inputs. It never
+// samples live gameplay controls.
+func NewReplay(path string) (*Game, error) {
+	recording, err := readGameplayRecording(recordingPath(path))
+	if err != nil {
+		return nil, err
+	}
+	replay, err := newGameplayReplay(recording)
+	if err != nil {
+		return nil, err
+	}
+	game, err := NewWithProfile(recording.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct replay profile: %w", err)
+	}
+	game.selectedMission = 0
+	if err := game.launchYavinSession(true); err != nil {
+		return nil, fmt.Errorf("reconstruct replay session: %w", err)
+	}
+	game.viewCamera.Mode = camera.Cockpit
+	game.viewCamera.TargetID = fighterID
+	game.setRealismLevel(recording.InitialRealism)
+	game.replay = replay
+	return game, nil
+}
+
+// ReplayStatus reports the current playback cursor without exposing the
+// recording's mutable implementation details.
+func (g *Game) ReplayStatus() (ticks uint64, complete, aborted bool) {
+	if g.replay == nil {
+		return 0, false, false
+	}
+	return g.replay.cursor, g.replay.cursor == g.replay.recording.TotalTicks, g.replay.aborted
+}
+
 // CloseRecording finalizes an active recording. It is safe to call after a
 // bounded recording has already stopped the game loop.
 func (g *Game) CloseRecording() error {
@@ -1424,17 +1461,39 @@ func (g *Game) recordGameplayInput(input gameplayInput) bool {
 	return g.recording != nil && g.recording.Capture(input)
 }
 
+func (g *Game) gameplayInputForTick() (gameplayInput, bool) {
+	if g.replay == nil {
+		return g.readGameplayInput(), true
+	}
+	return g.replay.Current()
+}
+
+func (g *Game) completeGameplayTick(input gameplayInput) (bool, error) {
+	if g.replay == nil {
+		return g.recordGameplayInput(input), nil
+	}
+	if g.flow != flowPlaying && g.replay.remainingAfterCurrent() > 0 {
+		return false, fmt.Errorf("replay mission ended after %d of %d recorded ticks", g.replay.cursor+1, g.replay.recording.TotalTicks)
+	}
+	return g.replay.Advance(), nil
+}
+
 func (g *Game) Update() error {
 	if g.telemetry != nil {
 		updateStarted := time.Now()
 		defer func() { g.recordTelemetryUpdate(time.Since(updateStarted)) }()
 	}
 	seconds := g.profile.Simulation.TickSeconds
-	questionPressed := questionKeyJustPressed()
+	replaying := g.replay != nil
+	if replaying && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		g.replay.aborted = true
+		return ebiten.Termination
+	}
+	questionPressed := !replaying && questionKeyJustPressed()
 	if questionPressed {
 		g.toggleControls()
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyC) || (g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape)) {
+	if !replaying && (inpututil.IsKeyJustPressed(ebiten.KeyC) || (g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape))) {
 		g.showcaseActive = !g.showcaseActive
 		g.showcaseTime = 0
 		if g.showcaseActive {
@@ -1446,7 +1505,7 @@ func (g *Game) Update() error {
 			g.viewCamera.Mode = g.showcasePreviousMode
 		}
 	}
-	if !g.showcaseActive && g.quitPrompt {
+	if !replaying && !g.showcaseActive && g.quitPrompt {
 		if inpututil.IsKeyJustPressed(ebiten.KeyY) {
 			return ebiten.Termination
 		}
@@ -1461,13 +1520,13 @@ func (g *Game) Update() error {
 		g.refreshViewContext()
 		return nil
 	}
-	if !g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+	if !replaying && !g.showcaseActive && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
 		g.paused = true
 		g.quitPrompt = true
 		g.refreshViewContext()
 		return nil
 	}
-	if g.showcaseActive {
+	if !replaying && g.showcaseActive {
 		g.handleRealismSliderClick()
 		if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
 			g.showcaseRotating = !g.showcaseRotating
@@ -1527,25 +1586,41 @@ func (g *Game) Update() error {
 		return err
 	}
 	g.updateControls(seconds)
-	input := g.readGameplayInput()
+	input, hasInput := g.gameplayInputForTick()
+	if !hasInput {
+		return ebiten.Termination
+	}
 	g.applyGameplayModeToggle(input)
-	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
+	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeyP) {
 		g.paused = !g.paused
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeySpace) {
 		g.showHUD = !g.showHUD
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyBracketLeft) {
+	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeyBracketLeft) {
 		g.setRealismLevel(g.realismLevel - 1)
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
+	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
 		g.setRealismLevel(g.realismLevel + 1)
 	}
 	g.applyGameplayReset(input)
-	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
+	// A reset immediately starts the hyperspace-arrival presentation and so
+	// does not reach the normal world-step completion point below. Preserve the
+	// command as its own recorded/replayed input entry before that presentation
+	// begins; otherwise a replay would have no way to reproduce the reset.
+	if input.ResetFighter {
+		stopAfterReset, completionErr := g.completeGameplayTick(input)
+		if completionErr != nil {
+			return completionErr
+		}
+		if stopAfterReset {
+			return ebiten.Termination
+		}
+	}
+	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeyV) {
 		g.viewCamera.Cycle()
 	}
-	if !questionPressed && (inpututil.IsKeyJustPressed(ebiten.KeyShiftLeft) || inpututil.IsKeyJustPressed(ebiten.KeyShiftRight)) && len(g.controllers) > 0 {
+	if !replaying && !questionPressed && (inpututil.IsKeyJustPressed(ebiten.KeyShiftLeft) || inpututil.IsKeyJustPressed(ebiten.KeyShiftRight)) && len(g.controllers) > 0 {
 		g.switchToRandomSwarmFollowView()
 	}
 	g.applyGameplayControlModes(input)
@@ -1573,7 +1648,11 @@ func (g *Game) Update() error {
 				return err
 			}
 			g.enterTerminalMissionFlow()
-			stopAfterTick = g.recordGameplayInput(input)
+			var completionErr error
+			stopAfterTick, completionErr = g.completeGameplayTick(input)
+			if completionErr != nil {
+				return completionErr
+			}
 		}
 		g.refreshTransitionEnvironmentTiles()
 		g.refreshViewContext()
@@ -1583,7 +1662,9 @@ func (g *Game) Update() error {
 		return nil
 	}
 
-	g.updateZoom()
+	if !replaying {
+		g.updateZoom()
+	}
 	g.laserBeamTime = max(0, g.laserBeamTime-seconds)
 	g.applyGameplayFlightInput(input, seconds)
 	if g.paused {
@@ -1605,7 +1686,7 @@ func (g *Game) Update() error {
 	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	g.torpedoCooldown = max(0, g.torpedoCooldown-seconds)
 	g.applyGameplayTorpedo(input)
-	if input.FireLaser {
+	if !replaying && input.FireLaser {
 		if g.showHUD && g.handleRealismSliderClick() {
 			g.refreshViewContext()
 			return nil
@@ -1648,7 +1729,11 @@ func (g *Game) Update() error {
 	}
 	g.viewCamera.Update(seconds)
 	g.refreshViewContext()
-	if g.recordGameplayInput(input) {
+	stopAfterTick, err := g.completeGameplayTick(input)
+	if err != nil {
+		return err
+	}
+	if stopAfterTick {
 		return ebiten.Termination
 	}
 	return nil

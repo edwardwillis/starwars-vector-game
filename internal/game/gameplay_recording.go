@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 
@@ -49,6 +50,14 @@ type gameplayRecorder struct {
 	closed    bool
 }
 
+// gameplayReplay owns the immutable input stream and its cursor. It has no
+// knowledge of live Ebitengine input, rendering, or craft-specific behaviour.
+type gameplayReplay struct {
+	recording gameplayRecording
+	cursor    uint64
+	aborted   bool
+}
+
 func newGameplayRecorder(path string, maxTicks uint64, recording gameplayRecording) (*gameplayRecorder, error) {
 	if path == "" {
 		return nil, fmt.Errorf("recording path is empty")
@@ -64,6 +73,8 @@ func newGameplayRecorder(path string, maxTicks uint64, recording gameplayRecordi
 	}
 	tempPath := path + ".partial"
 	recording.Inputs = make([]gameplayInput, 0, initialRecordingCapacity(maxTicks))
+	recording.TotalTicks = 0
+	recording.Complete = false
 	return &gameplayRecorder{path: path, tempPath: tempPath, maxTicks: maxTicks, recording: recording}, nil
 }
 
@@ -162,6 +173,94 @@ func readGameplayRecording(path string) (gameplayRecording, error) {
 		return gameplayRecording{}, fmt.Errorf("recording tick count %d does not match %d inputs", recording.TotalTicks, len(recording.Inputs))
 	}
 	return recording, nil
+}
+
+func validateReplayRecording(recording gameplayRecording) error {
+	if recording.FormatVersion != gameplayRecordingFormatVersion {
+		return fmt.Errorf("replay format version %d is unsupported", recording.FormatVersion)
+	}
+	if !recording.Complete {
+		return fmt.Errorf("replay recording is incomplete")
+	}
+	if recording.TotalTicks != uint64(len(recording.Inputs)) {
+		return fmt.Errorf("replay tick count %d does not match %d inputs", recording.TotalTicks, len(recording.Inputs))
+	}
+	if recording.Mission != yavinMissionID {
+		return fmt.Errorf("replay mission %q is unsupported", recording.Mission)
+	}
+	if recording.StartMode != surfaceDevelopmentRecordingStart {
+		return fmt.Errorf("replay start mode %q is unsupported", recording.StartMode)
+	}
+	if err := recording.Profile.Validate(); err != nil {
+		return fmt.Errorf("replay profile is invalid: %w", err)
+	}
+	if math.Abs(recording.TickSeconds-recording.Profile.Simulation.TickSeconds) > 1e-12 {
+		return fmt.Errorf("replay tick duration %.12f does not match profile duration %.12f", recording.TickSeconds, recording.Profile.Simulation.TickSeconds)
+	}
+	if recording.InitialView != camera.Cockpit.String() || recording.InitialTarget != fighterID {
+		return fmt.Errorf("replay requires the canonical cockpit view of fighter %d", fighterID)
+	}
+	if recording.InitialRealism < 0 || recording.InitialRealism >= len(renderingProfiles) {
+		return fmt.Errorf("replay realism level %d is out of range", recording.InitialRealism)
+	}
+	for tick, input := range recording.Inputs {
+		if err := validateGameplayInput(input); err != nil {
+			return fmt.Errorf("replay input tick %d is invalid: %w", tick, err)
+		}
+	}
+	return nil
+}
+
+func validateGameplayInput(input gameplayInput) error {
+	values := []struct {
+		name  string
+		value float64
+	}{
+		{"flight throttle", input.Flight.Throttle},
+		{"flight yaw", input.Flight.Yaw},
+		{"flight pitch", input.Flight.Pitch},
+		{"flight roll", input.Flight.Roll},
+		{"cockpit yaw", input.CockpitSteering.Yaw},
+		{"cockpit pitch", input.CockpitSteering.Pitch},
+		{"cockpit throttle", input.CockpitSteering.Throttle},
+		{"cockpit roll", input.CockpitSteering.Roll},
+	}
+	for _, entry := range values {
+		name, value := entry.name, entry.value
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < -1 || value > 1 {
+			return fmt.Errorf("%s %.6g is outside [-1, 1]", name, value)
+		}
+	}
+	return nil
+}
+
+func newGameplayReplay(recording gameplayRecording) (*gameplayReplay, error) {
+	if err := validateReplayRecording(recording); err != nil {
+		return nil, err
+	}
+	return &gameplayReplay{recording: recording}, nil
+}
+
+func (replay *gameplayReplay) Current() (gameplayInput, bool) {
+	if replay == nil || replay.cursor >= replay.recording.TotalTicks {
+		return gameplayInput{}, false
+	}
+	return replay.recording.Inputs[replay.cursor], true
+}
+
+func (replay *gameplayReplay) Advance() bool {
+	if replay == nil || replay.cursor >= replay.recording.TotalTicks {
+		return true
+	}
+	replay.cursor++
+	return replay.cursor == replay.recording.TotalTicks
+}
+
+func (replay *gameplayReplay) remainingAfterCurrent() uint64 {
+	if replay == nil || replay.cursor >= replay.recording.TotalTicks {
+		return 0
+	}
+	return replay.recording.TotalTicks - replay.cursor - 1
 }
 
 func recordingView(mode camera.Mode) string {
