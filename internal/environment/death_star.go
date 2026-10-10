@@ -22,16 +22,25 @@ const (
 	deathStarGridLines         = 8
 	trenchTileX                = 0
 	trenchFirstTileZ           = -1
-	trenchLastTileZ            = 2
+	// The port occupies the penultimate physical tile.  The final tile is a
+	// deliberate escape lane: after a successful shot the player has room to
+	// climb above the deck instead of having to pull up inside the few units
+	// between the port and an end wall.
+	trenchPortTileZ            = 2
+	trenchLastTileZ            = 3
 	deathStarTrenchHalf        = 14.0
 	deathStarTrenchDepth       = 14.0
+	deathStarAttackGateZ       = 108.0
+	deathStarFiringRange       = 40.0
 )
 
 var deathStarTrenchRoute = [...]float64{
 	float64(trenchFirstTileZ)*deathStarTileSize + deathStarTileSize/2 - 4,
 	0.5 * deathStarTileSize,
-	float64(trenchLastTileZ)*deathStarTileSize - deathStarTileSize/2 + 4,
-	float64(trenchLastTileZ)*deathStarTileSize + deathStarTileSize/2 - 20,
+	// This gate opens the attack run well before the port. It leaves enough
+	// distance both to establish the downward torpedo solution and to begin a
+	// safe climb after the hit.
+	deathStarAttackGateZ,
 }
 
 type DeathStarMissionRegion uint8
@@ -50,9 +59,9 @@ func DeathStarRegion(position math3d.Vec3) DeathStarMissionRegion {
 	if math.Abs(position.X) > deathStarTrenchHalf || position.Y > 0 || position.Z < start || position.Z > end {
 		return DeathStarSurfaceRegion
 	}
-	// The terminal tile begins the deliberate attack run. The actual port hit
-	// remains a later weapon/objective validation, not a positional shortcut.
-	attackStart := (float64(trenchLastTileZ) - 0.5) * deathStarTileSize
+	// The attack run starts before the port tile. The actual port hit remains a
+	// later weapon/objective validation, not a positional shortcut.
+	attackStart := deathStarAttackGateZ
 	if position.Z >= attackStart {
 		return DeathStarExhaustAttackRegion
 	}
@@ -104,8 +113,21 @@ func DeathStarTrenchCheckpointCrossed(checkpoint int, previous, current math3d.V
 }
 
 func DeathStarExhaustPortPoint() math3d.Vec3 {
-	zCenter := float64(trenchLastTileZ) * deathStarTileSize
+	zCenter := float64(trenchPortTileZ) * deathStarTileSize
 	return math3d.Vec3{Y: -deathStarTrenchDepth + 0.03, Z: zCenter + deathStarTileSize/2 - 12}
+}
+
+// DeathStarExhaustPortFiringRange is the range at which the targeting
+// computer's vertical guides meet. It is a clear preferred shot cue, not a
+// second hidden validity rule; the combat envelope remains authoritative.
+func DeathStarExhaustPortFiringRange() float64 { return deathStarFiringRange }
+
+// DeathStarTrenchEscapePoint is the open-top climb-out lane immediately past
+// the port. It is deliberately still inside the extended physical trench, so
+// a successful pilot can pull up and clear the deck before frame transfer.
+func DeathStarTrenchEscapePoint() math3d.Vec3 {
+	port := DeathStarExhaustPortPoint()
+	return math3d.Vec3{Y: 56, Z: port.Z + 48}
 }
 
 var (
@@ -234,7 +256,7 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 			features, boxes = tileFeatures(coordinate, xCenter, zCenter, isTrench)
 		}
 	}
-	if !horizonOnly && isTrench && coordinate.Z == trenchLastTileZ {
+	if !horizonOnly && isTrench && coordinate.Z == trenchPortTileZ {
 		portPosition := DeathStarExhaustPortPoint()
 		portZ := portPosition.Z
 		port := exhaustPort()

@@ -129,6 +129,18 @@ func TestDeathStarTrenchRouteRequiresForwardPhysicalProgress(t *testing.T) {
 	}
 }
 
+func TestDeathStarTrenchProvidesAttackRunAndClimbOutPastThePort(t *testing.T) {
+	checkpoints := DeathStarTrenchCheckpoints()
+	port := DeathStarExhaustPortPoint()
+	if len(checkpoints) == 0 || port.Z-checkpoints[len(checkpoints)-1] < 60 {
+		t.Fatalf("attack run is too short: checkpoints=%v port=%+v", checkpoints, port)
+	}
+	escape := DeathStarTrenchEscapePoint()
+	if escape.Y <= 53 || escape.Z <= port.Z || escape.Z >= (float64(trenchLastTileZ)+.5)*deathStarTileSize {
+		t.Fatalf("escape lane=%+v is not above and beyond port=%+v", escape, port)
+	}
+}
+
 func TestDeathStarSurfaceFeaturesAreOpaque(t *testing.T) {
 	tile := DeathStarTrench().Tile(TileCoordinate{X: 2, Z: 0})
 	if len(tile.Features) == 0 {
@@ -304,18 +316,19 @@ func TestDeathStarTrenchIsFiniteWithinOrdinarySurface(t *testing.T) {
 	}
 }
 
-func TestDeathStarTrenchEndsAtAddressableExhaustPort(t *testing.T) {
-	tile := DeathStarTrench().Tile(TileCoordinate{X: trenchTileX, Z: trenchLastTileZ})
+func TestDeathStarTrenchPlacesPortBeforeTerminalEscapeLane(t *testing.T) {
+	terminalTile := DeathStarTrench().Tile(TileCoordinate{X: trenchTileX, Z: trenchLastTileZ})
 	foundEndWall := false
-	for _, plane := range tile.Planes {
+	for _, plane := range terminalTile.Planes {
 		foundEndWall = foundEndWall || plane.FeatureID == "trench-end-wall"
 	}
+	portTile := DeathStarTrench().Tile(TileCoordinate{X: trenchTileX, Z: trenchPortTileZ})
 	foundPort := false
-	for _, feature := range tile.Features {
+	for _, feature := range portTile.Features {
 		foundPort = foundPort || feature.Kind == "exhaust-port" && feature.Targetable && !feature.Hittable
 	}
 	if !foundEndWall || !foundPort {
-		t.Fatalf("end wall=%t exhaust port=%t", foundEndWall, foundPort)
+		t.Fatalf("terminal end wall=%t exhaust port=%t", foundEndWall, foundPort)
 	}
 }
 
@@ -398,7 +411,8 @@ func TestDeathStarMissionRegionsUsePhysicalTrenchDimensions(t *testing.T) {
 		{"above trench", math3d.Vec3{Y: 4}, DeathStarSurfaceRegion},
 		{"trench entrance", math3d.Vec3{Y: -2, Z: -110}, DeathStarTrenchRegion},
 		{"attack run", math3d.Vec3{Y: -8, Z: 125}, DeathStarExhaustAttackRegion},
-		{"past closed end", math3d.Vec3{Y: -8, Z: 210}, DeathStarSurfaceRegion},
+		{"through escape lane", math3d.Vec3{Y: -8, Z: 210}, DeathStarExhaustAttackRegion},
+		{"past closed end", math3d.Vec3{Y: -8, Z: 290}, DeathStarSurfaceRegion},
 	}
 	for _, test := range tests {
 		if got := DeathStarRegion(test.at); got != test.want {
@@ -413,7 +427,7 @@ func TestDeathStarMissionGuidePointsMatchAuthoredTrench(t *testing.T) {
 		t.Fatalf("trench guide=%+v region=%d", guide, DeathStarRegion(guide))
 	}
 	port := DeathStarExhaustPortPoint()
-	tile := DeathStarTrench().Tile(TileCoordinate{X: trenchTileX, Z: trenchLastTileZ})
+	tile := DeathStarTrench().Tile(TileCoordinate{X: trenchTileX, Z: trenchPortTileZ})
 	found := false
 	for _, feature := range tile.Features {
 		if feature.Kind == "exhaust-port" {

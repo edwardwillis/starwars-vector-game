@@ -41,6 +41,7 @@ const (
 )
 
 var background = color.RGBA{R: 2, G: 4, B: 8, A: 255}
+var shieldIndicatorColor = color.RGBA{R: 255, G: 224, B: 32, A: 255}
 
 type flightMode int
 
@@ -51,8 +52,7 @@ const missionDirectorVisibleSeconds = 5.0
 const missionDirectorFadeSeconds = 0.65
 const missionDirectorVanishY = 34.0
 const impactFlashDuration = 0.16
-
-var xWingDashboardInstrumentColor = color.RGBA{R: 120, G: 76, B: 42, A: 170}
+const coordinatedTurnBankMix = 0.42
 
 const transitionEnvironmentTileRadius = 2
 
@@ -988,6 +988,7 @@ type Game struct {
 	swarmLaunched            bool
 	showHUD                  bool
 	surfaceAutoLevel         bool
+	coordinatedTurnBank      bool
 	showcaseActive           bool
 	showcaseTime             float64
 	showcaseObjects          []scene.Object
@@ -1535,8 +1536,9 @@ func (g *Game) Update() error {
 	if g.mode == modeManual {
 		if fighter := g.objectByID(fighterID); fighter != nil {
 			intent := g.readIntent()
+			g.mixCoordinatedTurnBank(&intent)
 			motion := control.Apply(fighter.Motion, intent, g.playerFlightConfig(*fighter), seconds)
-			fighter.Motion = g.applySurfaceAutoLevel(*fighter, intent, motion)
+			fighter.Motion = g.applyPlayerAutoLevel(*fighter, intent, motion)
 		}
 	}
 	if g.paused {
@@ -4339,6 +4341,7 @@ func (g *Game) resetFighter() {
 	fighter.Pose = g.initialPose
 	g.controlsRemaining = 0
 	g.controlsPinned = false
+	g.coordinatedTurnBank = false
 	g.destructionViewRemaining = 0
 	delete(g.transitions, fighterID)
 	delete(g.transitionCommitments, fighterID)
@@ -4479,6 +4482,7 @@ func (g *Game) respawnPlayer() {
 	g.destructionVictim = scene.Object{}
 	g.controlsRemaining = 0
 	g.controlsPinned = false
+	g.coordinatedTurnBank = false
 	g.destructionViewRemaining = 0
 	g.shieldStrength = g.profile.Player.Shield.Maximum
 	g.shieldQuietTime = 0
@@ -4583,10 +4587,23 @@ func (g *Game) playerFlightConfig(fighter scene.Object) control.ManualConfig {
 	return config
 }
 
-// applySurfaceAutoLevel adds only a local roll rate. It is intentionally
-// downstream of manual intent mapping so explicit roll or turn input always
-// wins, and it activates only in an environment that declares a level axis.
-func (g *Game) applySurfaceAutoLevel(fighter scene.Object, intent control.Intent, motion kinematics.Motion) kinematics.Motion {
+// mixCoordinatedTurnBank adds a modest opposite roll to yaw input, yielding a
+// readable fighter-style bank without taking away Q/E as explicit roll.
+func (g *Game) mixCoordinatedTurnBank(intent *control.Intent) {
+	if intent == nil || math.Abs(intent.Yaw) <= g.profile.Player.AutoLevel.TurnDeadzone {
+		return
+	}
+	// Positive yaw is a starboard turn; a negative local roll puts the
+	// starboard wing down, so the signs deliberately oppose one another.
+	intent.Roll = max(-1, min(1, intent.Roll-intent.Yaw*coordinatedTurnBankMix))
+	g.coordinatedTurnBank = true
+}
+
+// applyPlayerAutoLevel keeps existing surface horizon assistance and extends
+// it to the temporary bank introduced by a player turn in open space. Explicit
+// roll input always wins. Outside a level-defined surface frame, only a bank
+// created by coordinated turning is automatically recovered.
+func (g *Game) applyPlayerAutoLevel(fighter scene.Object, intent control.Intent, motion kinematics.Motion) kinematics.Motion {
 	config := g.profile.Player.AutoLevel
 	config.Enabled = g.surfaceAutoLevel
 	if !config.Enabled || math.Abs(intent.Yaw) > config.TurnDeadzone || math.Abs(intent.Roll) > config.TurnDeadzone {
@@ -4598,9 +4615,27 @@ func (g *Game) applySurfaceAutoLevel(fighter scene.Object, intent control.Intent
 			continue
 		}
 		motion.RollRate = control.AutoLevelRollRate(fighter.Pose.Orientation, runtime.bound.Definition.LevelUp, config)
+		if motion.RollRate == 0 {
+			g.coordinatedTurnBank = false
+		}
 		return motion
 	}
+	if !g.coordinatedTurnBank {
+		return motion
+	}
+	motion.RollRate = control.AutoLevelRollRate(fighter.Pose.Orientation, math3d.Vec3{Y: 1}, config)
+	if motion.RollRate == 0 {
+		g.coordinatedTurnBank = false
+	}
 	return motion
+}
+
+// applySurfaceAutoLevel remains as a compatibility entry point for callers
+// that exercise the original surface-only assistance contract. The expanded
+// implementation now also knows how to recover a coordinated player turn in
+// open space.
+func (g *Game) applySurfaceAutoLevel(fighter scene.Object, intent control.Intent, motion kinematics.Motion) kinematics.Motion {
+	return g.applyPlayerAutoLevel(fighter, intent, motion)
 }
 
 func navigationInputPressed() bool {
@@ -4621,10 +4656,10 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 	}
 	g.drawCockpitWindshield(screen, layout.Windshield)
 	cx, cy, targetInRange := g.cockpitTarget()
-	g.drawShieldIndicator(screen)
 	if layout.Definition == catalog.XWingName {
-		g.drawXWingDashboard(screen, xWingDashboardInstrumentColor)
+		g.drawXWingDashboard(screen, g.xWingInstrumentState(), layout.Palette)
 	} else {
+		g.drawShieldIndicator(screen)
 		g.drawSpeedIndicator(screen)
 	}
 	g.drawTargetableIndicator(screen)
@@ -4955,9 +4990,10 @@ func (g *Game) missionObjectiveTarget() (math3d.Vec3, bool) {
 		return environment.DeathStarExhaustPortPoint(), true
 	case sim.MissionEscape:
 		if normalizedObjectFrame(*player) != scene.ExteriorFrame {
-			// The trench is open above its floor. Point straight up until the
-			// existing local-environment exit transfers the player to exterior.
-			return player.Pose.Position.Add(math3d.Vec3{Y: 64}), true
+			// The extra terminal trench tile is the authored climb-out lane. Its
+			// target is ahead and above the port, giving a readable break-away
+			// vector rather than asking the pilot to infer the frame exit volume.
+			return environment.DeathStarTrenchEscapePoint(), true
 		}
 		if g.world.Mission.HostID == 0 {
 			return math3d.Vec3{}, false
@@ -5011,75 +5047,31 @@ func (g *Game) drawSpeedIndicator(screen *ebiten.Image) {
 	drawVectorText(screen, 850, 505, fmt.Sprintf("SPD %03d MLGT", max(-99, min(999, mlgt))), color)
 }
 
-// drawXWingDashboard uses the opaque lower X-wing coaming for stable,
-// low-cost instrument art. Shield status deliberately remains in its original
-// top-of-screen position as a homage to the arcade presentation.
-func (g *Game) drawXWingDashboard(screen *ebiten.Image, instrumentColor color.RGBA) {
-	const (
-		top    = float32(414)
-		leftX  = float32(322)
-		radarX = float32(ScreenWidth / 2)
-		rightX = float32(638)
-	)
-
-	// Side readouts are deliberately unboxed so the targeting screen owns the
-	// dashboard's visual hierarchy.
-	drawVectorText(screen, leftX, top+9, "SPD", instrumentColor)
-	fighter := g.objectByID(fighterID)
-	mlgt := 0
-	if fighter != nil && g.profile.Player.Flight.MaxForward > 0 {
-		mlgt = int(math.Round(fighter.Motion.Speed / g.profile.Player.Flight.MaxForward * 100))
+// xWingInstrumentState takes a deliberately narrow presentation snapshot. It
+// keeps cockpit drawing independent of simulation ownership while making each
+// illuminated indicator answer to real state.
+func (g *Game) xWingInstrumentState() cockpit.XWingInstrumentState {
+	state := cockpit.XWingInstrumentState{
+		Shields:           g.shieldStrength,
+		MaxShields:        g.profile.Player.Shield.Maximum,
+		Torpedoes:         g.torpedoesRemaining,
+		Countdown:         g.xWingDashboardCountdown(),
+		CountdownFraction: g.xWingDashboardCountdownFraction(),
+		VisualDetail:      g.realismLevel,
 	}
-	drawVectorText(screen, leftX, top+29, fmt.Sprintf("%03d", max(-99, min(999, mlgt))), instrumentColor)
-
-	// Centre: space flight uses a contact display; trench phases instead show
-	// the authored trench route and exhaust-port approach rails.
-	if g.xWingTrenchDisplayActive() {
-		g.drawXWingTrenchScreen(screen, radarX, 455, 108, 43)
-	} else {
-		g.drawXWingTargetingScreen(screen, radarX, 455, 108, 43, instrumentColor)
-	}
-
-	// A dash is shown outside a timed Yavin objective rather than leaving stale
-	// digits on the display.
-	drawVectorText(screen, rightX, top+9, "T", instrumentColor)
-	drawVectorText(screen, rightX, top+29, g.xWingDashboardCountdown(), instrumentColor)
-}
-
-func (g *Game) drawXWingTargetingScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32, lineColor color.RGBA) {
-	left, right := centerX-halfWidth, centerX+halfWidth
-	top, bottom := centerY-halfHeight, centerY+halfHeight
-	farHalfWidth, farHalfHeight := float32(27), float32(11)
-	farTop, farBottom := centerY-farHalfHeight, centerY+farHalfHeight
-	for _, line := range [][4]float32{
-		{left, top, right, top}, {right, top, right, bottom},
-		{right, bottom, left, bottom}, {left, bottom, left, top},
-		{left, top, centerX - farHalfWidth, farTop},
-		{right, top, centerX + farHalfWidth, farTop},
-		{right, bottom, centerX + farHalfWidth, farBottom},
-		{left, bottom, centerX - farHalfWidth, farBottom},
-		{centerX - farHalfWidth, farTop, centerX + farHalfWidth, farTop},
-		{centerX + farHalfWidth, farTop, centerX + farHalfWidth, farBottom},
-		{centerX + farHalfWidth, farBottom, centerX - farHalfWidth, farBottom},
-		{centerX - farHalfWidth, farBottom, centerX - farHalfWidth, farTop},
-	} {
-		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.25, lineColor, true)
-	}
-	for _, fraction := range []float32{.38, .68} {
-		leftX := left + (centerX-farHalfWidth-left)*fraction
-		rightX := right + (centerX+farHalfWidth-right)*fraction
-		y := top + (centerY-top)*fraction
-		vector.StrokeLine(screen, leftX, y, rightX, y, 1, lineColor, true)
-		vector.StrokeLine(screen, leftX, 2*centerY-y, rightX, 2*centerY-y, 1, lineColor, true)
-	}
-	vector.DrawFilledCircle(screen, centerX, centerY, 3, lineColor, true)
-	vector.StrokeLine(screen, centerX-8, centerY, centerX+8, centerY, 1, lineColor, true)
-	vector.StrokeLine(screen, centerX, centerY-8, centerX, centerY+8, 1, lineColor, true)
-
 	player := g.objectByID(fighterID)
 	if player == nil {
-		return
+		return state
 	}
+	if g.profile.Player.Flight.MaxForward > 0 {
+		state.SpeedPercent = int(math.Round(player.Motion.Speed / g.profile.Player.Flight.MaxForward * 100))
+	}
+	if g.xWingTrenchDisplayActive() {
+		state.Mode = cockpit.XWingComputerTrench
+		state.TrenchRange = g.xWingExhaustPortDistance()
+		return state
+	}
+
 	const scanRange = 80.0
 	for _, object := range g.objects {
 		if object.ID == player.ID || !object.Targetable || !sameFrame(*player, object) {
@@ -5090,15 +5082,233 @@ func (g *Game) drawXWingTargetingScreen(screen *ebiten.Image, centerX, centerY, 
 		if distance > scanRange {
 			continue
 		}
-		contactColor := color.RGBA{R: 88, G: 196, B: 224, A: 255}
-		if object.Team != player.Team {
-			contactColor = color.RGBA{R: 255, G: 112, B: 48, A: 255}
+		state.Contacts = append(state.Contacts, cockpit.XWingContact{
+			X:       float32(max(-1, min(1, relative.X/scanRange))),
+			Y:       float32(max(-1, min(1, -relative.Z/scanRange))),
+			Hostile: object.Team != player.Team,
+		})
+		if len(state.Contacts) == 6 {
+			break
 		}
-		vector.DrawFilledCircle(screen,
-			centerX+float32(relative.X/scanRange)*(halfWidth-8),
-			centerY-float32(relative.Z/scanRange)*(halfHeight-7),
-			2, contactColor, true)
 	}
+	if target, ok := g.aimedTarget(); ok {
+		relative := kinematics.Relative(player.Pose, target.Pose).Position
+		state.TargetKnown = true
+		state.TargetX = float32(max(-1, min(1, relative.X/scanRange)))
+		state.TargetY = float32(max(-1, min(1, -relative.Z/scanRange)))
+		state.TargetRange = relative.Length()
+	}
+	return state
+}
+
+// drawXWingDashboard evolves the existing lower coaming into a physical T-65
+// instrument panel. The shield remains above the canopy as the arcade homage;
+// everything here is intentionally quiet enough to preserve forward visibility.
+func (g *Game) drawXWingDashboard(screen *ebiten.Image, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
+	// The panel deliberately spans most of the coaming.  Its screen and side
+	// bays are separated by generous dead space, so illuminated readouts never
+	// collide with the understated structural lines.
+	const centerX, centerY, halfWidth, halfHeight = float32(ScreenWidth / 2), float32(454), float32(132), float32(45)
+	g.drawXWingPanelStructure(screen, palette.Structure, state.VisualDetail)
+	g.drawXWingEngineInstrument(screen, 100, 430, state, palette)
+	g.drawXWingOrdnanceInstrument(screen, 730, 417, state, palette)
+	g.drawXWingShieldInstrument(screen, state)
+	if state.Mode == cockpit.XWingComputerTrench {
+		g.drawXWingTrenchScreen(screen, centerX, centerY, halfWidth, halfHeight, state, palette)
+		return
+	}
+	g.drawXWingTargetingScreen(screen, centerX, centerY, halfWidth, halfHeight, state, palette)
+}
+
+// drawXWingShieldInstrument relocates the established arcade shield graphic
+// into the narrow binnacle strip above the targeting computer. It retains the
+// familiar segmented form, but omits the large HUD label so it fits the actual
+// cockpit panel without crowding the forward view.
+func (g *Game) drawXWingShieldInstrument(screen *ebiten.Image, state cockpit.XWingInstrumentState) {
+	const (
+		centerX    = float32(ScreenWidth / 2)
+		topY       = float32(354)
+		halfWidth  = float32(40)
+		canopyDrop = float32(18)
+	)
+	segmentCount := max(1, state.MaxShields)
+	activeSegments := max(0, min(segmentCount, state.Shields))
+	for side := 0; side < 2; side++ {
+		for index := 0; index < segmentCount; index++ {
+			if index < segmentCount-activeSegments {
+				continue
+			}
+			fractionA := float32(math.Sqrt(float64(index) / float64(segmentCount)))
+			fractionB := float32(math.Sqrt(float64(index+1) / float64(segmentCount)))
+			var xA, xB float32
+			if side == 0 {
+				xA, xB = centerX-halfWidth+halfWidth*fractionA, centerX-halfWidth+halfWidth*fractionB
+			} else {
+				xA, xB = centerX+halfWidth-halfWidth*fractionB, centerX+halfWidth-halfWidth*fractionA
+			}
+			yA := topY + canopyDrop*(float32(math.Abs(float64(xA-centerX)))/halfWidth)
+			yB := topY + canopyDrop*(float32(math.Abs(float64(xB-centerX)))/halfWidth)
+			vector.StrokeLine(screen, xA, topY, xB, topY, 1.25, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xA, topY, xA, yA, 1.25, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xB, topY, xB, yB, 1.25, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xA, yA, xB, yB, 1.25, shieldIndicatorColor, true)
+		}
+	}
+	drawScaledSlantedVectorText(screen, centerX, topY+3, fmt.Sprintf("%d", state.Shields), 0, .82, shieldIndicatorColor)
+}
+
+func (g *Game) drawXWingPanelStructure(screen *ebiten.Image, lineColor color.RGBA, detail int) {
+	// The outer upper edges deliberately reuse the mask contour: (0,.806) to
+	// (.335,.72) on port, mirrored on starboard.  Keeping their screen points
+	// identical prevents a distracting double edge where the panel meets the
+	// opaque coaming.
+	for _, line := range [][4]float32{
+		{0, 435.24, 321.6, 388.8}, {638.4, 388.8, 960, 435.24},
+		{0, 435.24, 58, 503}, {960, 435.24, 902, 503},
+		{320, 483, 309, 540}, {640, 483, 669, 540},
+	} {
+		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.1, lineColor, true)
+	}
+	if detail < 2 {
+		return
+	}
+	for _, line := range [][4]float32{{58, 503, 320, 483}, {640, 483, 902, 503}} {
+		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 0.8, lineColor, true)
+	}
+}
+
+func (g *Game) drawXWingEngineInstrument(screen *ebiten.Image, x, y float32, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
+	const slope = float32(-.116)
+	g.drawXWingCountdownDial(screen, x, y+11, 18, state.CountdownFraction, state.Countdown, palette)
+	const speedX = float32(238)
+	speedY := slopedPanelRowY(x, y, speedX, slope)
+	drawScaledSlantedVectorText(screen, speedX, speedY, fmt.Sprintf("SPD: %03d", max(-99, min(999, state.SpeedPercent))), slope, .82, palette.Active)
+}
+
+// drawXWingCountdownDial is a compact physical mission clock: a circular
+// bezel, seven ticks, a remaining-time needle, and a tiny exact readout.
+func (g *Game) drawXWingCountdownDial(screen *ebiten.Image, centerX, centerY, radius float32, remainingFraction float64, countdown string, palette cockpit.Palette) {
+	const circumferenceSegments = 20
+	for index := 0; index < circumferenceSegments; index++ {
+		angleA := 2 * math.Pi * float64(index) / circumferenceSegments
+		angleB := 2 * math.Pi * float64(index+1) / circumferenceSegments
+		vector.StrokeLine(screen,
+			centerX+radius*float32(math.Cos(angleA)), centerY+radius*float32(math.Sin(angleA)),
+			centerX+radius*float32(math.Cos(angleB)), centerY+radius*float32(math.Sin(angleB)),
+			1, palette.Structure, true)
+	}
+	remainingPercent := int(math.Round(max(0, min(1, remainingFraction)) * 100))
+	activeTicks := int(math.Round(float64(remainingPercent) / 100 * 6))
+	for index := 0; index <= 6; index++ {
+		angle := countdownDialAngle(index * 100 / 6)
+		outerX, outerY := centerX+radius*float32(math.Cos(angle)), centerY+radius*float32(math.Sin(angle))
+		innerRadius := radius - 4
+		lineColor := palette.Structure
+		if index <= activeTicks {
+			lineColor = palette.Instrument
+		}
+		vector.StrokeLine(screen, outerX, outerY,
+			centerX+innerRadius*float32(math.Cos(angle)), centerY+innerRadius*float32(math.Sin(angle)),
+			1.25, lineColor, true)
+	}
+	needleAngle := countdownDialAngle(remainingPercent)
+	vector.StrokeLine(screen, centerX, centerY,
+		centerX+(radius-6)*float32(math.Cos(needleAngle)), centerY+(radius-6)*float32(math.Sin(needleAngle)),
+		1.5, palette.Active, true)
+	vector.DrawFilledCircle(screen, centerX, centerY, 2, palette.Active, true)
+	drawScaledSlantedVectorText(screen, centerX, centerY-2, countdown, 0, .43, palette.Instrument)
+}
+
+func countdownDialAngle(remainingPercent int) float64 {
+	percent := float64(max(0, min(100, remainingPercent))) / 100
+	return math.Pi*.75 + percent*math.Pi*1.5
+}
+
+func (g *Game) drawXWingOrdnanceInstrument(screen *ebiten.Image, x, y float32, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
+	// This is the exact rise/run of the starboard coaming edge from
+	// (638.4,388.8) to (960,435.24), so the right-bank readouts sit parallel
+	// to the windscreen border rather than merely approximately angled.
+	const slope = float32(.14440299)
+	row := func(rowY, atX float32) float32 { return slopedPanelRowY(x, rowY, atX, slope) }
+	// The ordnance count remains on the top perspective line; the mission clock
+	// now lives in the dedicated circular dial on the port console.
+	const torpedoX = float32(730)
+	drawScaledSlantedVectorText(screen, torpedoX, row(y, torpedoX), fmt.Sprintf("TOR: %d", max(0, state.Torpedoes)), slope, .82, palette.Active)
+	if state.Shields <= max(1, state.MaxShields/4) {
+		vector.DrawFilledCircle(screen, x+40, row(y+29, x+40), 2, palette.Critical, true)
+	}
+}
+
+// slopedPanelRowY converts a local dashboard row into screen space. Keeping
+// every readout in a bank on this same line avoids labels that look pasted onto
+// a perspective panel rather than installed within it.
+func slopedPanelRowY(referenceX, referenceY, atX, slope float32) float32 {
+	return referenceY + slope*(atX-referenceX)
+}
+
+func (g *Game) drawXWingTargetingScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
+	lineColor := palette.Active
+	left, right := centerX-halfWidth, centerX+halfWidth
+	top, bottom := centerY-halfHeight, centerY+halfHeight
+	innerHalfWidth, innerHalfHeight := float32(76), float32(24)
+	innerLeft, innerRight := centerX-innerHalfWidth, centerX+innerHalfWidth
+	innerTop, innerBottom := centerY-innerHalfHeight, centerY+innerHalfHeight
+	drawRoundedCockpitRectangle(screen, left, top, right, bottom, 4, 1.25, lineColor)
+	for _, line := range [][4]float32{
+		{innerLeft, innerTop, innerRight, innerTop}, {innerRight, innerTop, innerRight, innerBottom},
+		{innerRight, innerBottom, innerLeft, innerBottom}, {innerLeft, innerBottom, innerLeft, innerTop},
+	} {
+		vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.25, lineColor, true)
+	}
+	for _, y := range []float32{centerY - 12, centerY + 12} {
+		vector.StrokeLine(screen, innerLeft+5, y, innerRight-5, y, .8, palette.Instrument, true)
+	}
+	vector.StrokeLine(screen, left+8, centerY, innerLeft-6, centerY, .8, palette.Instrument, true)
+	vector.StrokeLine(screen, innerRight+6, centerY, right-8, centerY, .8, palette.Instrument, true)
+	vector.DrawFilledCircle(screen, centerX, centerY, 2, lineColor, true)
+	vector.StrokeLine(screen, centerX-8, centerY, centerX+8, centerY, 1, lineColor, true)
+	vector.StrokeLine(screen, centerX, centerY-8, centerX, centerY+8, 1, lineColor, true)
+	for _, contact := range state.Contacts {
+		contactColor := palette.Instrument
+		if contact.Hostile {
+			contactColor = palette.Active
+		}
+		vector.DrawFilledCircle(screen, centerX+contact.X*(halfWidth-8), centerY+contact.Y*(halfHeight-7), 1.6, contactColor, true)
+	}
+	if state.TargetKnown {
+		x, y := centerX+state.TargetX*(halfWidth-11), centerY+state.TargetY*(halfHeight-10)
+		for _, line := range [][4]float32{{x - 5, y - 5, x - 1, y - 5}, {x - 5, y - 5, x - 5, y - 1}, {x + 5, y + 5, x + 1, y + 5}, {x + 5, y + 5, x + 5, y + 1}} {
+			vector.StrokeLine(screen, line[0], line[1], line[2], line[3], 1.2, palette.Active, true)
+		}
+		if state.VisualDetail >= 1 {
+			drawScaledSlantedVectorText(screen, centerX, navigationRangeReadoutTop(innerBottom, bottom), fmt.Sprintf("%02d", int(state.TargetRange)), 0, .78, palette.Instrument)
+		}
+	}
+}
+
+// navigationRangeReadoutTop centres the scaled seven-segment digits in the
+// band between the inner display and the outer computer bezel.
+func navigationRangeReadoutTop(innerBottom, outerBottom float32) float32 {
+	const scaledDigitVisualCentre = float32(3.9)
+	return (innerBottom+outerBottom)/2 - scaledDigitVisualCentre
+}
+
+func drawRoundedCockpitRectangle(screen *ebiten.Image, left, top, right, bottom, radius, width float32, lineColor color.RGBA) {
+	radius = min(radius, min((right-left)/2, (bottom-top)/2))
+	var path vector.Path
+	path.MoveTo(left+radius, top)
+	path.LineTo(right-radius, top)
+	path.QuadTo(right, top, right, top+radius)
+	path.LineTo(right, bottom-radius)
+	path.QuadTo(right, bottom, right-radius, bottom)
+	path.LineTo(left+radius, bottom)
+	path.QuadTo(left, bottom, left, bottom-radius)
+	path.LineTo(left, top+radius)
+	path.QuadTo(left, top, left+radius, top)
+	path.Close()
+	draw := &vector.DrawPathOptions{AntiAlias: true}
+	draw.ColorScale.ScaleWithColor(lineColor)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: width}, draw)
 }
 
 func (g *Game) xWingTrenchDisplayActive() bool {
@@ -5114,15 +5324,16 @@ func (g *Game) xWingTrenchDisplayActive() bool {
 }
 
 // drawXWingTrenchScreen is deliberately schematic: its yellow perspective
-// grid communicates the fixed trench corridor, while red rails give a single
-// unmistakable cue that tightens as the real exhaust port gets nearer.
-func (g *Game) drawXWingTrenchScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32) {
-	yellow := color.RGBA{R: 255, G: 216, B: 48, A: 255}
-	red := color.RGBA{R: 255, G: 64, B: 48, A: 255}
+// grid communicates the fixed trench corridor, while its red vertical guides
+// close at the preferred firing range for the real exhaust port.
+func (g *Game) drawXWingTrenchScreen(screen *ebiten.Image, centerX, centerY, halfWidth, halfHeight float32, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
+	yellow := palette.Active
+	red := palette.Critical
 	left, right := centerX-halfWidth, centerX+halfWidth
 	top, bottom := centerY-halfHeight, centerY+halfHeight
 	farHalfWidth := float32(30)
 	farY := top + 10
+	gridBottom := bottom - 16
 	for _, line := range [][4]float32{
 		{left, top, right, top}, {right, top, right, bottom},
 		{right, bottom, left, bottom}, {left, bottom, left, top},
@@ -5131,22 +5342,28 @@ func (g *Game) drawXWingTrenchScreen(screen *ebiten.Image, centerX, centerY, hal
 	}
 	for _, lane := range []float32{-1, -.5, 0, .5, 1} {
 		vector.StrokeLine(screen,
-			centerX+lane*halfWidth, bottom,
+			centerX+lane*halfWidth, gridBottom,
 			centerX+lane*farHalfWidth, farY,
 			1, yellow, true)
 	}
 	for _, fraction := range []float32{.18, .38, .60, .82} {
-		y := bottom - (bottom-farY)*fraction
+		y := gridBottom - (gridBottom-farY)*fraction
 		half := halfWidth + (farHalfWidth-halfWidth)*fraction
 		vector.StrokeLine(screen, centerX-half, y, centerX+half, y, 1, yellow, true)
 	}
 
-	distance := g.xWingExhaustPortDistance()
-	halfRail := trenchTargetRailHalfSpan(distance)
-	vector.StrokeLine(screen, centerX-halfRail, top+7, centerX-halfRail, bottom-7, 2, red, true)
-	vector.StrokeLine(screen, centerX+halfRail, top+7, centerX+halfRail, bottom-7, 2, red, true)
-	vector.StrokeLine(screen, centerX-halfRail-5, centerY, centerX-halfRail+3, centerY, 1, red, true)
-	vector.StrokeLine(screen, centerX+halfRail-3, centerY, centerX+halfRail+5, centerY, 1, red, true)
+	halfRail := trenchTargetRailHalfSpan(state.TrenchRange)
+	if halfRail <= 0.5 {
+		// The two guides have met: a bright centre rail is the firing cue.
+		vector.StrokeLine(screen, centerX, top+7, centerX, gridBottom, 2, red, true)
+	} else {
+		vector.StrokeLine(screen, centerX-halfRail, top+7, centerX-halfRail, gridBottom, 2, red, true)
+		vector.StrokeLine(screen, centerX+halfRail, top+7, centerX+halfRail, gridBottom, 2, red, true)
+		vector.StrokeLine(screen, centerX-halfRail-5, centerY, centerX-halfRail+3, centerY, 1, red, true)
+		vector.StrokeLine(screen, centerX+halfRail-3, centerY, centerX+halfRail+5, centerY, 1, red, true)
+	}
+	vector.StrokeLine(screen, centerX-5, gridBottom, centerX+5, gridBottom, 1.25, red, true)
+	drawScaledSlantedVectorText(screen, centerX, bottom-10, fmt.Sprintf("PORT %03d", max(0, int(math.Round(state.TrenchRange)))), 0, .68, yellow)
 }
 
 func (g *Game) xWingExhaustPortDistance() float64 {
@@ -5158,9 +5375,13 @@ func (g *Game) xWingExhaustPortDistance() float64 {
 }
 
 func trenchTargetRailHalfSpan(distance float64) float32 {
-	const approachRange = 260.0
-	progress := 1 - min(1, max(0, distance/approachRange))
-	return float32(31 - 22*progress)
+	const acquisitionRange = 120.0
+	firingRange := environment.DeathStarExhaustPortFiringRange()
+	if distance <= firingRange {
+		return 0
+	}
+	progress := min(1, (distance-firingRange)/(acquisitionRange-firingRange))
+	return float32(28 * progress)
 }
 
 func (g *Game) xWingDashboardCountdown() string {
@@ -5176,6 +5397,38 @@ func (g *Game) xWingDashboardCountdown() string {
 		seconds = int(math.Ceil(float64(deadline-g.world.Tick) * g.profile.Simulation.TickSeconds))
 	}
 	return fmt.Sprintf("%02d:%02d", seconds/60, seconds%60)
+}
+
+// xWingDashboardCountdownFraction reports the remaining portion of the
+// currently authoritative Yavin deadline. Mission progress owns the deadline;
+// the cockpit only translates it into an analog-clock position.
+func (g *Game) xWingDashboardCountdownFraction() float64 {
+	if g.world == nil || g.profile.Simulation.TickSeconds <= 0 {
+		return 0
+	}
+	_, deadline := yavinMissionDeadline(g.world.Mission)
+	if deadline == 0 || g.world.Tick >= deadline {
+		return 0
+	}
+	duration := g.yavinCountdownDuration(g.world.Mission.Phase)
+	if duration <= 0 {
+		return 0
+	}
+	remaining := float64(deadline-g.world.Tick) * g.profile.Simulation.TickSeconds
+	return max(0, min(1, remaining/duration))
+}
+
+func (g *Game) yavinCountdownDuration(phase sim.MissionPhase) float64 {
+	switch phase {
+	case sim.MissionOrbitalBattle, sim.MissionApproach:
+		return g.profile.Yavin.ApproachDeadlineSeconds
+	case sim.MissionSurfaceAssault, sim.MissionTrenchRun, sim.MissionExhaustPortAttack:
+		return g.profile.Yavin.AssaultDeadlineSeconds
+	case sim.MissionEscape:
+		return g.profile.Yavin.EscapeDeadlineSeconds
+	default:
+		return 0
+	}
 }
 
 func (g *Game) drawTargetableIndicator(screen *ebiten.Image) {
@@ -5291,7 +5544,6 @@ func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
 		canopyDrop = float32(34)
 	)
 	cx := float32(ScreenWidth / 2)
-	yellow := color.RGBA{R: 255, G: 224, B: 32, A: 255}
 	segmentCount := g.profile.Player.Shield.Maximum
 	activeSegments := max(0, min(segmentCount, g.shieldStrength))
 	for side := 0; side < 2; side++ {
@@ -5313,14 +5565,14 @@ func (g *Game) drawShieldIndicator(screen *ebiten.Image) {
 			}
 			yA := topY + canopyDrop*(float32(math.Abs(float64(xA-cx)))/halfWidth)
 			yB := topY + canopyDrop*(float32(math.Abs(float64(xB-cx)))/halfWidth)
-			vector.StrokeLine(screen, xA, topY, xB, topY, 2, yellow, true)
-			vector.StrokeLine(screen, xA, topY, xA, yA, 2, yellow, true)
-			vector.StrokeLine(screen, xB, topY, xB, yB, 2, yellow, true)
-			vector.StrokeLine(screen, xA, yA, xB, yB, 2, yellow, true)
+			vector.StrokeLine(screen, xA, topY, xB, topY, 2, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xA, topY, xA, yA, 2, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xB, topY, xB, yB, 2, shieldIndicatorColor, true)
+			vector.StrokeLine(screen, xA, yA, xB, yB, 2, shieldIndicatorColor, true)
 		}
 	}
-	drawVectorShieldNumber(screen, cx, topY+canopyDrop-20, g.shieldStrength, yellow)
-	drawVectorShieldWord(screen, cx, 52, yellow)
+	drawVectorShieldNumber(screen, cx, topY+canopyDrop-20, g.shieldStrength, shieldIndicatorColor)
+	drawVectorShieldWord(screen, cx, 52, shieldIndicatorColor)
 }
 
 func drawVectorShieldWord(screen *ebiten.Image, centerX, topY float32, lineColor color.Color) {
@@ -5333,6 +5585,69 @@ func drawVectorText(screen *ebiten.Image, centerX, topY float32, text string, li
 	draw := &vector.DrawPathOptions{AntiAlias: true}
 	draw.ColorScale.ScaleWithColor(lineColor)
 	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: 2}, draw)
+}
+
+// drawSlantedVectorText mounts a readout to a shallow cockpit-panel slope.
+// The glyph paths rotate as rigid vector characters, so both their baselines
+// and vertical strokes share the physical orientation of the panel face.
+func drawSlantedVectorText(screen *ebiten.Image, centerX, topY float32, text string, slope float32, lineColor color.Color) {
+	drawScaledSlantedVectorText(screen, centerX, topY, text, slope, 1, lineColor)
+}
+
+// drawScaledSlantedVectorText is used for subordinate numeric instrumentation.
+// Scaling the vector paths keeps labels legible while preventing seven-segment
+// digits from overpowering the surrounding cockpit structure.
+func drawScaledSlantedVectorText(screen *ebiten.Image, centerX, topY float32, text string, slope, scale float32, lineColor color.Color) {
+	var path vector.Path
+	appendScaledSlantedVectorTextPath(&path, centerX, topY, text, slope, scale)
+	draw := &vector.DrawPathOptions{AntiAlias: true}
+	draw.ColorScale.ScaleWithColor(lineColor)
+	vector.StrokePath(screen, &path, &vector.StrokeOptions{Width: max(1, 2*scale)}, draw)
+}
+
+func appendSlantedVectorTextPath(path *vector.Path, centerX, topY float32, text string, slope float32) {
+	appendScaledSlantedVectorTextPath(path, centerX, topY, text, slope, 1)
+}
+
+func appendScaledSlantedVectorTextPath(path *vector.Path, centerX, topY float32, text string, slope, scale float32) {
+	const glyphWidth, glyphGap, spaceWidth = float32(8), float32(3), float32(6)
+	total := float32(0)
+	for _, letter := range text {
+		if letter == ' ' {
+			total += spaceWidth + glyphGap
+		} else {
+			total += glyphWidth + glyphGap
+		}
+	}
+	left := centerX - (total-glyphGap)/2
+	angle := math.Atan(float64(slope))
+	cosine, sine := float32(math.Cos(angle)), float32(math.Sin(angle))
+	project := func(x, y float32) (float32, float32) {
+		dx, dy := (x-centerX)*scale, (y-topY)*scale
+		return centerX + dx*cosine - dy*sine, topY + dx*sine + dy*cosine
+	}
+	appendSegment := func(segment [4]float32) {
+		x1, y1 := project(segment[0], segment[1])
+		x2, y2 := project(segment[2], segment[3])
+		path.MoveTo(x1, y1)
+		path.LineTo(x2, y2)
+	}
+	for _, letter := range text {
+		if letter == ' ' {
+			left += spaceWidth + glyphGap
+			continue
+		}
+		if letter >= '0' && letter <= '9' {
+			for _, segment := range vectorDigitPathSegments(left-.5, topY-2, int(letter-'0')) {
+				appendSegment(segment)
+			}
+		} else {
+			for _, segment := range vectorGlyphSegments[letter] {
+				appendSegment([4]float32{left + segment[0], topY + segment[1], left + segment[2], topY + segment[3]})
+			}
+		}
+		left += glyphWidth + glyphGap
+	}
 }
 
 func drawPerspectiveVectorText(screen *ebiten.Image, centerX, topY float32, text string, vanishY, scale float32, lineColor color.Color) {

@@ -20,6 +20,53 @@ type FramePoint struct{ X, Y float32 }
 
 type FramePolygon struct{ Points []FramePoint }
 
+// Palette establishes the visual hierarchy for a cockpit presentation.  The
+// structural colour stays deliberately recessive; the computer may use Active
+// and Critical sparingly when information requires the pilot's attention.
+type Palette struct {
+	Structure  color.RGBA
+	Instrument color.RGBA
+	Active     color.RGBA
+	Critical   color.RGBA
+}
+
+// XWingComputerMode selects the physical display's information layout. It is
+// presentation state, not a new gameplay mode.
+type XWingComputerMode uint8
+
+const (
+	XWingComputerNavigation XWingComputerMode = iota
+	XWingComputerTrench
+)
+
+// XWingContact is a normalized local contact position for the targeting
+// computer. Coordinates are constrained to roughly [-1, 1], preserving a
+// small, schematic display rather than turning it into a world map.
+type XWingContact struct {
+	X, Y    float32
+	Hostile bool
+}
+
+// XWingInstrumentState is the small read-only snapshot needed to render the
+// cockpit. Game code owns simulation truth and creates this once per frame;
+// cockpit presentation never reaches into flight, combat, or mission state.
+type XWingInstrumentState struct {
+	SpeedPercent      int
+	Shields           int
+	MaxShields        int
+	Torpedoes         int
+	Countdown         string
+	CountdownFraction float64
+	Mode              XWingComputerMode
+	Contacts          []XWingContact
+	TargetKnown       bool
+	TargetX           float32
+	TargetY           float32
+	TargetRange       float64
+	TrenchRange       float64
+	VisualDetail      int
+}
+
 // Windshield describes lightweight cockpit framing drawn over the world but
 // beneath the aiming/HUD symbology.
 type Windshield struct {
@@ -42,6 +89,7 @@ type Layout struct {
 	Definition string
 	Cannons    []Cannon
 	Windshield Windshield
+	Palette    Palette
 }
 
 type Registry struct{ layouts map[string]Layout }
@@ -72,6 +120,7 @@ func DefaultRegistry() *Registry {
 	xwing.Definition = "builtin/x-wing"
 	xwing.Cannons = xWingCannons()
 	xwing.Windshield = xWingWindshield()
+	xwing.Palette = xWingPalette()
 	r.Register(xwing)
 	interceptor := Fallback()
 	interceptor.Definition = "builtin/tie-interceptor"
@@ -113,19 +162,44 @@ func xWingWindshield() Windshield {
 				{.365, .675}, {0, .30},
 			}},
 		},
-		// The side-window notches are part of the same external contour. There is
-		// no port/starboard fill behavior and no internal cockpit seam.
+		// Every edge of the one-piece coaming is drawn with the same quiet grey.
+		// This makes the cockpit read as a deliberate solid volume while the
+		// uncovered main and side apertures remain its only windows.
 		OpaqueOutlineSegments: []FrameSegment{
 			{FromX: 0, FromY: .132, ToX: .403, ToY: .65},
 			{FromX: .403, FromY: .65, ToX: .597, ToY: .65},
-			{FromX: 1, FromY: .132, ToX: .597, ToY: .65},
-			{FromX: 0, FromY: .30, ToX: .365, ToY: .675},
-			{FromX: .365, FromY: .675, ToX: .335, ToY: .72},
-			{FromX: .335, FromY: .72, ToX: 0, ToY: .806},
+			{FromX: .597, FromY: .65, ToX: 1, ToY: .132},
+			{FromX: 1, FromY: .132, ToX: 1, ToY: .30},
 			{FromX: 1, FromY: .30, ToX: .635, ToY: .675},
 			{FromX: .635, FromY: .675, ToX: .665, ToY: .72},
 			{FromX: .665, FromY: .72, ToX: 1, ToY: .806},
+			{FromX: 1, FromY: .806, ToX: 1, ToY: 1},
+			{FromX: 1, FromY: 1, ToX: 0, ToY: 1},
+			{FromX: 0, FromY: 1, ToX: 0, ToY: .806},
+			{FromX: 0, FromY: .806, ToX: .335, ToY: .72},
+			{FromX: .335, FromY: .72, ToX: .365, ToY: .675},
+			{FromX: .365, FromY: .675, ToX: 0, ToY: .30},
+			{FromX: 0, FromY: .30, ToX: 0, ToY: .132},
 		},
+		// These short segments define the raised central binnacle and the
+		// upper dashboard edge. The opaque contour remains the physical
+		// coaming; these are its significant illuminated structural edges.
+		Segments: []FrameSegment{
+			{FromX: .403, FromY: .65, ToX: .425, ToY: .70},
+			{FromX: .597, FromY: .65, ToX: .575, ToY: .70},
+			{FromX: .425, FromY: .70, ToX: .575, ToY: .70},
+		},
+		Color:     color.RGBA{R: 48, G: 52, B: 58, A: 220},
+		LineWidth: 1.1,
+	}
+}
+
+func xWingPalette() Palette {
+	return Palette{
+		Structure:  color.RGBA{R: 48, G: 52, B: 58, A: 220},
+		Instrument: color.RGBA{R: 150, G: 92, B: 44, A: 205},
+		Active:     color.RGBA{R: 232, G: 150, B: 64, A: 235},
+		Critical:   color.RGBA{R: 255, G: 88, B: 52, A: 240},
 	}
 }
 

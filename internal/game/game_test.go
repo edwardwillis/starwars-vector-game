@@ -8,6 +8,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
+	"github.com/edwardwillis/starwars-vector-game/internal/cockpit"
 	"github.com/edwardwillis/starwars-vector-game/internal/collision"
 	"github.com/edwardwillis/starwars-vector-game/internal/combat"
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
@@ -34,11 +35,100 @@ func TestLayoutUsesLogicalResolution(t *testing.T) {
 	}
 }
 
-func TestTrenchTargetRailsConvergeAtTheExhaustPort(t *testing.T) {
-	far := trenchTargetRailHalfSpan(260)
-	near := trenchTargetRailHalfSpan(0)
-	if near >= far || near <= 0 {
-		t.Fatalf("trench rails near=%v far=%v, want positive convergence", near, far)
+func TestTrenchTargetRailsConvergeAtTheFiringPoint(t *testing.T) {
+	firing := environment.DeathStarExhaustPortFiringRange()
+	far := trenchTargetRailHalfSpan(120)
+	atFire := trenchTargetRailHalfSpan(firing)
+	if far <= 0 || atFire != 0 || trenchTargetRailHalfSpan(0) != 0 {
+		t.Fatalf("trench rails far=%v at fire=%v, want positive rails converging at firing range %v", far, atFire, firing)
+	}
+}
+
+func TestSlopedPanelRowsShareTheirPanelLine(t *testing.T) {
+	if got := slopedPanelRowY(230, 417, 280, -.116); math.Abs(float64(got-411.2)) > .001 {
+		t.Fatalf("port panel row=%v, want 411.2", got)
+	}
+	if got := slopedPanelRowY(730, 417, 680, .116); math.Abs(float64(got-411.2)) > .001 {
+		t.Fatalf("starboard panel row=%v, want 411.2", got)
+	}
+}
+
+func TestCoordinatedTurnBankRollsOppositeTheYawDirection(t *testing.T) {
+	g := New()
+	rightTurn := control.Intent{Yaw: 1}
+	g.mixCoordinatedTurnBank(&rightTurn)
+	if !g.coordinatedTurnBank || math.Abs(rightTurn.Roll+coordinatedTurnBankMix) > 1e-9 {
+		t.Fatalf("right-turn bank=%+v active=%v", rightTurn, g.coordinatedTurnBank)
+	}
+	leftTurn := control.Intent{Yaw: -1}
+	g.mixCoordinatedTurnBank(&leftTurn)
+	if math.Abs(leftTurn.Roll-coordinatedTurnBankMix) > 1e-9 {
+		t.Fatalf("left-turn bank=%+v", leftTurn)
+	}
+}
+
+func TestCoordinatedTurnBankLevelsAfterYawStops(t *testing.T) {
+	g := New()
+	fighter := *g.objectByID(fighterID)
+	fighter.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(0, 0, .45)
+	g.coordinatedTurnBank = true
+	motion := g.applyPlayerAutoLevel(fighter, control.Intent{}, kinematics.Motion{})
+	if motion.RollRate >= 0 {
+		t.Fatalf("right bank level rate=%v, want negative correction", motion.RollRate)
+	}
+}
+
+func TestCountdownDialNeedleSweepsFromExpiredToFullTime(t *testing.T) {
+	low, high := countdownDialAngle(0), countdownDialAngle(100)
+	if high <= low || math.Abs(low-math.Pi*.75) > 1e-9 || math.Abs(high-math.Pi*2.25) > 1e-9 {
+		t.Fatalf("countdown angles low=%v high=%v", low, high)
+	}
+}
+
+func TestXWingCountdownDialUsesRemainingMissionDeadline(t *testing.T) {
+	g := New()
+	g.world.Mission.Phase = sim.MissionOrbitalBattle
+	g.world.Mission.Progress.ApproachDeadlineTick = 7200
+	g.world.Tick = 3600
+	if got := g.xWingDashboardCountdownFraction(); math.Abs(got-.5) > 1e-9 {
+		t.Fatalf("countdown fraction=%v, want 0.5", got)
+	}
+}
+
+func TestNavigationRangeReadoutCentresInComputerLowerBand(t *testing.T) {
+	const innerBottom, outerBottom = float32(478), float32(499)
+	top := navigationRangeReadoutTop(innerBottom, outerBottom)
+	visualCentre := top + 3.9
+	if math.Abs(float64(visualCentre-(innerBottom+outerBottom)/2)) > .001 {
+		t.Fatalf("range visual centre=%v, want %v", visualCentre, (innerBottom+outerBottom)/2)
+	}
+}
+
+func TestXWingInstrumentStateUsesAuthoritativeFlightAndMissionData(t *testing.T) {
+	g := New()
+	fighter := g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("missing player fighter")
+	}
+	fighter.Motion.Speed = g.profile.Player.Flight.MaxForward / 2
+	g.shieldStrength = 3
+	g.torpedoesRemaining = 1
+	g.setRealismLevel(2)
+
+	state := g.xWingInstrumentState()
+	if state.Mode != cockpit.XWingComputerNavigation || state.SpeedPercent != 50 || state.Shields != 3 || state.Torpedoes != 1 {
+		t.Fatalf("navigation state=%+v", state)
+	}
+	if state.VisualDetail != 2 {
+		t.Fatalf("detail state=%+v", state)
+	}
+
+	fighter.Frame = environment.DeathStarTrenchFrame
+	fighter.Pose.Position = environment.DeathStarExhaustPortPoint()
+	g.world.Mission.Phase = sim.MissionTrenchRun
+	state = g.xWingInstrumentState()
+	if state.Mode != cockpit.XWingComputerTrench || state.TrenchRange != 0 {
+		t.Fatalf("trench state=%+v", state)
 	}
 }
 
@@ -2547,6 +2637,18 @@ func TestExhaustPortReadinessUsesSameAttackEnvelope(t *testing.T) {
 	}
 }
 
+func TestAttackGateBeginsWithAValidPortTorpedoSolution(t *testing.T) {
+	checkpoints := environment.DeathStarTrenchCheckpoints()
+	fighter := catalog.XWing(fighterID, kinematics.Pose{
+		Position:    math3d.Vec3{Y: -2, Z: checkpoints[len(checkpoints)-1]},
+		Orientation: math3d.IdentityQuaternion(),
+	})
+	mission := sim.MissionState{Phase: sim.MissionExhaustPortAttack, PlayerID: fighterID}
+	if reason := validateExhaustPortReadiness(fighter, fighterID, mission, "muzzle-lower-left", environment.DeathStarExhaustPortPoint(), combat.DefaultTorpedoConfig()); reason != "" {
+		t.Fatalf("attack gate has no valid initial torpedo solution: %s", reason)
+	}
+}
+
 func TestValidExhaustPortImpactAdvancesMissionToEscape(t *testing.T) {
 	g := New()
 	if err := g.startYavinMission(false); err != nil {
@@ -2748,6 +2850,13 @@ func TestCockpitMissionTargetTracksAuthoritativeObjective(t *testing.T) {
 	checkpoints := environment.DeathStarTrenchCheckpoints()
 	if !ok || target != (math3d.Vec3{Y: -2, Z: checkpoints[0]}) {
 		t.Fatalf("trench target=%+v, ok=%v", target, ok)
+	}
+	if err := g.world.Apply(sim.AdvanceMission{To: sim.MissionExhaustPortAttack, Reason: "test"}, sim.BeginEscape{DeadlineTick: g.world.Tick + 60, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	target, ok = g.missionObjectiveTarget()
+	if !ok || target != environment.DeathStarTrenchEscapePoint() {
+		t.Fatalf("escape target=%+v, ok=%v", target, ok)
 	}
 }
 

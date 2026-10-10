@@ -15,11 +15,17 @@ func TestDefaultRegistryProvidesDistinctXWingAndTIEWindshields(t *testing.T) {
 	if len(xwing.Windshield.OpaquePolygons) != 1 || xwing.Windshield.OpaqueColor.A != 255 {
 		t.Fatalf("X-wing cockpit is missing its single opaque enclosure: %+v", xwing.Windshield)
 	}
-	if len(xwing.Windshield.OpaqueOutlineSegments) != 9 || xwing.Windshield.OpaqueOutlineColor.A == 0 || xwing.Windshield.OpaqueOutlineWidth <= 0 {
+	if len(xwing.Windshield.OpaqueOutlineSegments) != 14 || xwing.Windshield.OpaqueOutlineColor.A == 0 || xwing.Windshield.OpaqueOutlineWidth <= 0 {
 		t.Fatalf("X-wing cockpit has no restrained external frame outline: %+v", xwing.Windshield)
 	}
-	if len(xwing.Windshield.Segments) != 0 || len(xwing.Windshield.InstrumentSegments) != 0 {
-		t.Fatalf("X-wing cockpit has unreviewed line art: %+v", xwing.Windshield)
+	if len(xwing.Windshield.Segments) < 3 || xwing.Windshield.LineWidth <= 0 || xwing.Windshield.Color.A == 0 {
+		t.Fatalf("X-wing cockpit has no binnacle/dashboard structure: %+v", xwing.Windshield)
+	}
+	if xwing.Palette.Structure.A == 0 || xwing.Palette.Instrument.A == 0 || xwing.Palette.Active.A == 0 || xwing.Palette.Critical.A == 0 {
+		t.Fatalf("X-wing cockpit has an incomplete instrument palette: %+v", xwing.Palette)
+	}
+	if len(xwing.Windshield.InstrumentSegments) != 0 {
+		t.Fatalf("X-wing cockpit has unreviewed generic instrument art: %+v", xwing.Windshield)
 	}
 	if xwing.Cannons[0].Y >= 100 || xwing.Cannons[2].Y <= 380 || xwing.Cannons[0].X != 36 || xwing.Cannons[1].X != 924 {
 		t.Fatalf("X-wing cannons overlap its opaque coaming: %+v", xwing.Cannons)
