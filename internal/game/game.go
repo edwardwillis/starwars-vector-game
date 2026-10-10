@@ -1473,16 +1473,8 @@ func (g *Game) Update() error {
 		return err
 	}
 	g.updateControls(seconds)
-	if inpututil.IsKeyJustPressed(ebiten.KeyM) {
-		if g.mode == modeAutopilot {
-			g.mode = modeManual
-		} else {
-			g.mode = modeAutopilot
-			if fighter := g.objectByID(fighterID); fighter != nil {
-				fighter.Motion = g.autoMotion
-			}
-		}
-	}
+	input := g.readGameplayInput()
+	g.applyGameplayModeToggle(input)
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
 		g.paused = !g.paused
 	}
@@ -1495,37 +1487,20 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyBracketRight) {
 		g.setRealismLevel(g.realismLevel + 1)
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
-		g.resetFighter()
-	}
+	g.applyGameplayReset(input)
 	if inpututil.IsKeyJustPressed(ebiten.KeyV) {
 		g.viewCamera.Cycle()
 	}
 	if !questionPressed && (inpututil.IsKeyJustPressed(ebiten.KeyShiftLeft) || inpututil.IsKeyJustPressed(ebiten.KeyShiftRight)) && len(g.controllers) > 0 {
 		g.switchToRandomSwarmFollowView()
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyG) {
-		g.toggleMouseFlight()
-	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyL) {
-		g.surfaceAutoLevel = !g.surfaceAutoLevel
-	}
+	g.applyGameplayControlModes(input)
 	if g.hyperspaceArrival != nil {
 		if !g.paused {
 			g.advanceHyperspaceArrival(seconds)
 		}
 		g.refreshViewContext()
 		return nil
-	}
-	if g.mode == modeAutopilot && navigationInputPressed() {
-		g.mode = modeManual
-	}
-	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight) && g.viewCamera.Mode == camera.Cockpit {
-		g.mode = modeManual
-		if g.mouseFlight {
-			g.mouseFlight = false
-			ebiten.SetCursorMode(ebiten.CursorModeVisible)
-		}
 	}
 	if len(g.transitions) > 0 {
 		if !g.paused {
@@ -1538,7 +1513,7 @@ func (g *Game) Update() error {
 				return err
 			}
 			g.objects = g.world.Objects
-			g.advanceEnvironmentTransitions(seconds, inpututil.IsKeyJustPressed(ebiten.KeyEscape))
+			g.advanceEnvironmentTransitions(seconds, input.SkipEnvironmentTransition)
 			if err := g.updateYavinMission(); err != nil {
 				return err
 			}
@@ -1551,14 +1526,7 @@ func (g *Game) Update() error {
 
 	g.updateZoom()
 	g.laserBeamTime = max(0, g.laserBeamTime-seconds)
-	if g.mode == modeManual {
-		if fighter := g.objectByID(fighterID); fighter != nil {
-			intent := g.readIntent()
-			g.mixCoordinatedTurnBank(&intent)
-			motion := control.Apply(fighter.Motion, intent, g.playerFlightConfig(*fighter), seconds)
-			fighter.Motion = g.applyPlayerAutoLevel(*fighter, intent, motion)
-		}
-	}
+	g.applyGameplayFlightInput(input, seconds)
 	if g.paused {
 		g.refreshViewContext()
 		return nil
@@ -1577,17 +1545,14 @@ func (g *Game) Update() error {
 	g.updateAutonomous(seconds)
 	g.fireCooldown = max(0, g.fireCooldown-seconds)
 	g.torpedoCooldown = max(0, g.torpedoCooldown-seconds)
-	if inpututil.IsKeyJustPressed(ebiten.KeyT) {
-		g.fireProtonTorpedo()
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyF) || ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
+	g.applyGameplayTorpedo(input)
+	if input.FireLaser {
 		if g.showHUD && g.handleRealismSliderClick() {
 			g.refreshViewContext()
 			return nil
 		}
-		g.launchSwarm()
-		g.fireLaser()
 	}
+	g.applyGameplayLaser(input)
 	previousPositions := objectPositions(g.objects)
 	motionSeconds := seconds * g.profile.Simulation.MotionScale
 	// Keep the simulation world authoritative for fixed-tick kinematics. The
@@ -4583,26 +4548,6 @@ func (g *Game) objectByID(id scene.ObjectID) *scene.Object {
 	return nil
 }
 
-func (g *Game) readIntent() control.Intent {
-	intent := control.Intent{
-		Throttle: keyAxis(ebiten.KeyS, ebiten.KeyW),
-		Yaw:      keyAxis(ebiten.KeyArrowLeft, ebiten.KeyArrowRight),
-		Pitch:    keyAxis(ebiten.KeyArrowUp, ebiten.KeyArrowDown),
-		Roll:     keyAxis(ebiten.KeyQ, ebiten.KeyE),
-		Stop:     false,
-	}
-	if g.viewCamera.Mode == camera.Cockpit && ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
-		mouseX, mouseY := ebiten.CursorPosition()
-		intent.Yaw, intent.Pitch = cockpitSteeringAxes(mouseX, mouseY, g.profile.Input)
-	} else if g.mouseFlight {
-		mouseX, mouseY := ebiten.CursorPosition()
-		mouseYaw, mousePitch := mouseFlightAxes(mouseX, mouseY, g.mouseNeutralX, g.mouseNeutralY, g.profile.Input)
-		intent.Yaw += mouseYaw
-		intent.Pitch += mousePitch
-	}
-	return intent
-}
-
 func (g *Game) surfaceRuntime(frame scene.FrameID) *localEnvironment {
 	for index := range g.environments {
 		runtime := &g.environments[index]
@@ -4671,13 +4616,6 @@ func (g *Game) applyPlayerAutoLevel(fighter scene.Object, intent control.Intent,
 // open space.
 func (g *Game) applySurfaceAutoLevel(fighter scene.Object, intent control.Intent, motion kinematics.Motion) kinematics.Motion {
 	return g.applyPlayerAutoLevel(fighter, intent, motion)
-}
-
-func navigationInputPressed() bool {
-	return ebiten.IsKeyPressed(ebiten.KeyW) || ebiten.IsKeyPressed(ebiten.KeyS) ||
-		ebiten.IsKeyPressed(ebiten.KeyArrowLeft) || ebiten.IsKeyPressed(ebiten.KeyArrowRight) ||
-		ebiten.IsKeyPressed(ebiten.KeyArrowUp) || ebiten.IsKeyPressed(ebiten.KeyArrowDown) ||
-		ebiten.IsKeyPressed(ebiten.KeyQ) || ebiten.IsKeyPressed(ebiten.KeyE)
 }
 
 func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
@@ -6256,11 +6194,11 @@ func appendCockpitArrowPath(path *vector.Path, fromX, fromY, tipX, tipY float32)
 	}
 }
 
-func (g *Game) toggleMouseFlight() {
+func (g *Game) toggleMouseFlight(neutralX, neutralY int) {
 	g.mouseFlight = !g.mouseFlight
 	if g.mouseFlight {
 		g.mode = modeManual
-		g.mouseNeutralX, g.mouseNeutralY = ebiten.CursorPosition()
+		g.mouseNeutralX, g.mouseNeutralY = neutralX, neutralY
 		ebiten.SetCursorMode(ebiten.CursorModeCaptured)
 	} else {
 		ebiten.SetCursorMode(ebiten.CursorModeVisible)

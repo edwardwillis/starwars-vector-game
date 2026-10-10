@@ -88,6 +88,131 @@ func TestCoordinatedTurnBankLevelsAfterYawStops(t *testing.T) {
 	}
 }
 
+func TestGameplayInputAppliesEquivalentFlightControlWithoutLiveInput(t *testing.T) {
+	first := New()
+	second := New()
+	first.mode, second.mode = modeManual, modeManual
+	input := gameplayInput{Flight: control.Intent{Throttle: 1, Yaw: -0.35, Pitch: 0.2, Roll: 0.1}}
+
+	first.applyGameplayFlightInput(input, first.profile.Simulation.TickSeconds)
+	second.applyGameplayFlightInput(input, second.profile.Simulation.TickSeconds)
+
+	if got, want := first.objectByID(fighterID).Motion, second.objectByID(fighterID).Motion; got != want {
+		t.Fatalf("injected flight motion = %+v, want %+v", got, want)
+	}
+	if first.objectByID(fighterID).Motion == first.autoMotion {
+		t.Fatal("injected flight input did not alter the manual fighter motion")
+	}
+}
+
+func TestGameplayInputPreservesModeAndAutoLevelCommands(t *testing.T) {
+	g := New()
+	if g.mode != modeAutopilot {
+		t.Fatalf("initial mode = %v, want autopilot", g.mode)
+	}
+	autoLevel := g.surfaceAutoLevel
+	input := gameplayInput{
+		ToggleMode:             true,
+		ToggleSurfaceAutoLevel: true,
+		Flight:                 control.Intent{Throttle: 1, Yaw: 0.4},
+	}
+
+	g.applyGameplayModeToggle(input)
+	g.applyGameplayControlModes(input)
+	g.applyGameplayFlightInput(input, g.profile.Simulation.TickSeconds)
+
+	if g.mode != modeManual {
+		t.Fatalf("mode after toggle = %v, want manual", g.mode)
+	}
+	if g.surfaceAutoLevel == autoLevel {
+		t.Fatal("surface auto-level did not toggle")
+	}
+	if g.objectByID(fighterID).Motion == g.autoMotion {
+		t.Fatal("flight input was not applied after switching from autopilot")
+	}
+}
+
+func TestGameplayInputHeldLaserFiresOnSuccessiveEligibleTicks(t *testing.T) {
+	g := New()
+	input := gameplayInput{FireLaser: true}
+	for tick := 0; tick < 16; tick++ {
+		g.applyGameplayLaser(input)
+		g.simulationTime += g.profile.Simulation.TickSeconds
+		g.fireCooldown = max(0, g.fireCooldown-g.profile.Simulation.TickSeconds)
+	}
+	if got := projectileCountByKind(g, scene.ProjectileLaser); got < 4 {
+		t.Fatalf("held laser input created %d bolts, want at least two volleys", got)
+	}
+	if got := len(g.fireHistory); got < 2 {
+		t.Fatalf("held laser input created %d fire events, want at least two", got)
+	}
+}
+
+func TestGameplayInputTorpedoIsAnExplicitOneShotCommand(t *testing.T) {
+	g := New()
+	before := g.torpedoesRemaining
+	input := gameplayInput{FireTorpedo: true}
+
+	g.applyGameplayTorpedo(input)
+	if got := projectileCountByKind(g, scene.ProjectileProtonTorpedo); got != 1 {
+		t.Fatalf("torpedo projectiles after one input pulse = %d, want 1", got)
+	}
+	if g.torpedoesRemaining != before-1 {
+		t.Fatalf("torpedoes remaining = %d, want %d", g.torpedoesRemaining, before-1)
+	}
+	g.applyGameplayTorpedo(input)
+	if got := projectileCountByKind(g, scene.ProjectileProtonTorpedo); got != 1 {
+		t.Fatalf("reapplying the same tick pulse bypassed torpedo cooldown: %d projectiles", got)
+	}
+}
+
+func TestGameplayInputPreservesTorpedoBeforeLaserOrdering(t *testing.T) {
+	g := New()
+	input := gameplayInput{FireTorpedo: true, FireLaser: true}
+	g.applyGameplayTorpedo(input)
+	g.applyGameplayLaser(input)
+
+	projectiles := make([]scene.Object, 0, 3)
+	for _, object := range g.objects {
+		if object.CollisionRole == scene.CollisionProjectile {
+			projectiles = append(projectiles, object)
+		}
+	}
+	if len(projectiles) != 3 {
+		t.Fatalf("simultaneous weapon input created %d projectiles, want 3", len(projectiles))
+	}
+	if projectiles[0].ProjectileKind != scene.ProjectileProtonTorpedo || projectiles[1].ProjectileKind != scene.ProjectileLaser || projectiles[2].ProjectileKind != scene.ProjectileLaser {
+		t.Fatalf("simultaneous weapon projectile order = %v, %v, %v; want torpedo then laser pair", projectiles[0].ProjectileKind, projectiles[1].ProjectileKind, projectiles[2].ProjectileKind)
+	}
+}
+
+func TestGameplayInputLeavesMissionStateUntouchedWithoutMissionCommands(t *testing.T) {
+	g := New()
+	if err := g.startYavinMission(false); err != nil {
+		t.Fatal(err)
+	}
+	before := g.world.Mission
+	g.applyGameplayModeToggle(gameplayInput{})
+	g.applyGameplayReset(gameplayInput{})
+	g.applyGameplayControlModes(gameplayInput{})
+	g.applyGameplayFlightInput(gameplayInput{}, g.profile.Simulation.TickSeconds)
+	g.applyGameplayTorpedo(gameplayInput{})
+	g.applyGameplayLaser(gameplayInput{})
+	if got := g.world.Mission; !reflect.DeepEqual(got, before) {
+		t.Fatalf("empty gameplay input changed mission state: got %+v want %+v", got, before)
+	}
+}
+
+func projectileCountByKind(g *Game, kind scene.ProjectileKind) int {
+	count := 0
+	for _, object := range g.objects {
+		if object.CollisionRole == scene.CollisionProjectile && object.ProjectileKind == kind {
+			count++
+		}
+	}
+	return count
+}
+
 func TestCountdownDialNeedleSweepsFromExpiredToFullTime(t *testing.T) {
 	low, high := countdownDialAngle(0), countdownDialAngle(100)
 	if high <= low || math.Abs(low-math.Pi*.75) > 1e-9 || math.Abs(high-math.Pi*2.25) > 1e-9 {
