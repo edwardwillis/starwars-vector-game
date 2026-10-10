@@ -3,6 +3,7 @@ package game
 import (
 	"image/color"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
@@ -25,6 +26,15 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/view"
 	"github.com/hajimehoshi/ebiten/v2"
 )
+
+type recordingFiringController struct {
+	order *[]scene.ObjectID
+}
+
+func (controller recordingFiringController) Decide(context control.Context) control.Decision {
+	*controller.order = append(*controller.order, context.Self.ID)
+	return control.Decision{Fire: true}
+}
 
 func TestLayoutUsesLogicalResolution(t *testing.T) {
 	g := New()
@@ -1707,6 +1717,99 @@ func TestSwarmControllersContinueAvoidingWhenPlayerIsDestroyed(t *testing.T) {
 			t.Fatalf("swarm controller %d stopped updating without a player target", id)
 		}
 	}
+}
+
+func TestOrderedControllerIDsAreStableAndReuseGameScratchBuffer(t *testing.T) {
+	g := &Game{
+		controllers: map[scene.ObjectID]control.Strategy{
+			9: control.Static{},
+			2: control.Static{},
+			5: control.Static{},
+		},
+		controllerOrder: make([]scene.ObjectID, 0, 3),
+	}
+	backing := &g.controllerOrder[:cap(g.controllerOrder)][0]
+	if got, want := g.orderedControllerIDs(), []scene.ObjectID{2, 5, 9}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ordered controller IDs = %v, want %v", got, want)
+	}
+	if got := &g.controllerOrder[0]; got != backing {
+		t.Fatal("ordered controller IDs replaced the preallocated Game scratch buffer")
+	}
+	if got, want := g.orderedControllerIDs(), []scene.ObjectID{2, 5, 9}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reused ordered controller IDs = %v, want %v", got, want)
+	}
+}
+
+func TestAutonomousExecutionIsIndependentOfControllerMapInsertionOrder(t *testing.T) {
+	first, firstOrder := newAutonomousFiringSession(t, []scene.ObjectID{4, 2, 3})
+	second, secondOrder := newAutonomousFiringSession(t, []scene.ObjectID{3, 4, 2})
+
+	advanceAutonomousOnly(t, first, 3)
+	advanceAutonomousOnly(t, second, 3)
+
+	wantOrder := []scene.ObjectID{2, 3, 4, 2, 3, 4, 2, 3, 4}
+	if !reflect.DeepEqual(*firstOrder, wantOrder) {
+		t.Fatalf("first controller execution order = %v, want %v", *firstOrder, wantOrder)
+	}
+	if !reflect.DeepEqual(*secondOrder, wantOrder) {
+		t.Fatalf("second controller execution order = %v, want %v", *secondOrder, wantOrder)
+	}
+
+	firstIDs, firstOwners := autonomousProjectileSequence(first)
+	secondIDs, secondOwners := autonomousProjectileSequence(second)
+	wantOwners := []scene.ObjectID{2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4, 2, 2, 3, 3, 4, 4}
+	if !reflect.DeepEqual(firstOwners, wantOwners) {
+		t.Fatalf("first projectile owner order = %v, want %v", firstOwners, wantOwners)
+	}
+	if !reflect.DeepEqual(firstIDs, secondIDs) || !reflect.DeepEqual(firstOwners, secondOwners) {
+		t.Fatalf("projectile sequence differs: first IDs/owners=%v/%v second=%v/%v", firstIDs, firstOwners, secondIDs, secondOwners)
+	}
+	if !reflect.DeepEqual(first.objects, second.objects) {
+		t.Fatal("equivalent autonomous sessions produced different authoritative objects")
+	}
+	if !reflect.DeepEqual(first.controllerTargets, second.controllerTargets) || !reflect.DeepEqual(first.world.Mission, second.world.Mission) || first.world.Tick != second.world.Tick {
+		t.Fatal("equivalent autonomous sessions produced different mission-relevant state")
+	}
+}
+
+func newAutonomousFiringSession(t *testing.T, insertionOrder []scene.ObjectID) (*Game, *[]scene.ObjectID) {
+	t.Helper()
+	g, err := NewWithProfile(profile.Cadet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := []scene.ObjectID{}
+	g.controllers = make(map[scene.ObjectID]control.Strategy, len(insertionOrder))
+	for _, id := range insertionOrder {
+		g.controllers[id] = recordingFiringController{order: &order}
+	}
+	return g, &order
+}
+
+func advanceAutonomousOnly(t *testing.T, g *Game, ticks int) {
+	t.Helper()
+	for range ticks {
+		g.updateAutonomous(g.profile.Simulation.TickSeconds)
+		g.world.Objects = g.objects
+		if err := g.world.Step(g.profile.Simulation.TickSeconds * g.profile.Simulation.MotionScale); err != nil {
+			t.Fatal(err)
+		}
+		g.objects = g.world.Objects
+		g.simulationTime += g.profile.Simulation.TickSeconds
+	}
+}
+
+func autonomousProjectileSequence(g *Game) ([]scene.ObjectID, []scene.ObjectID) {
+	ids := make([]scene.ObjectID, 0)
+	owners := make([]scene.ObjectID, 0)
+	for _, object := range g.objects {
+		if object.CollisionRole != scene.CollisionProjectile {
+			continue
+		}
+		ids = append(ids, object.ID)
+		owners = append(owners, g.owners[object.ID])
+	}
+	return ids, owners
 }
 
 func TestDisintegrationFragmentsUseOwnPivotAndInheritFlightPath(t *testing.T) {

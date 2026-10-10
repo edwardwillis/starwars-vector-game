@@ -1032,6 +1032,7 @@ type Game struct {
 	mouseNeutralY            int
 	starField                *starfield.Field
 	controllers              map[scene.ObjectID]control.Strategy
+	controllerOrder          []scene.ObjectID
 	controllerTargets        map[scene.ObjectID]scene.ObjectID
 	debris                   map[scene.ObjectID]destructionTransient
 	surfaceEffects           map[scene.ObjectID]surfaceEffect
@@ -1196,6 +1197,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		owners:                 make(map[scene.ObjectID]scene.ObjectID),
 		starField:              starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
 		controllers:            controllers,
+		controllerOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		controllerTargets:      make(map[scene.ObjectID]scene.ObjectID),
 		debris:                 make(map[scene.ObjectID]destructionTransient),
 		surfaceEffects:         make(map[scene.ObjectID]surfaceEffect),
@@ -3954,7 +3956,8 @@ func (g *Game) updateAutonomous(seconds float64) {
 			solidSnapshots = append(solidSnapshots, object)
 		}
 	}
-	for id, controller := range g.controllers {
+	for _, id := range g.orderedControllerIDs() {
+		controller := g.controllers[id]
 		if !g.swarmLaunched {
 			continue
 		}
@@ -3999,6 +4002,22 @@ func (g *Game) updateAutonomous(seconds float64) {
 			}
 		}
 	}
+}
+
+// orderedControllerIDs provides a canonical execution order for autonomous
+// simulation. Controller decisions may append projectiles and therefore affect
+// later IDs and collision ordering, so Go map iteration cannot be used here.
+// The scratch slice stays owned by Game and grows only if the controller count
+// exceeds its previous high-water mark.
+func (g *Game) orderedControllerIDs() []scene.ObjectID {
+	g.controllerOrder = g.controllerOrder[:0]
+	for id := range g.controllers {
+		g.controllerOrder = append(g.controllerOrder, id)
+	}
+	sort.Slice(g.controllerOrder, func(first, second int) bool {
+		return g.controllerOrder[first] < g.controllerOrder[second]
+	})
+	return g.controllerOrder
 }
 
 // surfaceWeaponsEnabled keeps the first seconds of a local surface encounter
