@@ -126,7 +126,11 @@ play and renderer profiling:
 make build-windows
 make run-windows
 make run-windows WINDOWS_RUN_ARGS='-profile cadet -telemetry C:\Users\YOUR_WINDOWS_USER\surface-flight-native.csv'
+make run-windows-telemetry
 ```
+
+`run-windows-telemetry` writes a timestamped CSV in the current Windows
+user's home directory. Override `WINDOWS_TELEMETRY` to choose a fixed path.
 
 `build-windows` writes `starwars-vector.exe` to the current Windows user's home
 directory by default. Override `WINDOWS_EXE` with a Windows-mounted WSL path if

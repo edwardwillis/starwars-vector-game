@@ -3,11 +3,14 @@ GO ?= go
 # These targets are intended for development from WSL. The executable is put
 # on the Windows filesystem and launched through cmd.exe, so it uses the native
 # Windows graphics stack rather than WSLg/XWayland.
-WINDOWS_EXE ?= $(shell wslpath -u "$$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')" 2>/dev/null)/starwars-vector.exe
+WINDOWS_HOME ?= $(shell wslpath -u "$$(cmd.exe /C "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')" 2>/dev/null)
+WINDOWS_EXE ?= $(WINDOWS_HOME)/starwars-vector.exe
 WINDOWS_EXE_NATIVE := $(shell wslpath -w "$(WINDOWS_EXE)" 2>/dev/null)
+WINDOWS_TELEMETRY ?= $(WINDOWS_HOME)/starwars-telemetry-$(shell date +%Y%m%d-%H%M%S).csv
+WINDOWS_TELEMETRY_NATIVE := $(shell wslpath -w "$(WINDOWS_TELEMETRY)" 2>/dev/null)
 WINDOWS_RUN_ARGS ?=
 
-.PHONY: test test-unit build-windows run-windows
+.PHONY: test test-unit build-windows run-windows run-windows-telemetry
 
 # Complete suite, including Ebitengine integration tests. The wrapper supplies
 # a virtual X11 display automatically on headless Linux systems.
@@ -28,3 +31,8 @@ build-windows:
 # WINDOWS_RUN_ARGS, for example: make run-windows WINDOWS_RUN_ARGS='-profile cadet'
 run-windows: build-windows
 	cmd.exe /C start "" "$(WINDOWS_EXE_NATIVE)" $(WINDOWS_RUN_ARGS)
+
+# Build and launch the native Windows executable with a timestamped CSV
+# telemetry file. Override WINDOWS_TELEMETRY to select a fixed output path.
+run-windows-telemetry: build-windows
+	cmd.exe /C start "" "$(WINDOWS_EXE_NATIVE)" -telemetry "$(WINDOWS_TELEMETRY_NATIVE)" $(WINDOWS_RUN_ARGS)

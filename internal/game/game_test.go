@@ -132,6 +132,109 @@ func TestXWingInstrumentStateUsesAuthoritativeFlightAndMissionData(t *testing.T)
 	}
 }
 
+func TestXWingCockpitStaticCacheKeyTracksStaticLayoutAndPresentationChanges(t *testing.T) {
+	layout, ok := cockpit.DefaultRegistry().ForDefinition(catalog.XWingName)
+	if !ok {
+		t.Fatal("missing X-wing cockpit layout")
+	}
+	base := xWingCockpitStaticCacheKey{
+		structureDetail: xWingStaticStructureDetail(2),
+		layoutHash:      xWingCockpitStaticLayoutHash(layout),
+	}
+	if base != (xWingCockpitStaticCacheKey{
+		structureDetail: xWingStaticStructureDetail(3),
+		layoutHash:      xWingCockpitStaticLayoutHash(layout),
+	}) {
+		t.Fatal("equivalent static detail produced a different cache key")
+	}
+	for _, changed := range []xWingCockpitStaticCacheKey{
+		{structureDetail: xWingStaticStructureDetail(1), layoutHash: base.layoutHash},
+	} {
+		if changed == base {
+			t.Fatalf("cache key did not change for presentation input: %+v", changed)
+		}
+	}
+
+	changedLayout := layout
+	changedLayout.Windshield.Segments = append([]cockpit.FrameSegment(nil), layout.Windshield.Segments...)
+	changedLayout.Windshield.Segments[0].ToX += .01
+	if got := xWingCockpitStaticLayoutHash(changedLayout); got == base.layoutHash {
+		t.Fatal("windshield layout change did not invalidate static cache key")
+	}
+	changedLayout = layout
+	changedLayout.Palette.Structure.R++
+	if got := xWingCockpitStaticLayoutHash(changedLayout); got == base.layoutHash {
+		t.Fatal("dashboard structure colour change did not invalidate static cache key")
+	}
+}
+
+func TestCachedXWingCockpitReusesAndInvalidatesStaticArtwork(t *testing.T) {
+	g := New()
+	layout, ok := cockpit.DefaultRegistry().ForDefinition(catalog.XWingName)
+	if !ok {
+		t.Fatal("missing X-wing cockpit layout")
+	}
+	screen := ebiten.NewImage(ScreenWidth, ScreenHeight)
+	g.drawCachedXWingCockpit(screen, layout, 2)
+	first := g.cockpitArtwork.xWingStatic.image
+	if first == nil || !g.cockpitArtwork.xWingStatic.valid {
+		t.Fatal("X-wing static cockpit artwork was not cached")
+	}
+
+	g.drawCachedXWingCockpit(screen, layout, 2)
+	if g.cockpitArtwork.xWingStatic.image != first {
+		t.Fatal("unchanged cockpit artwork was rebuilt")
+	}
+
+	g.drawCachedXWingCockpit(screen, layout, 3)
+	if g.cockpitArtwork.xWingStatic.image != first {
+		t.Fatal("equivalent visual-detail change rebuilt static cockpit artwork")
+	}
+
+	g.drawCachedXWingCockpit(screen, layout, 1)
+	if g.cockpitArtwork.xWingStatic.image == first {
+		t.Fatal("static visual-detail change did not rebuild cockpit artwork")
+	}
+	detailChanged := g.cockpitArtwork.xWingStatic.image
+
+	g.drawCachedXWingCockpit(ebiten.NewImage(ScreenWidth-1, ScreenHeight), layout, 3)
+	if g.cockpitArtwork.xWingStatic.image == detailChanged {
+		t.Fatal("screen-size change did not rebuild static cockpit artwork")
+	}
+	resized := g.cockpitArtwork.xWingStatic.image
+
+	changedLayout := layout
+	changedLayout.Windshield.Segments = append([]cockpit.FrameSegment(nil), layout.Windshield.Segments...)
+	changedLayout.Windshield.Segments[0].ToX += .01
+	g.drawCachedXWingCockpit(ebiten.NewImage(ScreenWidth-1, ScreenHeight), changedLayout, 3)
+	if g.cockpitArtwork.xWingStatic.image == resized {
+		t.Fatal("cockpit-layout change did not rebuild static artwork")
+	}
+}
+
+func TestXWingStaticCockpitCacheSurvivesLiveInstrumentAndMissionChanges(t *testing.T) {
+	g := New()
+	screen := ebiten.NewImage(ScreenWidth, ScreenHeight)
+	g.drawCockpitOverlay(screen)
+	staticArtwork := g.cockpitArtwork.xWingStatic.image
+	if staticArtwork == nil {
+		t.Fatal("initial X-wing cockpit did not create static artwork")
+	}
+
+	fighter := g.objectByID(fighterID)
+	if fighter == nil {
+		t.Fatal("missing player fighter")
+	}
+	fighter.Motion.Speed = g.profile.Player.Flight.MaxForward / 2
+	g.shieldStrength--
+	g.torpedoesRemaining--
+	g.world.Mission.Phase = sim.MissionTrenchRun
+	g.drawCockpitOverlay(screen)
+	if g.cockpitArtwork.xWingStatic.image != staticArtwork {
+		t.Fatal("live instrument or trench-computer state rebuilt static cockpit artwork")
+	}
+}
+
 func TestRenderDiagnosticsRequireHUDOrTelemetry(t *testing.T) {
 	g := New()
 	if g.renderDiagnosticsEnabled() {

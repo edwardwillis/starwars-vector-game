@@ -943,6 +943,22 @@ const (
 
 const yavinMissionID = "battle-of-yavin"
 
+// xWingCockpitStaticCacheKey describes every presentation input used to build
+// the cached, immutable portion of the X-wing cockpit.  Dynamic instrument
+// state deliberately does not appear here: it is rendered directly each frame.
+type xWingCockpitStaticCacheKey struct {
+	structureDetail int
+	layoutHash      uint64
+}
+
+// cockpitArtwork groups resources used by cockpit drawing. The static image
+// cache itself is craft-agnostic; the X-wing entry supplies only its key and
+// build callback.
+type cockpitArtwork struct {
+	mask        *ebiten.Image
+	xWingStatic staticArtworkCache[xWingCockpitStaticCacheKey]
+}
+
 const (
 	// The Imperial screen starts ahead of the player and closes naturally as
 	// the player advances. These are mission-design constraints, not visual or
@@ -1037,7 +1053,7 @@ type Game struct {
 	viewContext              view.Context
 	visibleObjectIDs         map[scene.ObjectID]bool
 	whitePixel               *ebiten.Image
-	cockpitMask              *ebiten.Image
+	cockpitArtwork           cockpitArtwork
 	textureRegistry          *render.TextureRegistry
 	textureImages            map[string]*ebiten.Image
 	starVertices             []ebiten.Vertex
@@ -4654,10 +4670,17 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 			layout = candidate
 		}
 	}
-	g.drawCockpitWindshield(screen, layout.Windshield)
+	isXWing := layout.Definition == catalog.XWingName
+	var xWingState cockpit.XWingInstrumentState
+	if isXWing {
+		xWingState = g.xWingInstrumentState()
+		g.drawCachedXWingCockpit(screen, layout, xWingState.VisualDetail)
+	} else {
+		g.drawCockpitWindshield(screen, layout.Windshield)
+	}
 	cx, cy, targetInRange := g.cockpitTarget()
-	if layout.Definition == catalog.XWingName {
-		g.drawXWingDashboard(screen, g.xWingInstrumentState(), layout.Palette)
+	if isXWing {
+		g.drawXWingDashboard(screen, xWingState, layout.Palette)
 	} else {
 		g.drawShieldIndicator(screen)
 		g.drawSpeedIndicator(screen)
@@ -4742,6 +4765,84 @@ func (g *Game) drawCockpitWindshield(screen *ebiten.Image, windshield cockpit.Wi
 	}
 }
 
+// drawCachedXWingCockpit composites the genuinely immutable X-wing coaming
+// artwork. The cache deliberately stops before every stateful instrument and
+// targeting primitive, so the existing live cockpit path remains responsible
+// for gameplay information and aiming feedback.
+func (g *Game) drawCachedXWingCockpit(screen *ebiten.Image, layout cockpit.Layout, visualDetail int) {
+	key := xWingCockpitStaticCacheKey{
+		structureDetail: xWingStaticStructureDetail(visualDetail),
+		layoutHash:      xWingCockpitStaticLayoutHash(layout),
+	}
+	g.cockpitArtwork.xWingStatic.Draw(screen, key, func(staticArtwork *ebiten.Image) {
+		g.drawCockpitWindshield(staticArtwork, layout.Windshield)
+		g.drawXWingPanelStructure(staticArtwork, layout.Palette.Structure, visualDetail)
+	})
+}
+
+// xWingStaticStructureDetail returns only the portion of the realism profile
+// that affects the fixed panel artwork. Levels two and above render the same
+// two supplemental frame lines, so moving between them must not rebuild the
+// cached cockpit image.
+func xWingStaticStructureDetail(visualDetail int) int {
+	if visualDetail < 2 {
+		return 0
+	}
+	return 2
+}
+
+// xWingCockpitStaticLayoutHash covers the data that contributes to fixed
+// artwork. It permits a future registry/layout replacement to invalidate the
+// cache without teaching the rendering path about individual layout changes.
+func xWingCockpitStaticLayoutHash(layout cockpit.Layout) uint64 {
+	const (
+		offset = uint64(14695981039346656037)
+		prime  = uint64(1099511628211)
+	)
+	hash := offset
+	add := func(value uint64) {
+		hash ^= value
+		hash *= prime
+	}
+	addColor := func(value color.RGBA) {
+		add(uint64(value.R)<<24 | uint64(value.G)<<16 | uint64(value.B)<<8 | uint64(value.A))
+	}
+	addSegment := func(segment cockpit.FrameSegment) {
+		add(uint64(math.Float32bits(segment.FromX)))
+		add(uint64(math.Float32bits(segment.FromY)))
+		add(uint64(math.Float32bits(segment.ToX)))
+		add(uint64(math.Float32bits(segment.ToY)))
+	}
+	addColor(layout.Palette.Structure)
+	windshield := layout.Windshield
+	addColor(windshield.Color)
+	add(uint64(math.Float32bits(windshield.LineWidth)))
+	addColor(windshield.OpaqueColor)
+	addColor(windshield.OpaqueOutlineColor)
+	add(uint64(math.Float32bits(windshield.OpaqueOutlineWidth)))
+	addColor(windshield.InstrumentColor)
+	add(uint64(math.Float32bits(windshield.InstrumentLineWidth)))
+	for _, segments := range [][]cockpit.FrameSegment{
+		windshield.Segments,
+		windshield.OpaqueOutlineSegments,
+		windshield.InstrumentSegments,
+	} {
+		add(uint64(len(segments)))
+		for _, segment := range segments {
+			addSegment(segment)
+		}
+	}
+	add(uint64(len(windshield.OpaquePolygons)))
+	for _, polygon := range windshield.OpaquePolygons {
+		add(uint64(len(polygon.Points)))
+		for _, point := range polygon.Points {
+			add(uint64(math.Float32bits(point.X)))
+			add(uint64(math.Float32bits(point.Y)))
+		}
+	}
+	return hash
+}
+
 // drawCockpitOpaqueMask fills one closed cockpit contour on an isolated mask and
 // composites it afterward. This keeps concave outlines independent from world
 // rendering and from any other cockpit artwork.
@@ -4749,10 +4850,13 @@ func (g *Game) drawCockpitOpaqueMask(screen *ebiten.Image, polygon cockpit.Frame
 	if len(polygon.Points) < 3 {
 		return
 	}
-	if g.cockpitMask == nil || g.cockpitMask.Bounds().Dx() != ScreenWidth || g.cockpitMask.Bounds().Dy() != ScreenHeight {
-		g.cockpitMask = ebiten.NewImage(ScreenWidth, ScreenHeight)
+	if g.cockpitArtwork.mask == nil || g.cockpitArtwork.mask.Bounds().Dx() != ScreenWidth || g.cockpitArtwork.mask.Bounds().Dy() != ScreenHeight {
+		if g.cockpitArtwork.mask != nil {
+			g.cockpitArtwork.mask.Dispose()
+		}
+		g.cockpitArtwork.mask = ebiten.NewImage(ScreenWidth, ScreenHeight)
 	}
-	g.cockpitMask.Clear()
+	g.cockpitArtwork.mask.Clear()
 	var path vector.Path
 	for index, point := range polygon.Points {
 		x, y := point.X*ScreenWidth, point.Y*ScreenHeight
@@ -4765,10 +4869,10 @@ func (g *Game) drawCockpitOpaqueMask(screen *ebiten.Image, polygon cockpit.Frame
 	path.Close()
 	draw := &vector.DrawPathOptions{AntiAlias: true}
 	draw.ColorScale.ScaleWithColor(fillColor)
-	vector.FillPath(g.cockpitMask, &path, nil, draw)
+	vector.FillPath(g.cockpitArtwork.mask, &path, nil, draw)
 	// Using the mask as a source flushes its single vector fill before the mask
 	// is composited. No other path can affect this closed opaque region.
-	screen.DrawImage(g.cockpitMask, nil)
+	screen.DrawImage(g.cockpitArtwork.mask, nil)
 }
 
 // drawMissionDirector keeps the next required player action visible in every
@@ -5107,9 +5211,9 @@ func (g *Game) xWingInstrumentState() cockpit.XWingInstrumentState {
 func (g *Game) drawXWingDashboard(screen *ebiten.Image, state cockpit.XWingInstrumentState, palette cockpit.Palette) {
 	// The panel deliberately spans most of the coaming.  Its screen and side
 	// bays are separated by generous dead space, so illuminated readouts never
-	// collide with the understated structural lines.
+	// collide with the understated structural lines. The fixed frame itself is
+	// already present in drawCachedXWingCockpit; all work below is live data.
 	const centerX, centerY, halfWidth, halfHeight = float32(ScreenWidth / 2), float32(454), float32(132), float32(45)
-	g.drawXWingPanelStructure(screen, palette.Structure, state.VisualDetail)
 	g.drawXWingEngineInstrument(screen, 100, 430, state, palette)
 	g.drawXWingOrdnanceInstrument(screen, 730, 417, state, palette)
 	g.drawXWingShieldInstrument(screen, state)
