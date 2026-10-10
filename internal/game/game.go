@@ -1083,6 +1083,7 @@ type Game struct {
 	telemetry                *telemetry.Recorder
 	telemetryUpdateDuration  time.Duration
 	telemetryUpdateCalls     int
+	recording                *gameplayRecorder
 }
 
 var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
@@ -1370,6 +1371,59 @@ func (g *Game) SetTelemetryRecorder(recorder *telemetry.Recorder) {
 	g.telemetryUpdateCalls = 0
 }
 
+// StartSurfaceRecording begins a fresh, canonical Battle of Yavin
+// surface-development session and records normalized input from its active
+// simulation ticks. The recording is published only when CloseRecording is
+// called successfully.
+func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
+	if g.recording != nil {
+		return fmt.Errorf("gameplay recording is already active")
+	}
+	if g.flow != flowTitle {
+		return fmt.Errorf("gameplay recording must start from the title flow")
+	}
+	path = recordingPath(path)
+	if err := validateRecordingDestination(path); err != nil {
+		return err
+	}
+	g.selectedMission = 0
+	if err := g.launchYavinSession(true); err != nil {
+		return fmt.Errorf("start surface recording session: %w", err)
+	}
+	mission := ""
+	if g.world != nil {
+		mission = g.world.Mission.ID
+	}
+	recorder, err := newGameplayRecorder(path, maxTicks, gameplayRecording{
+		FormatVersion:  gameplayRecordingFormatVersion,
+		Mission:        mission,
+		StartMode:      surfaceDevelopmentRecordingStart,
+		Profile:        g.profile.Clone(),
+		TickSeconds:    g.profile.Simulation.TickSeconds,
+		InitialView:    recordingView(g.viewCamera.Mode),
+		InitialTarget:  g.viewCamera.TargetID,
+		InitialRealism: g.realismLevel,
+	})
+	if err != nil {
+		return err
+	}
+	g.recording = recorder
+	return nil
+}
+
+// CloseRecording finalizes an active recording. It is safe to call after a
+// bounded recording has already stopped the game loop.
+func (g *Game) CloseRecording() error {
+	if g.recording == nil {
+		return nil
+	}
+	return g.recording.Close()
+}
+
+func (g *Game) recordGameplayInput(input gameplayInput) bool {
+	return g.recording != nil && g.recording.Capture(input)
+}
+
 func (g *Game) Update() error {
 	if g.telemetry != nil {
 		updateStarted := time.Now()
@@ -1503,6 +1557,7 @@ func (g *Game) Update() error {
 		return nil
 	}
 	if len(g.transitions) > 0 {
+		stopAfterTick := false
 		if !g.paused {
 			g.simulationTime += seconds
 			// Keep the authoritative tick and unrelated world objects moving while
@@ -1518,9 +1573,13 @@ func (g *Game) Update() error {
 				return err
 			}
 			g.enterTerminalMissionFlow()
+			stopAfterTick = g.recordGameplayInput(input)
 		}
 		g.refreshTransitionEnvironmentTiles()
 		g.refreshViewContext()
+		if stopAfterTick {
+			return ebiten.Termination
+		}
 		return nil
 	}
 
@@ -1589,6 +1648,9 @@ func (g *Game) Update() error {
 	}
 	g.viewCamera.Update(seconds)
 	g.refreshViewContext()
+	if g.recordGameplayInput(input) {
+		return ebiten.Termination
+	}
 	return nil
 }
 

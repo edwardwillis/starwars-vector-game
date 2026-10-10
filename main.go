@@ -13,6 +13,8 @@ import (
 func main() {
 	profileName := flag.String("profile", "pilot", "game profile: cadet, pilot, ace, or nightmare")
 	telemetryPath := flag.String("telemetry", "", "write one-second development telemetry samples to this CSV file")
+	recordingPath := flag.String("record", "", "record a canonical Yavin surface-development input trace to this JSON file")
+	recordingTicks := flag.Uint64("record-ticks", 60*60, "active simulation ticks to record (0 records until clean exit)")
 	flag.Parse()
 	selected, err := profile.Builtin(*profileName)
 	if err != nil {
@@ -31,6 +33,12 @@ func main() {
 		runningGame.SetTelemetryRecorder(recorder)
 		log.Printf("development telemetry: %s", *telemetryPath)
 	}
+	if *recordingPath != "" {
+		if err := runningGame.StartSurfaceRecording(*recordingPath, *recordingTicks); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("recording %d active simulation ticks to %s", *recordingTicks, *recordingPath)
+	}
 
 	ebiten.SetWindowSize(game.ScreenWidth, game.ScreenHeight)
 	// The default Ebitengine mode fixes the native window to its initial size.
@@ -44,6 +52,11 @@ func main() {
 	if recorder != nil {
 		if err := recorder.Close(); err != nil {
 			log.Printf("close telemetry: %v", err)
+		}
+	}
+	if *recordingPath != "" {
+		if err := runningGame.CloseRecording(); err != nil {
+			log.Printf("close recording: %v", err)
 		}
 	}
 	if runErr != nil {

@@ -12,20 +12,20 @@ import (
 // never keyboard, mouse, camera, or rendering state. Recording will persist
 // this value and replay will inject it at the same application points.
 type gameplayInput struct {
-	Flight                    control.Intent
-	CockpitSteering           control.Intent
-	CockpitSteeringHeld       bool
-	CockpitSteeringPressed    bool
-	ToggleMode                bool
-	ResetFighter              bool
-	ToggleMouseFlight         bool
-	MouseFlightNeutralX       int
-	MouseFlightNeutralY       int
-	ToggleSurfaceAutoLevel    bool
-	ManualOverride            bool
-	FireTorpedo               bool
-	FireLaser                 bool
-	SkipEnvironmentTransition bool
+	Flight                    control.Intent `json:"flight"`
+	CockpitSteering           control.Intent `json:"cockpit_steering"`
+	CockpitSteeringHeld       bool           `json:"cockpit_steering_held"`
+	CockpitSteeringPressed    bool           `json:"cockpit_steering_pressed"`
+	ToggleMode                bool           `json:"toggle_mode"`
+	ResetFighter              bool           `json:"reset_fighter"`
+	ToggleMouseFlight         bool           `json:"toggle_mouse_flight"`
+	MouseFlightNeutralX       int            `json:"mouse_flight_neutral_x"`
+	MouseFlightNeutralY       int            `json:"mouse_flight_neutral_y"`
+	ToggleSurfaceAutoLevel    bool           `json:"toggle_surface_auto_level"`
+	ManualOverride            bool           `json:"manual_override"`
+	FireTorpedo               bool           `json:"fire_torpedo"`
+	FireLaser                 bool           `json:"fire_laser"`
+	SkipEnvironmentTransition bool           `json:"skip_environment_transition"`
 }
 
 // readGameplayInput samples live controls once for the active gameplay update.
