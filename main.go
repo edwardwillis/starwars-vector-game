@@ -51,6 +51,9 @@ func main() {
 	}
 	if *replayPath != "" {
 		log.Printf("replaying %s", *replayPath)
+		if !runningGame.ReplayVerifiesState() {
+			log.Printf("warning: replay has no simulation checkpoints and is unverified; re-record it for strict benchmarking")
+		}
 	}
 
 	ebiten.SetWindowSize(game.ScreenWidth, game.ScreenHeight)

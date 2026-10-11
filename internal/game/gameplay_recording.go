@@ -1,6 +1,7 @@
 package game
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 
 const gameplayRecordingFormatVersion = 1
 
+const simulationCheckpointInterval = 300
+
 const surfaceDevelopmentRecordingStart = "surface-development"
 
 // gameplayRecording is a completed, self-contained input trace for one
@@ -25,18 +28,29 @@ const surfaceDevelopmentRecordingStart = "surface-development"
 // simulation-affecting tuning explicit for future replay validation while
 // retaining the associated presentation metadata as descriptive context.
 type gameplayRecording struct {
-	FormatVersion  int                 `json:"format_version"`
-	Build          string              `json:"build,omitempty"`
-	Mission        string              `json:"mission"`
-	StartMode      string              `json:"start_mode"`
-	Profile        profile.GameProfile `json:"profile"`
-	TickSeconds    float64             `json:"tick_seconds"`
-	InitialView    string              `json:"initial_view"`
-	InitialTarget  scene.ObjectID      `json:"initial_target"`
-	InitialRealism int                 `json:"initial_realism"`
-	Inputs         []gameplayInput     `json:"inputs"`
-	TotalTicks     uint64              `json:"total_ticks"`
-	Complete       bool                `json:"complete"`
+	FormatVersion  int                    `json:"format_version"`
+	Build          string                 `json:"build,omitempty"`
+	Mission        string                 `json:"mission"`
+	StartMode      string                 `json:"start_mode"`
+	Profile        profile.GameProfile    `json:"profile"`
+	TickSeconds    float64                `json:"tick_seconds"`
+	InitialView    string                 `json:"initial_view"`
+	InitialTarget  scene.ObjectID         `json:"initial_target"`
+	InitialRealism int                    `json:"initial_realism"`
+	Inputs         []gameplayInput        `json:"inputs"`
+	TotalTicks     uint64                 `json:"total_ticks"`
+	Complete       bool                   `json:"complete"`
+	Checkpoints    []simulationCheckpoint `json:"checkpoints,omitempty"`
+}
+
+// simulationCheckpoint records an authoritative state digest after InputCount
+// normalized inputs have been applied. SimulationTick is the underlying world
+// tick at that moment; a reset command may advance the input count without
+// advancing the world tick.
+type simulationCheckpoint struct {
+	InputCount     uint64 `json:"input_count"`
+	SimulationTick uint64 `json:"simulation_tick"`
+	Hash           string `json:"hash"`
 }
 
 // gameplayRecorder buffers normalized inputs in memory and atomically publishes
@@ -53,9 +67,10 @@ type gameplayRecorder struct {
 // gameplayReplay owns the immutable input stream and its cursor. It has no
 // knowledge of live Ebitengine input, rendering, or craft-specific behaviour.
 type gameplayReplay struct {
-	recording gameplayRecording
-	cursor    uint64
-	aborted   bool
+	recording        gameplayRecording
+	cursor           uint64
+	checkpointCursor int
+	aborted          bool
 }
 
 func newGameplayRecorder(path string, maxTicks uint64, recording gameplayRecording) (*gameplayRecorder, error) {
@@ -111,6 +126,38 @@ func (recorder *gameplayRecorder) Capture(input gameplayInput) bool {
 	recorder.recording.Inputs = append(recorder.recording.Inputs, input)
 	recorder.recording.TotalTicks++
 	return recorder.maxTicks > 0 && recorder.recording.TotalTicks >= recorder.maxTicks
+}
+
+func (recorder *gameplayRecorder) Checkpoint(inputCount, simulationTick uint64, checksum string, final bool) {
+	if recorder == nil || recorder.closed || checksum == "" {
+		return
+	}
+	if !recorder.NeedsCheckpoint(inputCount, final) {
+		return
+	}
+	if count := len(recorder.recording.Checkpoints); count > 0 && recorder.recording.Checkpoints[count-1].InputCount == inputCount {
+		recorder.recording.Checkpoints[count-1] = simulationCheckpoint{InputCount: inputCount, SimulationTick: simulationTick, Hash: checksum}
+		return
+	}
+	recorder.recording.Checkpoints = append(recorder.recording.Checkpoints, simulationCheckpoint{InputCount: inputCount, SimulationTick: simulationTick, Hash: checksum})
+}
+
+// NeedsCheckpoint reports whether an authoritative state digest is required
+// for this completed input count. Input count, rather than world tick, is the
+// recording clock: a reset consumes one input entry without stepping the
+// world, yet remains a replay boundary that must be verifiable.
+func (recorder *gameplayRecorder) NeedsCheckpoint(inputCount uint64, final bool) bool {
+	if recorder == nil || recorder.closed {
+		return false
+	}
+	if inputCount == 0 {
+		return true
+	}
+	if final {
+		count := len(recorder.recording.Checkpoints)
+		return count == 0 || recorder.recording.Checkpoints[count-1].InputCount != inputCount
+	}
+	return inputCount%simulationCheckpointInterval == 0
 }
 
 // Close writes a complete JSON document to a sibling temporary path and then
@@ -172,7 +219,65 @@ func readGameplayRecording(path string) (gameplayRecording, error) {
 	if recording.TotalTicks != uint64(len(recording.Inputs)) {
 		return gameplayRecording{}, fmt.Errorf("recording tick count %d does not match %d inputs", recording.TotalTicks, len(recording.Inputs))
 	}
+	if err := validateCheckpointSequence(recording.Checkpoints, recording.Inputs); err != nil {
+		return gameplayRecording{}, err
+	}
 	return recording, nil
+}
+
+func validateCheckpointSequence(checkpoints []simulationCheckpoint, inputs []gameplayInput) error {
+	if len(checkpoints) == 0 {
+		return nil // Milestone 3 recordings are supported as explicitly unverified legacy traces.
+	}
+	totalInputs := uint64(len(inputs))
+	expected := expectedCheckpointInputCounts(totalInputs)
+	if len(checkpoints) != len(expected) {
+		return fmt.Errorf("recording contains %d checkpoints, want %d for %d inputs", len(checkpoints), len(expected), totalInputs)
+	}
+	lastTick := uint64(0)
+	for index, checkpoint := range checkpoints {
+		if checkpoint.InputCount != expected[index] {
+			return fmt.Errorf("recording checkpoint %d is at input %d, want %d", index, checkpoint.InputCount, expected[index])
+		}
+		expectedTick := completedSimulationTicks(inputs, checkpoint.InputCount)
+		if checkpoint.SimulationTick != expectedTick {
+			return fmt.Errorf("recording checkpoint %d has simulation tick %d, want %d", index, checkpoint.SimulationTick, expectedTick)
+		}
+		if index > 0 && checkpoint.SimulationTick < lastTick {
+			return fmt.Errorf("recording checkpoints are not in canonical order")
+		}
+		decoded, err := hex.DecodeString(checkpoint.Hash)
+		if err != nil || len(decoded) != 32 {
+			return fmt.Errorf("recording checkpoint %d has invalid SHA-256 hash", index)
+		}
+		lastTick = checkpoint.SimulationTick
+	}
+	return nil
+}
+
+func expectedCheckpointInputCounts(totalInputs uint64) []uint64 {
+	counts := []uint64{0}
+	for inputCount := uint64(simulationCheckpointInterval); inputCount <= totalInputs; inputCount += simulationCheckpointInterval {
+		counts = append(counts, inputCount)
+	}
+	if counts[len(counts)-1] != totalInputs {
+		counts = append(counts, totalInputs)
+	}
+	return counts
+}
+
+// completedSimulationTicks mirrors the active recording boundary: ResetFighter
+// is recorded and replayed as an input command, but its immediate completion
+// occurs before a world step. Other recorded entries correspond to one fixed
+// world step.
+func completedSimulationTicks(inputs []gameplayInput, inputCount uint64) uint64 {
+	completed := uint64(0)
+	for _, input := range inputs[:inputCount] {
+		if !input.ResetFighter {
+			completed++
+		}
+	}
+	return completed
 }
 
 func validateReplayRecording(recording gameplayRecording) error {
@@ -184,6 +289,9 @@ func validateReplayRecording(recording gameplayRecording) error {
 	}
 	if recording.TotalTicks != uint64(len(recording.Inputs)) {
 		return fmt.Errorf("replay tick count %d does not match %d inputs", recording.TotalTicks, len(recording.Inputs))
+	}
+	if err := validateCheckpointSequence(recording.Checkpoints, recording.Inputs); err != nil {
+		return err
 	}
 	if recording.Mission != yavinMissionID {
 		return fmt.Errorf("replay mission %q is unsupported", recording.Mission)
@@ -261,6 +369,42 @@ func (replay *gameplayReplay) remainingAfterCurrent() uint64 {
 		return 0
 	}
 	return replay.recording.TotalTicks - replay.cursor - 1
+}
+
+func (replay *gameplayReplay) verified() bool {
+	return replay != nil && len(replay.recording.Checkpoints) > 0
+}
+
+func (replay *gameplayReplay) verifyInitial(simulationTick uint64, checksum string) error {
+	if !replay.verified() {
+		return nil
+	}
+	checkpoint := replay.recording.Checkpoints[0]
+	if checkpoint.SimulationTick != simulationTick || checkpoint.Hash != checksum {
+		return replay.checksumMismatch(checkpoint, 0, simulationTick, checksum)
+	}
+	replay.checkpointCursor = 1
+	return nil
+}
+
+func (replay *gameplayReplay) wantsCheckpoint(inputCount uint64) bool {
+	return replay != nil && replay.checkpointCursor < len(replay.recording.Checkpoints) && replay.recording.Checkpoints[replay.checkpointCursor].InputCount == inputCount
+}
+
+func (replay *gameplayReplay) verifyCheckpoint(inputCount, simulationTick uint64, checksum string) error {
+	if !replay.wantsCheckpoint(inputCount) {
+		return nil
+	}
+	checkpoint := replay.recording.Checkpoints[replay.checkpointCursor]
+	if checkpoint.SimulationTick != simulationTick || checkpoint.Hash != checksum {
+		return replay.checksumMismatch(checkpoint, inputCount, simulationTick, checksum)
+	}
+	replay.checkpointCursor++
+	return nil
+}
+
+func (replay *gameplayReplay) checksumMismatch(expected simulationCheckpoint, actualInputCount, simulationTick uint64, actual string) error {
+	return fmt.Errorf("replay divergence: expected checkpoint input %d at simulation tick %d; replay reached input %d at simulation tick %d; expected checksum %s, got %s", expected.InputCount, expected.SimulationTick, actualInputCount, simulationTick, expected.Hash, actual)
 }
 
 func recordingView(mode camera.Mode) string {

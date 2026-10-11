@@ -1033,6 +1033,7 @@ type Game struct {
 	starField                *starfield.Field
 	controllers              map[scene.ObjectID]control.Strategy
 	controllerOrder          []scene.ObjectID
+	transitionOrder          []scene.ObjectID
 	controllerTargets        map[scene.ObjectID]scene.ObjectID
 	debris                   map[scene.ObjectID]destructionTransient
 	surfaceEffects           map[scene.ObjectID]surfaceEffect
@@ -1085,6 +1086,9 @@ type Game struct {
 	telemetryUpdateCalls     int
 	recording                *gameplayRecorder
 	replay                   *gameplayReplay
+	// checksumObserver is test instrumentation only. It deliberately does not
+	// participate in simulation state or normal gameplay.
+	checksumObserver func()
 }
 
 var renderingProfiles = []string{"builtin/arcade", "builtin/culled", "builtin/hidden-line", "builtin/depth-cue", "builtin/maximum"}
@@ -1200,6 +1204,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		starField:              starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
 		controllers:            controllers,
 		controllerOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
+		transitionOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		controllerTargets:      make(map[scene.ObjectID]scene.ObjectID),
 		debris:                 make(map[scene.ObjectID]destructionTransient),
 		surfaceEffects:         make(map[scene.ObjectID]surfaceEffect),
@@ -1409,6 +1414,12 @@ func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
 		return err
 	}
 	g.recording = recorder
+	checksum, err := g.simulationChecksum()
+	if err != nil {
+		g.recording = nil
+		return fmt.Errorf("checksum initial recording state: %w", err)
+	}
+	g.recording.Checkpoint(0, g.world.Tick, checksum, false)
 	return nil
 }
 
@@ -1436,6 +1447,13 @@ func NewReplay(path string) (*Game, error) {
 	game.viewCamera.TargetID = fighterID
 	game.setRealismLevel(recording.InitialRealism)
 	game.replay = replay
+	checksum, err := game.simulationChecksum()
+	if err != nil {
+		return nil, fmt.Errorf("checksum initial replay state: %w", err)
+	}
+	if err := game.replay.verifyInitial(game.world.Tick, checksum); err != nil {
+		return nil, err
+	}
 	return game, nil
 }
 
@@ -1448,17 +1466,42 @@ func (g *Game) ReplayStatus() (ticks uint64, complete, aborted bool) {
 	return g.replay.cursor, g.replay.cursor == g.replay.recording.TotalTicks, g.replay.aborted
 }
 
+// ReplayVerifiesState reports whether this replay includes simulation
+// checkpoints. Legacy input-only recordings remain playable but cannot claim
+// deterministic verification until re-recorded.
+func (g *Game) ReplayVerifiesState() bool {
+	return g.replay != nil && g.replay.verified()
+}
+
 // CloseRecording finalizes an active recording. It is safe to call after a
 // bounded recording has already stopped the game loop.
 func (g *Game) CloseRecording() error {
 	if g.recording == nil {
 		return nil
 	}
+	if g.world != nil && g.recording.NeedsCheckpoint(g.recording.recording.TotalTicks, true) {
+		checksum, err := g.simulationChecksum()
+		if err != nil {
+			return fmt.Errorf("checksum final recording state: %w", err)
+		}
+		g.recording.Checkpoint(g.recording.recording.TotalTicks, g.world.Tick, checksum, true)
+	}
 	return g.recording.Close()
 }
 
-func (g *Game) recordGameplayInput(input gameplayInput) bool {
-	return g.recording != nil && g.recording.Capture(input)
+func (g *Game) recordGameplayInput(input gameplayInput) (bool, error) {
+	if g.recording == nil {
+		return false, nil
+	}
+	stop := g.recording.Capture(input)
+	if g.world != nil && g.recording.NeedsCheckpoint(g.recording.recording.TotalTicks, false) {
+		checksum, err := g.simulationChecksum()
+		if err != nil {
+			return false, fmt.Errorf("checksum recording state after input %d: %w", g.recording.recording.TotalTicks, err)
+		}
+		g.recording.Checkpoint(g.recording.recording.TotalTicks, g.world.Tick, checksum, false)
+	}
+	return stop, nil
 }
 
 func (g *Game) gameplayInputForTick() (gameplayInput, bool) {
@@ -1470,10 +1513,20 @@ func (g *Game) gameplayInputForTick() (gameplayInput, bool) {
 
 func (g *Game) completeGameplayTick(input gameplayInput) (bool, error) {
 	if g.replay == nil {
-		return g.recordGameplayInput(input), nil
+		return g.recordGameplayInput(input)
 	}
 	if g.flow != flowPlaying && g.replay.remainingAfterCurrent() > 0 {
 		return false, fmt.Errorf("replay mission ended after %d of %d recorded ticks", g.replay.cursor+1, g.replay.recording.TotalTicks)
+	}
+	inputCount := g.replay.cursor + 1
+	if g.replay.wantsCheckpoint(inputCount) {
+		checksum, err := g.simulationChecksum()
+		if err != nil {
+			return false, fmt.Errorf("checksum replay state after input %d: %w", inputCount, err)
+		}
+		if err := g.replay.verifyCheckpoint(inputCount, g.world.Tick, checksum); err != nil {
+			return false, err
+		}
 	}
 	return g.replay.Advance(), nil
 }
@@ -2279,7 +2332,11 @@ func (g *Game) destinationTransitionPose(objectID scene.ObjectID, destination sc
 }
 
 func (g *Game) advanceEnvironmentTransitions(seconds float64, skip bool) {
-	for id, transition := range g.transitions {
+	for _, id := range g.orderedTransitionIDs() {
+		transition, exists := g.transitions[id]
+		if !exists {
+			continue
+		}
 		transition.elapsed += seconds
 		amount := transition.elapsed / transition.duration
 		if skip {
@@ -2316,6 +2373,20 @@ func (g *Game) advanceEnvironmentTransitions(seconds float64, skip bool) {
 	}
 	g.viewCamera.Update(seconds)
 	g.objects = g.world.Objects
+}
+
+// orderedTransitionIDs gives presentation transitions a canonical simulation
+// order. Completing a transition can transfer objects and trigger encounter
+// setup, so map iteration would otherwise leak into authoritative state.
+func (g *Game) orderedTransitionIDs() []scene.ObjectID {
+	g.transitionOrder = g.transitionOrder[:0]
+	for id := range g.transitions {
+		g.transitionOrder = append(g.transitionOrder, id)
+	}
+	sort.Slice(g.transitionOrder, func(first, second int) bool {
+		return g.transitionOrder[first] < g.transitionOrder[second]
+	})
+	return g.transitionOrder
 }
 
 func (g *Game) completeEnvironmentTransition(transition environmentTransition, finalLocalPose kinematics.Pose) error {
@@ -2853,19 +2924,22 @@ func (g *Game) resolveEnvironmentCollisions(previous map[scene.ObjectID]math3d.V
 			start = object.Pose.Position
 		}
 		var nearest collision.Hit
+		var nearestKey surfaceCollisionKey
 		hitFound := false
 		for _, tile := range runtime.tiles {
-			for _, plane := range tile.Planes {
-				if hit, ok := collision.SweepSpherePlane(start, object.Pose.Position, object.CollisionRadius, plane); ok && (!hitFound || hit.Time < nearest.Time) {
-					nearest, hitFound = hit, true
+			for planeIndex, plane := range tile.Planes {
+				key := surfaceCollisionKey{tileX: tile.Coordinate.X, tileZ: tile.Coordinate.Z, kind: 0, index: planeIndex}
+				if hit, ok := collision.SweepSpherePlane(start, object.Pose.Position, object.CollisionRadius, plane); ok && surfaceCollisionEarlier(hit, key, nearest, nearestKey, hitFound) {
+					nearest, nearestKey, hitFound = hit, key, true
 				}
 			}
-			for _, box := range tile.Boxes {
+			for boxIndex, box := range tile.Boxes {
 				if runtime.featureStates[string(box.FeatureID)].Destroyed {
 					continue
 				}
-				if hit, ok := collision.SweepSphereBox(start, object.Pose.Position, object.CollisionRadius, box); ok && (!hitFound || hit.Time < nearest.Time) {
-					nearest, hitFound = hit, true
+				key := surfaceCollisionKey{tileX: tile.Coordinate.X, tileZ: tile.Coordinate.Z, kind: 1, featureID: string(box.FeatureID), index: boxIndex}
+				if hit, ok := collision.SweepSphereBox(start, object.Pose.Position, object.CollisionRadius, box); ok && surfaceCollisionEarlier(hit, key, nearest, nearestKey, hitFound) {
+					nearest, nearestKey, hitFound = hit, key, true
 				}
 			}
 		}
@@ -2918,6 +2992,35 @@ func (g *Game) resolveEnvironmentCollisions(previous map[scene.ObjectID]math3d.V
 	if len(remove) > 0 || len(destroyed) > 0 {
 		g.destroyAndDisintegrate(destroyed, remove)
 	}
+}
+
+type surfaceCollisionKey struct {
+	tileX, tileZ int
+	kind         int
+	featureID    string
+	index        int
+}
+
+func surfaceCollisionEarlier(candidate collision.Hit, candidateKey surfaceCollisionKey, current collision.Hit, currentKey surfaceCollisionKey, found bool) bool {
+	if !found || candidate.Time < current.Time {
+		return true
+	}
+	if candidate.Time != current.Time {
+		return false
+	}
+	if candidateKey.tileX != currentKey.tileX {
+		return candidateKey.tileX < currentKey.tileX
+	}
+	if candidateKey.tileZ != currentKey.tileZ {
+		return candidateKey.tileZ < currentKey.tileZ
+	}
+	if candidateKey.kind != currentKey.kind {
+		return candidateKey.kind < currentKey.kind
+	}
+	if candidateKey.featureID != currentKey.featureID {
+		return candidateKey.featureID < currentKey.featureID
+	}
+	return candidateKey.index < currentKey.index
 }
 
 const (
@@ -3646,7 +3749,7 @@ func (g *Game) nearestAutonomousTo(position math3d.Vec3) *scene.Object {
 			continue
 		}
 		distance := object.Pose.Position.Sub(position).Length()
-		if distance < nearestDistance {
+		if distance < nearestDistance || (distance == nearestDistance && (nearest == nil || object.ID < nearest.ID)) {
 			copy := *object
 			nearest = &copy
 			nearestDistance = distance
@@ -3841,7 +3944,7 @@ func (g *Game) nearestTeamObject(frame scene.FrameID, team scene.TeamID, positio
 			continue
 		}
 		distance := candidate.Pose.Position.Sub(position).Length()
-		if distance < nearestDistance {
+		if distance < nearestDistance || (distance == nearestDistance && (nearest == nil || candidate.ID < nearest.ID)) {
 			nearest, nearestDistance = candidate, distance
 		}
 	}
@@ -4227,15 +4330,17 @@ func (g *Game) surfaceObstacleAvoidance(runtime *localEnvironment, object scene.
 	end := object.Pose.Position.Add(forward.Scale(lookAhead))
 	safetyRadius := object.CollisionRadius + 2.5
 	nearestTime := math.Inf(1)
+	var nearestKey surfaceCollisionKey
 	result := surfaceAvoidanceIntent{}
 	found := false
 	for _, tile := range runtime.tiles {
-		for _, plane := range tile.Planes {
+		for planeIndex, plane := range tile.Planes {
 			hit, collisionRisk := collision.SweepSpherePlane(object.Pose.Position, end, safetyRadius, plane)
-			if !collisionRisk || hit.Time >= nearestTime {
+			key := surfaceCollisionKey{tileX: tile.Coordinate.X, tileZ: tile.Coordinate.Z, kind: 0, featureID: string(plane.FeatureID), index: planeIndex}
+			if !collisionRisk || !surfaceCollisionEarlier(hit, key, collision.Hit{Time: nearestTime}, nearestKey, found) {
 				continue
 			}
-			nearestTime, found = hit.Time, true
+			nearestTime, nearestKey, found = hit.Time, key, true
 			normal := hit.Normal.Normalize()
 			if normal.Dot(up) > 0.7 {
 				result = surfaceAvoidanceIntent{Pitch: -1}
@@ -4249,15 +4354,16 @@ func (g *Game) surfaceObstacleAvoidance(runtime *localEnvironment, object scene.
 			}
 			result = surfaceAvoidanceIntent{Yaw: yaw, Pitch: -0.25}
 		}
-		for _, box := range tile.Boxes {
+		for boxIndex, box := range tile.Boxes {
 			if runtime.featureStates[string(box.FeatureID)].Destroyed {
 				continue
 			}
 			hit, collisionRisk := collision.SweepSphereBox(object.Pose.Position, end, safetyRadius, box)
-			if !collisionRisk || hit.Time >= nearestTime {
+			key := surfaceCollisionKey{tileX: tile.Coordinate.X, tileZ: tile.Coordinate.Z, kind: 1, featureID: string(box.FeatureID), index: boxIndex}
+			if !collisionRisk || !surfaceCollisionEarlier(hit, key, collision.Hit{Time: nearestTime}, nearestKey, found) {
 				continue
 			}
-			nearestTime, found = hit.Time, true
+			nearestTime, nearestKey, found = hit.Time, key, true
 			lateral := box.Center.Sub(object.Pose.Position).Dot(right)
 			yaw := -sign(lateral)
 			if math.Abs(lateral) < 0.25 {

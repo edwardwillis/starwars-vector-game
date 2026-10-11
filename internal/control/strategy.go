@@ -1,6 +1,9 @@
 package control
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
@@ -31,6 +34,14 @@ type Decision struct {
 // game owns poses and integration; strategies never mutate world state.
 type Strategy interface {
 	Decide(context Context) Decision
+}
+
+// ChecksumState is implemented by strategies with mutable state that can
+// influence future decisions. The game includes the returned digest in its
+// replay checkpoint state without learning a strategy's internal layout.
+type ChecksumState interface {
+	Strategy
+	StateChecksum() ([sha256.Size]byte, error)
 }
 
 // PursuitFollower identifies controllers whose target relationship should be
@@ -182,6 +193,69 @@ func (p *Pursuit) PursuesTarget() bool { return true }
 // AttackIntent reports whether the most recent Step selected a firing moment.
 func (p *Pursuit) AttackIntent() bool {
 	return p.attackFire
+}
+
+// StateChecksum is a stable binary summary of every mutable pursuit field.
+// It observes state only; checksum generation never consumes random values or
+// changes controller behavior.
+func (p *Pursuit) StateChecksum() ([sha256.Size]byte, error) {
+	hash := sha256.New()
+	var stateErr error
+	writeUint64 := func(value uint64) {
+		var bytes [8]byte
+		binary.LittleEndian.PutUint64(bytes[:], value)
+		_, _ = hash.Write(bytes[:])
+	}
+	writeFloat := func(field string, value float64) {
+		if stateErr == nil && (math.IsNaN(value) || math.IsInf(value, 0)) {
+			stateErr = fmt.Errorf("non-finite pursuit state at %s", field)
+		}
+		writeUint64(math.Float64bits(value))
+	}
+	writeVector := func(value math3d.Vec3) {
+		writeFloat("vector.x", value.X)
+		writeFloat("vector.y", value.Y)
+		writeFloat("vector.z", value.Z)
+	}
+	writeBool := func(value bool) {
+		if value {
+			writeUint64(1)
+			return
+		}
+		writeUint64(0)
+	}
+	writeUint64(p.randomState)
+	writeFloat("wander_time", p.wanderTime)
+	writeFloat("wander_yaw", p.wanderYaw)
+	writeFloat("wander_pitch", p.wanderPitch)
+	writeFloat("target_yaw", p.targetYaw)
+	writeFloat("target_pitch", p.targetPitch)
+	writeVector(p.targetOffset)
+	writeVector(p.excursionDirection)
+	writeBool(p.excursion)
+	writeFloat("excursion_time", p.excursionTime)
+	writeFloat("excursion_gap", p.excursionGap)
+	writeFloat("speed_change_time", p.speedChangeTime)
+	writeFloat("speed_offset", p.speedOffset)
+	writeFloat("target_speed_offset", p.targetSpeedOffset)
+	writeFloat("avoidance_time", p.avoidanceTime)
+	writeFloat("avoidance_cooldown", p.avoidanceCooldown)
+	writeFloat("avoidance_yaw", p.avoidanceYaw)
+	writeFloat("avoidance_pitch", p.avoidancePitch)
+	writeUint64(uint64(p.avoidanceObject))
+	writeBool(p.attacking)
+	writeFloat("attack_gap", p.attackGap)
+	writeFloat("attack_time", p.attackTime)
+	writeFloat("attack_radius", p.attackRadius)
+	writeFloat("attack_direction", p.attackDirection)
+	writeFloat("attack_break_time", p.attackBreakTime)
+	writeVector(p.attackBreakVector)
+	writeFloat("attack_roll_rate", p.attackRollRate)
+	writeFloat("attack_fire_gap", p.attackFireGap)
+	writeBool(p.attackFire)
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, stateErr
 }
 
 // EngageNow preserves the controller's normal attack-run behavior but removes
