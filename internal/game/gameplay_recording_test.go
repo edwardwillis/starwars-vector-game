@@ -566,6 +566,39 @@ func writeReplayFixture(t *testing.T, inputs []gameplayInput) string {
 	return path
 }
 
+func TestReplayTelemetrySessionUsesStableTraceIdentityAndAuthoritativeCounters(t *testing.T) {
+	inputs := []gameplayInput{{Flight: control.Intent{Throttle: 1}}, {FireLaser: true}}
+	path := writeReplayFixture(t, inputs)
+	replayed, err := NewReplay(path)
+	if err != nil {
+		t.Fatalf("construct replay: %v", err)
+	}
+	recording, err := readGameplayRecording(path)
+	if err != nil {
+		t.Fatalf("read replay fixture: %v", err)
+	}
+	wantID := gameplayRecordingID(recording)
+	kind, recordingID, verified, simulationTick, inputCount := replayed.telemetrySession()
+	if kind != "replay" || recordingID != wantID || verified || simulationTick != replayed.world.Tick || inputCount != 0 {
+		t.Fatalf("initial telemetry session = %q %q %v %d %d, want replay %q false %d 0", kind, recordingID, verified, simulationTick, inputCount, wantID, replayed.world.Tick)
+	}
+	if err := replayed.Update(); err != nil {
+		t.Fatalf("advance replay: %v", err)
+	}
+	_, recordingID, _, simulationTick, inputCount = replayed.telemetrySession()
+	if recordingID != wantID || simulationTick != replayed.world.Tick || inputCount != 1 {
+		t.Fatalf("advanced telemetry session = ID %q tick %d input %d, want ID %q tick %d input 1", recordingID, simulationTick, inputCount, wantID, replayed.world.Tick)
+	}
+}
+
+func TestGameplayRecordingIDChangesWithTraceContent(t *testing.T) {
+	first := replayFixtureRecording([]gameplayInput{{Flight: control.Intent{Throttle: 1}}})
+	second := replayFixtureRecording([]gameplayInput{{Flight: control.Intent{Throttle: 0.5}}})
+	if firstID, secondID := gameplayRecordingID(first), gameplayRecordingID(second); firstID == "" || firstID == secondID {
+		t.Fatalf("recording IDs=%q and %q, want distinct non-empty trace identities", firstID, secondID)
+	}
+}
+
 func writeRecordingJSON(t *testing.T, path string, recording gameplayRecording) {
 	t.Helper()
 	encoded, err := json.Marshal(recording)
@@ -601,6 +634,13 @@ func TestGameplayRecordingRejectsInvalidArtifacts(t *testing.T) {
 	}
 	if _, err := readGameplayRecording(unsupported); err == nil {
 		t.Fatal("unsupported recording version was accepted")
+	}
+	legacyAim := filepath.Join(directory, "legacy-aim.json")
+	legacyRecording := replayFixtureRecording([]gameplayInput{{FireLaser: true}})
+	legacyRecording.FormatVersion = 1
+	writeRecordingJSON(t, legacyAim, legacyRecording)
+	if _, err := readGameplayRecording(legacyAim); err == nil || !strings.Contains(err.Error(), "does not contain cockpit aim snapshots") {
+		t.Fatalf("legacy aim recording error = %v, want clear re-record guidance", err)
 	}
 	incomplete := filepath.Join(directory, "incomplete.json")
 	if err := os.WriteFile(incomplete, []byte(`{"format_version":1,"mission":"battle-of-yavin","start_mode":"surface-development","tick_seconds":0.016666666666666666,"total_ticks":0,"inputs":[],"complete":false}`), 0o644); err != nil {

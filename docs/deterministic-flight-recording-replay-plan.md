@@ -41,7 +41,7 @@ Use versioned JSON initially:
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "build": { "commit": "2fe0513" },
   "session": {
     "mission": "battle-of-yavin",
@@ -58,6 +58,8 @@ Use versioned JSON initially:
       "yaw": -0.3,
       "pitch": 0,
       "roll": 0,
+      "cockpit_aim_x": 0.5,
+      "cockpit_aim_y": 0.5,
       "fire": true,
       "torpedo": false,
       "commands": ["manual"]
@@ -71,7 +73,9 @@ Use versioned JSON initially:
 }
 ```
 
-Store normalized flight intent rather than raw keys or mouse coordinates. JSON preserves inspectability; later versions can add compact encoding without changing the gameplay boundary.
+Store normalized flight intent and the normalized, clamped cockpit aim point
+rather than raw keys or mouse coordinates. JSON preserves inspectability;
+later versions can add compact encoding without changing the gameplay boundary.
 
 ## D. Recording and playback integration
 
@@ -114,7 +118,11 @@ Validate at a modest interval such as every 300 ticks. A mismatch should stop pl
 
 ## F. Telemetry integration
 
-Existing telemetry is appropriate and remains separate. Add replay metadata and `simulation_tick` to the telemetry frame/CSV after replay exists, allowing equivalent portions of two runs to be compared even if FPS differs.
+Existing telemetry remains separate from replay. CSV rows now include replay
+provenance (`session_kind`, `recording_id`, `replay_verified`) and inclusive
+simulation/input counter ranges (`simulation_tick_start`/`_end` and
+`replay_input_start`/`_end`). This permits equivalent portions of two runs to
+be compared even if FPS differs.
 
 Suggested Windows workflow:
 
@@ -146,7 +154,8 @@ For comparisons:
 5. Add session validation and periodic checksums.
    - Acceptance: identical replay passes; deliberately altered input fails at the expected checkpoint.
 6. Add replay tick/session metadata to telemetry and document the A/B workflow.
-   - Acceptance: two renderer builds produce comparable tick-aligned traces.
+   - Completed: two renderer builds can produce comparable tick-aligned traces
+     identified by the same recording fingerprint and verified replay status.
 
 ## H. First implementation recommendation
 

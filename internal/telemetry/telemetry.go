@@ -13,6 +13,11 @@ import (
 // renderer instrumentation snapshots, not additional per-pixel probes.
 type Frame struct {
 	At                 time.Time
+	SessionKind        string
+	RecordingID        string
+	ReplayVerified     bool
+	SimulationTick     uint64
+	ReplayInputCount   uint64
 	DrawDuration       time.Duration
 	UpdateDuration     time.Duration
 	UpdateCalls        int
@@ -60,6 +65,7 @@ type Recorder struct {
 	drawSum  time.Duration
 	drawMax  time.Duration
 	latest   Frame
+	first    Frame
 	sums     frameSums
 	err      error
 }
@@ -86,7 +92,7 @@ func NewCSV(path string) (*Recorder, error) {
 		file: file, writer: csv.NewWriter(file), interval: time.Second,
 	}
 	if err := recorder.writer.Write([]string{
-		"elapsed_s", "interval_s", "frames", "draw_ms_avg", "draw_ms_max", "updates_avg", "update_ms_avg", "update_ms_per_update_avg", "actual_fps_avg", "actual_tps_avg",
+		"elapsed_s", "interval_s", "frames", "session_kind", "recording_id", "replay_verified", "simulation_tick_start", "simulation_tick_end", "replay_input_start", "replay_input_end", "draw_ms_avg", "draw_ms_max", "updates_avg", "update_ms_avg", "update_ms_per_update_avg", "actual_fps_avg", "actual_tps_avg",
 		"flow", "mission_phase", "view", "realism", "player_shield", "collisions_total", "surface_attackers", "hostile_projectiles", "surface_entry_grace_s",
 		"active_tiles_avg", "features_avg", "candidates_avg", "depth_domains_avg",
 		"depth_faces_avg", "depth_triangles_avg", "depth_pixels_tested_avg", "depth_pixels_written_avg", "line_depth_samples_avg",
@@ -110,6 +116,9 @@ func (r *Recorder) Observe(frame Frame) {
 	}
 	if r.started.IsZero() {
 		r.started, r.last = frame.At, frame.At
+	}
+	if r.frames == 0 {
+		r.first = frame
 	}
 	r.frames++
 	r.drawSum += frame.DrawDuration
@@ -150,6 +159,7 @@ func (r *Recorder) writeSample(now time.Time) {
 	frames := float64(r.frames)
 	record := []string{
 		formatFloat(now.Sub(r.started).Seconds()), formatFloat(now.Sub(r.last).Seconds()), strconv.Itoa(r.frames),
+		r.latest.SessionKind, r.latest.RecordingID, strconv.FormatBool(r.latest.ReplayVerified), strconv.FormatUint(r.first.SimulationTick, 10), strconv.FormatUint(r.latest.SimulationTick, 10), strconv.FormatUint(r.first.ReplayInputCount, 10), strconv.FormatUint(r.latest.ReplayInputCount, 10),
 		formatFloat(float64(r.drawSum) / float64(time.Millisecond) / frames), formatFloat(float64(r.drawMax) / float64(time.Millisecond)),
 		formatFloat(float64(r.sums.updateCalls) / frames), formatFloat(float64(r.sums.updateDuration) / float64(time.Millisecond) / frames), formatFloat(durationPerCall(r.sums.updateDuration, r.sums.updateCalls)), formatFloat(r.sums.actualFPS / frames), formatFloat(r.sums.actualTPS / frames),
 		r.latest.Flow, r.latest.MissionPhase, r.latest.View, strconv.Itoa(r.latest.Realism), strconv.Itoa(r.latest.PlayerShield), strconv.Itoa(r.latest.Collisions), strconv.Itoa(r.latest.SurfaceAttackers), strconv.Itoa(r.latest.HostileProjectiles), formatFloat(r.latest.SurfaceEntryGrace),
@@ -171,6 +181,7 @@ func (r *Recorder) writeSample(now time.Time) {
 	}
 	r.last = now
 	r.frames = 0
+	r.first = Frame{}
 	r.drawSum, r.drawMax = 0, 0
 	r.sums = frameSums{}
 }

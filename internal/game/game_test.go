@@ -148,6 +148,33 @@ func TestGameplayInputHeldLaserFiresOnSuccessiveEligibleTicks(t *testing.T) {
 	}
 }
 
+func TestGameplayWeaponsUseRecordedCockpitAimRatherThanLiveMouseFlightAim(t *testing.T) {
+	g := New()
+	g.viewCamera.Mode = camera.Cockpit
+	g.mouseFlight = true // Live cockpitAimTarget would now use the centre reticle.
+	g.refreshViewContext()
+	input := gameplayInput{FireLaser: true, CockpitAimX: .78, CockpitAimY: .32}
+	aimTarget, aimed := g.cockpitAimTargetForInput(input)
+	if !aimed {
+		t.Fatal("recorded cockpit aim did not produce a target")
+	}
+	g.applyGameplayLaser(input)
+	var laser *scene.Object
+	for index := range g.objects {
+		if g.objects[index].ProjectileKind == scene.ProjectileLaser {
+			laser = &g.objects[index]
+			break
+		}
+	}
+	if laser == nil {
+		t.Fatal("recorded weapon aim did not launch a laser")
+	}
+	wantDirection := aimTarget.Sub(laser.Pose.Position).Normalize()
+	if got := laser.Pose.Forward().Normalize(); got.Dot(wantDirection) < 1-1e-9 {
+		t.Fatalf("laser direction=%+v, want recorded aim direction=%+v", got, wantDirection)
+	}
+}
+
 func TestGameplayInputTorpedoIsAnExplicitOneShotCommand(t *testing.T) {
 	g := New()
 	before := g.torpedoesRemaining

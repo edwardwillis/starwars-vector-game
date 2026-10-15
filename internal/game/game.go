@@ -4458,6 +4458,13 @@ func deterministicSigned(state *uint64) float64 {
 }
 
 func (g *Game) fireLaser() bool {
+	return g.fireLaserAt(g.cockpitAimTarget())
+}
+
+// fireLaserAt launches a paired volley using an already-sampled cockpit aim
+// target. Authoritative input application supplies this from gameplayInput;
+// the no-argument wrapper remains for direct callers and presentation tools.
+func (g *Game) fireLaserAt(aimTarget math3d.Vec3, aimed bool) bool {
 	if g.fireCooldown > 0 || !g.withinFireRateLimit() {
 		return false
 	}
@@ -4474,7 +4481,6 @@ func (g *Game) fireLaser() bool {
 		{"muzzle-lower-left", "muzzle-lower-right"},
 	}
 	pair := g.nextMuzzlePair
-	aimTarget, aimed := g.cockpitAimTarget()
 	for _, muzzle := range muzzlePairs[pair] {
 		var spawn combat.Spawn
 		var err error
@@ -4504,6 +4510,12 @@ func (g *Game) fireLaser() bool {
 }
 
 func (g *Game) fireProtonTorpedo() bool {
+	return g.fireProtonTorpedoAt(g.cockpitAimTarget())
+}
+
+// fireProtonTorpedoAt launches a torpedo using an already-sampled cockpit aim
+// target. See fireLaserAt for why gameplay input must not read the live cursor.
+func (g *Game) fireProtonTorpedoAt(aimedTarget math3d.Vec3, aimed bool) bool {
 	if g.torpedoCooldown > 0 || g.torpedoesRemaining <= 0 {
 		return false
 	}
@@ -4512,7 +4524,7 @@ func (g *Game) fireProtonTorpedo() bool {
 		return false
 	}
 	target := fighter.Pose.Position.Add(fighter.Pose.Forward().Scale(g.profile.Targeting.AimConvergence))
-	if aimedTarget, aimed := g.cockpitAimTarget(); aimed {
+	if aimed {
 		target = aimedTarget
 	}
 	launcher := "muzzle-lower-left"
@@ -6718,9 +6730,15 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 	if g.viewCamera != nil {
 		viewMode = g.viewCamera.Mode.String()
 	}
+	sessionKind, recordingID, replayVerified, simulationTick, replayInputCount := g.telemetrySession()
 	shield, surfaceAttackers, hostileProjectiles, surfaceEntryGrace := g.surfaceCombatTelemetry()
 	g.telemetry.Observe(telemetry.Frame{
 		At:                 time.Now(),
+		SessionKind:        sessionKind,
+		RecordingID:        recordingID,
+		ReplayVerified:     replayVerified,
+		SimulationTick:     simulationTick,
+		ReplayInputCount:   replayInputCount,
 		DrawDuration:       drawDuration,
 		UpdateDuration:     updateDuration,
 		UpdateCalls:        updateCalls,
@@ -6755,6 +6773,26 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 		OutputEdges:        g.renderStats.OutputEdges,
 		RenderJobs:         g.renderStats.RenderJobs,
 	})
+}
+
+// telemetrySession returns only immutable replay provenance and current
+// authoritative counters. It intentionally does not participate in gameplay
+// or rendering decisions; telemetry merely observes this state after a frame.
+func (g *Game) telemetrySession() (kind, recordingID string, replayVerified bool, simulationTick, replayInputCount uint64) {
+	kind = "interactive"
+	if g.world != nil {
+		simulationTick = g.world.Tick
+	}
+	if g.recording != nil {
+		kind = "recording"
+	}
+	if g.replay != nil {
+		kind = "replay"
+		recordingID = g.replay.recordingID
+		replayVerified = g.replay.verified()
+		replayInputCount = g.replay.cursor
+	}
+	return kind, recordingID, replayVerified, simulationTick, replayInputCount
 }
 
 // surfaceCombatTelemetry returns cheap run-state counters for post-hoc local

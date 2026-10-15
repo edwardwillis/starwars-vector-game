@@ -3,6 +3,7 @@ package game
 import (
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/control"
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
@@ -16,6 +17,8 @@ type gameplayInput struct {
 	CockpitSteering           control.Intent `json:"cockpit_steering"`
 	CockpitSteeringHeld       bool           `json:"cockpit_steering_held"`
 	CockpitSteeringPressed    bool           `json:"cockpit_steering_pressed"`
+	CockpitAimX               float64        `json:"cockpit_aim_x"`
+	CockpitAimY               float64        `json:"cockpit_aim_y"`
 	ToggleMode                bool           `json:"toggle_mode"`
 	ResetFighter              bool           `json:"reset_fighter"`
 	ToggleMouseFlight         bool           `json:"toggle_mouse_flight"`
@@ -82,7 +85,24 @@ func (g *Game) readGameplayInput() gameplayInput {
 		input.Flight.Yaw += mouseYaw
 		input.Flight.Pitch += mousePitch
 	}
+	input.CockpitAimX, input.CockpitAimY = g.sampledCockpitAim(mouseX, mouseY, input, mouseFlight)
 	return input
+}
+
+// sampledCockpitAim captures the post-command aim point that a weapon launch
+// on this tick will use. In particular, a right-click that exits mouse flight
+// takes effect before weapons, matching applyGameplayControlModes.
+func (g *Game) sampledCockpitAim(mouseX, mouseY int, input gameplayInput, mouseFlight bool) (float64, float64) {
+	if input.CockpitSteeringPressed && g.viewCamera != nil && g.viewCamera.Mode == camera.Cockpit {
+		mouseFlight = false
+	}
+	x, y := float32(mouseX), float32(mouseY)
+	if mouseFlight {
+		x, y = ScreenWidth/2, ScreenHeight/2
+	} else {
+		x, y, _ = clampCockpitTarget(x, y, float32(g.profile.Targeting.AimRadius))
+	}
+	return float64(x) / float64(ScreenWidth), float64(y) / float64(ScreenHeight)
 }
 
 func axis(negative, positive bool) float64 {
@@ -158,7 +178,7 @@ func (g *Game) applyGameplayFlightInput(input gameplayInput, seconds float64) {
 
 func (g *Game) applyGameplayTorpedo(input gameplayInput) {
 	if input.FireTorpedo {
-		g.fireProtonTorpedo()
+		g.fireProtonTorpedoAt(g.cockpitAimTargetForInput(input))
 	}
 }
 
@@ -167,5 +187,21 @@ func (g *Game) applyGameplayLaser(input gameplayInput) {
 		return
 	}
 	g.launchSwarm()
-	g.fireLaser()
+	g.fireLaserAt(g.cockpitAimTargetForInput(input))
+}
+
+// cockpitAimTargetForInput reconstructs a recorded cockpit aim point without
+// consulting Ebitengine cursor state. It is the sole weapon-aim path used by
+// authoritative gameplay input application.
+func (g *Game) cockpitAimTargetForInput(input gameplayInput) (math3d.Vec3, bool) {
+	if g.viewCamera == nil || g.viewCamera.Mode != camera.Cockpit {
+		return math3d.Vec3{}, false
+	}
+	x := input.CockpitAimX * float64(ScreenWidth)
+	y := input.CockpitAimY * float64(ScreenHeight)
+	ray, ok := g.pipeline.ScreenRay(x, y)
+	if !ok {
+		return math3d.Vec3{}, false
+	}
+	return ray.Origin.Add(ray.Direction.Scale(g.profile.Targeting.AimConvergence)), true
 }

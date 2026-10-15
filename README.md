@@ -132,6 +132,34 @@ make run-windows-telemetry
 `run-windows-telemetry` writes a timestamped CSV in the current Windows
 user's home directory. Override `WINDOWS_TELEMETRY` to choose a fixed path.
 
+## Repeatable renderer benchmarks
+
+Record a canonical surface-flight trace once, then replay that same trace for
+each renderer build. Replay preserves the real simulation and rendering path;
+it is not a captured video.
+
+```sh
+# Create a verified, 60-second trace (3,600 active simulation inputs).
+make run-windows WINDOWS_RUN_ARGS='-record C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json'
+
+# Run each build against exactly that trace and collect an independent CSV.
+make run-windows WINDOWS_RUN_ARGS='-replay C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json -telemetry C:\Users\YOUR_WINDOWS_USER\before.csv'
+make run-windows WINDOWS_RUN_ARGS='-replay C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json -telemetry C:\Users\YOUR_WINDOWS_USER\after.csv'
+```
+
+Replay telemetry includes `recording_id`, `replay_verified`, and inclusive
+`simulation_tick_start`/`simulation_tick_end` plus replay-input ranges for
+every one-second row. Compare matching recording IDs and tick ranges—not
+wall-clock row numbers—then confirm that the replay completes without a
+checksum-divergence error before comparing timing columns. Run at least three
+native-Windows trials per build and compare medians as well as the worst
+sustained intervals; replay fixes simulation workload, not GPU scheduling or
+frame pacing.
+
+Recording format 2 also captures the cockpit aim point used by weapon fire.
+Format-1 recordings cannot be replayed deterministically and must be
+re-recorded with the current executable.
+
 `build-windows` writes `starwars-vector.exe` to the current Windows user's home
 directory by default. Override `WINDOWS_EXE` with a Windows-mounted WSL path if
 you need a different output location.

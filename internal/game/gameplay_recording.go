@@ -1,6 +1,7 @@
 package game
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
-const gameplayRecordingFormatVersion = 1
+const gameplayRecordingFormatVersion = 2
 
 const simulationCheckpointInterval = 300
 
@@ -68,6 +69,7 @@ type gameplayRecorder struct {
 // knowledge of live Ebitengine input, rendering, or craft-specific behaviour.
 type gameplayReplay struct {
 	recording        gameplayRecording
+	recordingID      string
 	cursor           uint64
 	checkpointCursor int
 	aborted          bool
@@ -78,7 +80,7 @@ func newGameplayRecorder(path string, maxTicks uint64, recording gameplayRecordi
 		return nil, fmt.Errorf("recording path is empty")
 	}
 	if recording.FormatVersion != gameplayRecordingFormatVersion {
-		return nil, fmt.Errorf("recording format version %d is unsupported", recording.FormatVersion)
+		return nil, recordingFormatError(recording.FormatVersion)
 	}
 	if recording.Mission == "" || recording.StartMode == "" || recording.TickSeconds <= 0 {
 		return nil, fmt.Errorf("recording metadata is incomplete")
@@ -208,7 +210,7 @@ func readGameplayRecording(path string) (gameplayRecording, error) {
 		return gameplayRecording{}, fmt.Errorf("decode recording tail: %w", err)
 	}
 	if recording.FormatVersion != gameplayRecordingFormatVersion {
-		return gameplayRecording{}, fmt.Errorf("recording format version %d is unsupported", recording.FormatVersion)
+		return gameplayRecording{}, recordingFormatError(recording.FormatVersion)
 	}
 	if !recording.Complete {
 		return gameplayRecording{}, fmt.Errorf("recording is incomplete")
@@ -282,7 +284,7 @@ func completedSimulationTicks(inputs []gameplayInput, inputCount uint64) uint64 
 
 func validateReplayRecording(recording gameplayRecording) error {
 	if recording.FormatVersion != gameplayRecordingFormatVersion {
-		return fmt.Errorf("replay format version %d is unsupported", recording.FormatVersion)
+		return recordingFormatError(recording.FormatVersion)
 	}
 	if !recording.Complete {
 		return fmt.Errorf("replay recording is incomplete")
@@ -332,6 +334,8 @@ func validateGameplayInput(input gameplayInput) error {
 		{"cockpit pitch", input.CockpitSteering.Pitch},
 		{"cockpit throttle", input.CockpitSteering.Throttle},
 		{"cockpit roll", input.CockpitSteering.Roll},
+		{"cockpit aim x", input.CockpitAimX},
+		{"cockpit aim y", input.CockpitAimY},
 	}
 	for _, entry := range values {
 		name, value := entry.name, entry.value
@@ -339,14 +343,36 @@ func validateGameplayInput(input gameplayInput) error {
 			return fmt.Errorf("%s %.6g is outside [-1, 1]", name, value)
 		}
 	}
+	if input.CockpitAimX < 0 || input.CockpitAimX > 1 || input.CockpitAimY < 0 || input.CockpitAimY > 1 {
+		return fmt.Errorf("cockpit aim (%.6g, %.6g) is outside [0, 1]", input.CockpitAimX, input.CockpitAimY)
+	}
 	return nil
+}
+
+func recordingFormatError(version int) error {
+	if version == 1 {
+		return fmt.Errorf("recording format version 1 does not contain cockpit aim snapshots; re-record using this build")
+	}
+	return fmt.Errorf("recording format version %d is unsupported", version)
 }
 
 func newGameplayReplay(recording gameplayRecording) (*gameplayReplay, error) {
 	if err := validateReplayRecording(recording); err != nil {
 		return nil, err
 	}
-	return &gameplayReplay{recording: recording}, nil
+	return &gameplayReplay{recording: recording, recordingID: gameplayRecordingID(recording)}, nil
+}
+
+// gameplayRecordingID is a diagnostic fingerprint for telemetry correlation.
+// It identifies the complete trace, including its session metadata and ordered
+// normalized inputs, but is never used as a replay compatibility gate.
+func gameplayRecordingID(recording gameplayRecording) string {
+	encoded, err := json.Marshal(recording)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func (replay *gameplayReplay) Current() (gameplayInput, bool) {
