@@ -15,6 +15,7 @@ func main() {
 	telemetryPath := flag.String("telemetry", "", "write one-second development telemetry samples to this CSV file")
 	recordingPath := flag.String("record", "", "record a canonical Yavin surface-development input trace to this JSON file")
 	recordingTicks := flag.Uint64("record-ticks", 60*60, "active simulation ticks to record (0 records until clean exit)")
+	recordingSafe := flag.Bool("record-safe", false, "prevent player destruction while recording without disabling combat workload")
 	replayPath := flag.String("replay", "", "replay a completed canonical Yavin surface-development input trace")
 	flag.Parse()
 	if *recordingPath != "" && *replayPath != "" {
@@ -44,10 +45,14 @@ func main() {
 		log.Printf("development telemetry: %s", *telemetryPath)
 	}
 	if *recordingPath != "" {
-		if err := runningGame.StartSurfaceRecording(*recordingPath, *recordingTicks); err != nil {
+		startRecording := runningGame.StartSurfaceRecording
+		if *recordingSafe {
+			startRecording = runningGame.StartSafeSurfaceRecording
+		}
+		if err := startRecording(*recordingPath, *recordingTicks); err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("recording %d active simulation ticks to %s", *recordingTicks, *recordingPath)
+		log.Printf("recording %d active simulation ticks to %s (safe=%t)", *recordingTicks, *recordingPath, *recordingSafe)
 	}
 	if *replayPath != "" {
 		log.Printf("replaying %s", *replayPath)

@@ -1069,6 +1069,7 @@ type Game struct {
 	world                    *sim.World
 	detailLevels             map[scene.ObjectID]scene.DetailTier
 	shieldStrength           int
+	benchmarkSafe            bool
 	shieldQuietTime          float64
 	combatFeedback           string
 	combatFeedbackUntil      float64
@@ -1382,6 +1383,18 @@ func (g *Game) SetTelemetryRecorder(recorder *telemetry.Recorder) {
 // simulation ticks. The recording is published only when CloseRecording is
 // called successfully.
 func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
+	return g.startSurfaceRecording(path, maxTicks, false)
+}
+
+// StartSafeSurfaceRecording records the canonical surface workload while
+// retaining the player at one shield point after otherwise lethal impacts.
+// Enemy AI, projectiles, collisions, feedback, and all other combat work stay
+// active. The condition is persisted in the recording and restored by replay.
+func (g *Game) StartSafeSurfaceRecording(path string, maxTicks uint64) error {
+	return g.startSurfaceRecording(path, maxTicks, true)
+}
+
+func (g *Game) startSurfaceRecording(path string, maxTicks uint64, benchmarkSafe bool) error {
 	if g.recording != nil || g.replay != nil {
 		return fmt.Errorf("gameplay recording is already active")
 	}
@@ -1393,6 +1406,7 @@ func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
 		return err
 	}
 	g.selectedMission = 0
+	g.benchmarkSafe = benchmarkSafe
 	if err := g.launchYavinSession(true); err != nil {
 		return fmt.Errorf("start surface recording session: %w", err)
 	}
@@ -1409,6 +1423,7 @@ func (g *Game) StartSurfaceRecording(path string, maxTicks uint64) error {
 		InitialView:    recordingView(g.viewCamera.Mode),
 		InitialTarget:  g.viewCamera.TargetID,
 		InitialRealism: g.realismLevel,
+		BenchmarkSafe:  g.benchmarkSafe,
 	})
 	if err != nil {
 		return err
@@ -1446,6 +1461,7 @@ func NewReplay(path string) (*Game, error) {
 	game.viewCamera.Mode = camera.Cockpit
 	game.viewCamera.TargetID = fighterID
 	game.setRealismLevel(recording.InitialRealism)
+	game.benchmarkSafe = recording.BenchmarkSafe
 	game.replay = replay
 	checksum, err := game.simulationChecksum()
 	if err != nil {
@@ -4694,6 +4710,9 @@ func (g *Game) applyShieldDamage(amount int) bool {
 		return g.shieldStrength < 0
 	}
 	g.shieldStrength -= amount
+	if g.benchmarkSafe && g.shieldStrength < 1 {
+		g.shieldStrength = 1
+	}
 	g.shieldQuietTime = 0
 	g.impactFlashUntil = g.simulationTime + impactFlashDuration
 	g.setCombatFeedback(fmt.Sprintf("SHIELDS HIT -%d", amount), color.RGBA{R: 255, G: 80, B: 64, A: 255})

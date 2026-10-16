@@ -686,6 +686,37 @@ func TestStartSurfaceRecordingUsesCanonicalSessionAndDoesNotRecordWhenDisabled(t
 	}
 }
 
+func TestSafeSurfaceRecordingPersistsSafetyAndReplayRestoresIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "safe-surface.json")
+	recorded, err := NewWithProfile(profile.Pilot())
+	if err != nil {
+		t.Fatalf("create recording game: %v", err)
+	}
+	if err := recorded.StartSafeSurfaceRecording(path, 0); err != nil {
+		t.Fatalf("start safe recording: %v", err)
+	}
+	if !recorded.benchmarkSafe {
+		t.Fatal("safe recording did not enable benchmark safety")
+	}
+	if err := recorded.CloseRecording(); err != nil {
+		t.Fatalf("close safe recording: %v", err)
+	}
+	recording, err := readGameplayRecording(path)
+	if err != nil {
+		t.Fatalf("read safe recording: %v", err)
+	}
+	if !recording.BenchmarkSafe {
+		t.Fatal("safe recording metadata did not persist benchmark safety")
+	}
+	replayed, err := NewReplay(path)
+	if err != nil {
+		t.Fatalf("construct safe replay: %v", err)
+	}
+	if !replayed.benchmarkSafe {
+		t.Fatal("safe replay did not restore benchmark safety")
+	}
+}
+
 func TestStartSurfaceRecordingRejectsExistingDestinationBeforeChangingSession(t *testing.T) {
 	g, err := NewWithProfile(profile.Pilot())
 	if err != nil {

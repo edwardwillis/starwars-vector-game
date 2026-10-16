@@ -128,6 +128,7 @@ Suggested Windows workflow:
 
 ```text
 starwars.exe -record surface-benchmark.json
+starwars.exe -record surface-benchmark-safe.json -record-safe
 starwars.exe -replay surface-benchmark.json -telemetry before.csv
 starwars.exe -replay surface-benchmark.json -telemetry after.csv
 ```

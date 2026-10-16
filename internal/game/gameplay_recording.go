@@ -38,6 +38,7 @@ type gameplayRecording struct {
 	InitialView    string                 `json:"initial_view"`
 	InitialTarget  scene.ObjectID         `json:"initial_target"`
 	InitialRealism int                    `json:"initial_realism"`
+	BenchmarkSafe  bool                   `json:"benchmark_safe"`
 	Inputs         []gameplayInput        `json:"inputs"`
 	TotalTicks     uint64                 `json:"total_ticks"`
 	Complete       bool                   `json:"complete"`

@@ -193,6 +193,21 @@ func TestGameplayInputTorpedoIsAnExplicitOneShotCommand(t *testing.T) {
 	}
 }
 
+func TestBenchmarkSafetyPreservesCombatFeedbackWithoutDestroyingPlayer(t *testing.T) {
+	g := New()
+	g.benchmarkSafe = true
+	g.shieldStrength = 1
+	if destroyed := g.applyShieldDamage(3); destroyed {
+		t.Fatal("benchmark safety allowed a lethal shield hit")
+	}
+	if g.shieldStrength != 1 {
+		t.Fatalf("benchmark safety shield=%d, want 1", g.shieldStrength)
+	}
+	if g.impactFlashUntil <= g.simulationTime || g.combatFeedback == "" {
+		t.Fatalf("benchmark safety suppressed combat feedback: flash=%v feedback=%q", g.impactFlashUntil, g.combatFeedback)
+	}
+}
+
 func TestGameplayInputPreservesTorpedoBeforeLaserOrdering(t *testing.T) {
 	g := New()
 	input := gameplayInput{FireTorpedo: true, FireLaser: true}

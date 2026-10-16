@@ -142,6 +142,10 @@ it is not a captured video.
 # Create a verified, 60-second trace (3,600 active simulation inputs).
 make run-windows WINDOWS_RUN_ARGS='-record C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json'
 
+# Recommended for long combat traces: keep the combat workload intact while
+# preventing the player craft from being destroyed before recording completes.
+make run-windows WINDOWS_RUN_ARGS='-record C:\Users\YOUR_WINDOWS_USER\surface-benchmark-safe.json -record-safe'
+
 # Run each build against exactly that trace and collect an independent CSV.
 make run-windows WINDOWS_RUN_ARGS='-replay C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json -telemetry C:\Users\YOUR_WINDOWS_USER\before.csv'
 make run-windows WINDOWS_RUN_ARGS='-replay C:\Users\YOUR_WINDOWS_USER\surface-benchmark.json -telemetry C:\Users\YOUR_WINDOWS_USER\after.csv'
@@ -159,6 +163,12 @@ frame pacing.
 Recording format 2 also captures the cockpit aim point used by weapon fire.
 Format-1 recordings cannot be replayed deterministically and must be
 re-recorded with the current executable.
+
+`-record-safe` is intended for benchmark creation. It keeps enemy AI, cannon
+fire, projectile collisions, impact feedback, and debris active, but clamps the
+player at one shield point rather than allowing destruction. The condition is
+stored in the recording and restored during replay, so the recorded and replayed
+workloads remain consistent.
 
 `build-windows` writes `starwars-vector.exe` to the current Windows user's home
 directory by default. Override `WINDOWS_EXE` with a Windows-mounted WSL path if

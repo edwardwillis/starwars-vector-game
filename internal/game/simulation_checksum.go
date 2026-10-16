@@ -37,6 +37,7 @@ func (g *Game) simulationChecksum() (string, error) {
 	writer.uint64(uint64(g.mode))
 	writer.bool(g.surfaceAutoLevel)
 	writer.bool(g.coordinatedTurnBank)
+	writer.bool(g.benchmarkSafe)
 	writer.bool(g.swarmLaunched)
 	writer.bool(g.playerDestroyed)
 	writer.uint64(uint64(g.nextObjectID))
