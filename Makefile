@@ -9,8 +9,9 @@ WINDOWS_EXE_NATIVE := $(shell wslpath -w "$(WINDOWS_EXE)" 2>/dev/null)
 WINDOWS_TELEMETRY ?= $(WINDOWS_HOME)/starwars-telemetry-$(shell date +%Y%m%d-%H%M%S).csv
 WINDOWS_TELEMETRY_NATIVE := $(shell wslpath -w "$(WINDOWS_TELEMETRY)" 2>/dev/null)
 WINDOWS_RUN_ARGS ?=
+TELEMETRY_COMPARE_ARGS ?=
 
-.PHONY: test test-unit build-windows run-windows run-windows-telemetry
+.PHONY: test test-unit build-windows run-windows run-windows-telemetry compare-telemetry
 
 # Complete suite, including Ebitengine integration tests. The wrapper supplies
 # a virtual X11 display automatically on headless Linux systems.
@@ -36,3 +37,9 @@ run-windows: build-windows
 # telemetry file. Override WINDOWS_TELEMETRY to select a fixed output path.
 run-windows-telemetry: build-windows
 	cmd.exe /C start "" "$(WINDOWS_EXE_NATIVE)" -telemetry "$(WINDOWS_TELEMETRY_NATIVE)" $(WINDOWS_RUN_ARGS)
+
+# Compare verified replay telemetry trials. Supply repeated -baseline and
+# -candidate arguments through TELEMETRY_COMPARE_ARGS; paths are WSL paths.
+compare-telemetry:
+	@test -n "$(TELEMETRY_COMPARE_ARGS)" || (echo "usage: make compare-telemetry TELEMETRY_COMPARE_ARGS='-baseline baseline-1.csv -candidate candidate-1.csv'"; exit 2)
+	"$(GO)" run ./cmd/telemetry-compare $(TELEMETRY_COMPARE_ARGS)

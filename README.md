@@ -164,6 +164,22 @@ Recording format 2 also captures the cockpit aim point used by weapon fire.
 Format-1 recordings cannot be replayed deterministically and must be
 re-recorded with the current executable.
 
+Compare three baseline and three candidate trials from WSL. The comparison
+tool rejects telemetry that is not a verified replay of the same recording, or
+whose cockpit view or realism level differs. It uses the shared simulation-tick
+interval and reports medians across the supplied trials rather than comparing
+wall-clock rows:
+
+```sh
+make compare-telemetry TELEMETRY_COMPARE_ARGS='\
+  -baseline /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/baseline-1.csv \
+  -baseline /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/baseline-2.csv \
+  -baseline /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/baseline-3.csv \
+  -candidate /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/after-1.csv \
+  -candidate /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/after-2.csv \
+  -candidate /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/after-3.csv'
+```
+
 `-record-safe` is intended for benchmark creation. It keeps enemy AI, cannon
 fire, projectile collisions, impact feedback, and debris active, but clamps the
 player at one shield point rather than allowing destruction. The condition is
