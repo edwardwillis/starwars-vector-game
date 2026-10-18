@@ -25,6 +25,7 @@ func TestCompareReportsMedianAcrossVerifiedEquivalentTrials(t *testing.T) {
 		"Trials: baseline=2 candidate=1",
 		"Draw                       25.000 ms/frame       10.000 ms/frame",
 		"Worst sustained draw row: baseline 30.000 ms/frame; candidate 15.000 ms/frame",
+		"Optional overlay substage metrics were omitted",
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q:\n%s", want, report)

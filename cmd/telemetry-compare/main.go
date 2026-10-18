@@ -27,9 +27,10 @@ func (paths *pathList) Set(value string) error {
 }
 
 type metric struct {
-	column string
-	label  string
-	unit   string
+	column   string
+	label    string
+	unit     string
+	optional bool
 }
 
 var metrics = []metric{
@@ -43,15 +44,23 @@ var metrics = []metric{
 	{column: "update_ms_avg", label: "Update", unit: "ms/frame"},
 	{column: "actual_fps_avg", label: "FPS", unit: "fps"},
 	{column: "output_edges_avg", label: "Output edges", unit: "edges/frame"},
+	{column: "cockpit_static_ms_avg", label: "Cockpit static", unit: "ms/frame", optional: true},
+	{column: "cockpit_dynamic_ms_avg", label: "Cockpit dynamic", unit: "ms/frame", optional: true},
+	{column: "reticle_ms_avg", label: "Reticles", unit: "ms/frame", optional: true},
+	{column: "mission_director_ms_avg", label: "Mission director", unit: "ms/frame", optional: true},
+	{column: "hud_ms_avg", label: "HUD", unit: "ms/frame", optional: true},
 }
 
 var requiredColumns = append([]string{
 	"session_kind", "recording_id", "replay_verified", "simulation_tick_start", "simulation_tick_end", "frames", "view", "realism",
-}, metricColumns()...)
+}, metricColumns(false)...)
 
-func metricColumns() []string {
+func metricColumns(includeOptional bool) []string {
 	columns := make([]string, 0, len(metrics))
 	for _, metric := range metrics {
+		if metric.optional && !includeOptional {
+			continue
+		}
 		columns = append(columns, metric.column)
 	}
 	return columns
@@ -69,6 +78,7 @@ type trial struct {
 	view        string
 	realism     string
 	samples     []sample
+	metrics     map[string]bool
 	start, end  uint64
 }
 
@@ -125,7 +135,8 @@ func compare(baselinePaths, candidatePaths []string, output io.Writer) error {
 	fmt.Fprintf(output, "  Presentation: view=%s realism=%s\n", view, realism)
 	fmt.Fprintf(output, "  Trials: baseline=%d candidate=%d\n\n", len(baselines), len(candidates))
 	fmt.Fprintln(output, "Metric                  Baseline median     Candidate median    Change")
-	for _, metric := range metrics {
+	availableMetrics := sharedMetrics(allTrials)
+	for _, metric := range availableMetrics {
 		baselineMedian := median(summariesForMetric(baselineSummaries, metric.column))
 		candidateMedian := median(summariesForMetric(candidateSummaries, metric.column))
 		change := candidateMedian - baselineMedian
@@ -138,6 +149,9 @@ func compare(baselinePaths, candidatePaths []string, output io.Writer) error {
 	fmt.Fprintln(output)
 	fmt.Fprintf(output, "Worst sustained draw row: baseline %.3f ms/frame; candidate %.3f ms/frame\n", median(worstDraws(baselineSummaries)), median(worstDraws(candidateSummaries)))
 	fmt.Fprintln(output, "Averages are weighted by frame count within the shared tick interval; samples crossing its boundary are weighted proportionally.")
+	if len(availableMetrics) != len(metrics) {
+		fmt.Fprintln(output, "Optional overlay substage metrics were omitted because one or more trials use the earlier telemetry schema.")
+	}
 	return nil
 }
 
@@ -175,7 +189,15 @@ func loadTrial(path string) (trial, error) {
 			return trial{}, fmt.Errorf("%q is missing required %q column", path, name)
 		}
 	}
-	result := trial{path: path, start: math.MaxUint64}
+	metricAvailability := make(map[string]bool, len(metrics))
+	for _, metric := range metrics {
+		_, present := columns[metric.column]
+		if !present && !metric.optional {
+			return trial{}, fmt.Errorf("%q is missing required %q column", path, metric.column)
+		}
+		metricAvailability[metric.column] = present
+	}
+	result := trial{path: path, start: math.MaxUint64, metrics: metricAvailability}
 	for rowIndex, row := range records[1:] {
 		if len(row) != len(records[0]) {
 			return trial{}, fmt.Errorf("%q row %d has %d fields, want %d", path, rowIndex+2, len(row), len(records[0]))
@@ -209,6 +231,9 @@ func loadTrial(path string) (trial, error) {
 		}
 		values := make(map[string]float64, len(metrics))
 		for _, metric := range metrics {
+			if !metricAvailability[metric.column] {
+				continue
+			}
 			parsed, err := parseFloat(path, rowIndex+2, metric.column, value(metric.column))
 			if err != nil {
 				return trial{}, err
@@ -251,6 +276,23 @@ func sharedMetadata(trials []trial) (recordingID, view, realism string, err erro
 	return first.recordingID, first.view, first.realism, nil
 }
 
+func sharedMetrics(trials []trial) []metric {
+	available := make([]metric, 0, len(metrics))
+	for _, metric := range metrics {
+		present := true
+		for _, trial := range trials {
+			if !trial.metrics[metric.column] {
+				present = false
+				break
+			}
+		}
+		if present {
+			available = append(available, metric)
+		}
+	}
+	return available
+}
+
 func sharedRange(trials []trial) (uint64, uint64, error) {
 	start, end := uint64(0), uint64(math.MaxUint64)
 	for index, trial := range trials {
@@ -290,16 +332,16 @@ func summarizeTrial(trial trial, start, end uint64) (trialSummary, error) {
 		}
 		sampleWeight := sample.frames * overlap
 		weight += sampleWeight
-		for _, metric := range metrics {
-			weighted[metric.column] += sample.values[metric.column] * sampleWeight
+		for column, value := range sample.values {
+			weighted[column] += value * sampleWeight
 		}
 		worst = max(worst, sample.values["draw_ms_avg"])
 	}
 	if weight == 0 {
 		return trialSummary{}, fmt.Errorf("%q has no samples within shared tick range [%d, %d]", trial.path, start, end)
 	}
-	for _, metric := range metrics {
-		weighted[metric.column] /= weight
+	for column := range weighted {
+		weighted[column] /= weight
 	}
 	return trialSummary{path: trial.path, values: weighted, worstDrawMS: worst}, nil
 }

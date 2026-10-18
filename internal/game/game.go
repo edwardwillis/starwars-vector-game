@@ -4903,6 +4903,17 @@ func (g *Game) applySurfaceAutoLevel(fighter scene.Object, intent control.Intent
 }
 
 func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
+	g.drawCockpitOverlayTimed(screen, nil)
+}
+
+// cockpitOverlayTimings keeps the cached coaming, live instrument, and aiming
+// costs separate for telemetry. It is populated only when telemetry is active;
+// ordinary gameplay does not pay timing-call overhead.
+type cockpitOverlayTimings struct {
+	static, dynamic, reticle time.Duration
+}
+
+func (g *Game) drawCockpitOverlayTimed(screen *ebiten.Image, timings *cockpitOverlayTimings) {
 	cyan := color.RGBA{R: 40, G: 255, B: 224, A: 255}
 	amber := color.RGBA{R: 255, G: 176, B: 32, A: 255}
 	layout := cockpit.Fallback()
@@ -4912,20 +4923,53 @@ func (g *Game) drawCockpitOverlay(screen *ebiten.Image) {
 		}
 	}
 	isXWing := layout.Definition == catalog.XWingName
-	var xWingState cockpit.XWingInstrumentState
-	if isXWing {
-		xWingState = g.xWingInstrumentState()
-		g.drawCachedXWingCockpit(screen, layout, xWingState.VisualDetail)
+	if timings != nil {
+		started := time.Now()
+		if isXWing {
+			g.drawCachedXWingCockpit(screen, layout, xWingStaticStructureDetail(g.realismLevel))
+		} else {
+			g.drawCockpitWindshield(screen, layout.Windshield)
+		}
+		timings.static += time.Since(started)
+	} else if isXWing {
+		g.drawCachedXWingCockpit(screen, layout, xWingStaticStructureDetail(g.realismLevel))
 	} else {
 		g.drawCockpitWindshield(screen, layout.Windshield)
 	}
-	cx, cy, targetInRange := g.cockpitTarget()
-	if isXWing {
+
+	var xWingState cockpit.XWingInstrumentState
+	if timings != nil {
+		started := time.Now()
+		if isXWing {
+			xWingState = g.xWingInstrumentState()
+			g.drawXWingDashboard(screen, xWingState, layout.Palette)
+		} else {
+			g.drawShieldIndicator(screen)
+			g.drawSpeedIndicator(screen)
+		}
+		timings.dynamic += time.Since(started)
+	} else if isXWing {
+		xWingState = g.xWingInstrumentState()
 		g.drawXWingDashboard(screen, xWingState, layout.Palette)
 	} else {
 		g.drawShieldIndicator(screen)
 		g.drawSpeedIndicator(screen)
 	}
+
+	if timings != nil {
+		started := time.Now()
+		g.drawCockpitTargeting(screen, layout, cyan, amber)
+		timings.reticle += time.Since(started)
+	} else {
+		g.drawCockpitTargeting(screen, layout, cyan, amber)
+	}
+}
+
+// drawCockpitTargeting contains the live aiming and weapon presentation. It
+// remains separate from the instrument timing because it can vary sharply
+// with target state, pointer steering, and active laser beams.
+func (g *Game) drawCockpitTargeting(screen *ebiten.Image, layout cockpit.Layout, cyan, amber color.RGBA) {
+	cx, cy, targetInRange := g.cockpitTarget()
 	g.drawTargetableIndicator(screen)
 	targetColor := color.Color(cyan)
 	if !targetInRange {
@@ -6697,12 +6741,45 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		defer func() { timings.overlays = time.Since(overlayStarted) }()
 	}
 	if g.viewCamera.Mode == camera.Cockpit {
-		g.drawCockpitOverlay(screen)
+		if g.telemetry != nil {
+			var cockpitTimings cockpitOverlayTimings
+			g.drawCockpitOverlayTimed(screen, &cockpitTimings)
+			timings.cockpitStatic += cockpitTimings.static
+			timings.cockpitDynamic += cockpitTimings.dynamic
+			timings.reticle += cockpitTimings.reticle
+		} else {
+			g.drawCockpitOverlay(screen)
+		}
 	}
-	g.drawMissionDirector(screen)
+	if g.telemetry != nil {
+		started := time.Now()
+		g.drawMissionDirector(screen)
+		timings.missionDirector += time.Since(started)
+	} else {
+		g.drawMissionDirector(screen)
+	}
 	if g.mouseFlight {
-		g.drawMouseReticle(screen)
+		if g.telemetry != nil {
+			started := time.Now()
+			g.drawMouseReticle(screen)
+			timings.reticle += time.Since(started)
+		} else {
+			g.drawMouseReticle(screen)
+		}
 	}
+	if g.telemetry != nil {
+		started := time.Now()
+		g.drawOverlayHUD(screen)
+		timings.hud += time.Since(started)
+	} else {
+		g.drawOverlayHUD(screen)
+	}
+}
+
+// drawOverlayHUD contains presentation-only overlays not owned by the craft
+// cockpit or mission director. Keeping it separate makes telemetry attribution
+// explicit without changing their rendering order or visibility rules.
+func (g *Game) drawOverlayHUD(screen *ebiten.Image) {
 	if g.playerDestroyed && g.flow == flowPlaying {
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-120), "YOU FAILED!", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		drawVectorText(screen, float32(ScreenWidth/2), float32(ScreenHeight/2-104), "PRESS R TO RESTART", color.RGBA{R: 255, G: 224, B: 32, A: 255})
@@ -6724,7 +6801,8 @@ func (g *Game) renderDiagnosticsEnabled() bool {
 }
 
 type telemetryDrawTimings struct {
-	prepare, background, surfaces, overlays time.Duration
+	prepare, background, surfaces, overlays                      time.Duration
+	cockpitStatic, cockpitDynamic, reticle, missionDirector, hud time.Duration
 }
 
 func (g *Game) recordTelemetryUpdate(duration time.Duration) {
@@ -6765,6 +6843,11 @@ func (g *Game) recordTelemetryFrame(drawDuration time.Duration, timings telemetr
 		BackgroundDuration: timings.background,
 		SurfaceDuration:    timings.surfaces,
 		OverlayDuration:    timings.overlays,
+		CockpitStatic:      timings.cockpitStatic,
+		CockpitDynamic:     timings.cockpitDynamic,
+		Reticle:            timings.reticle,
+		MissionDirector:    timings.missionDirector,
+		HUD:                timings.hud,
 		ActualFPS:          ebiten.ActualFPS(),
 		ActualTPS:          ebiten.ActualTPS(),
 		Flow:               g.flow.String(),

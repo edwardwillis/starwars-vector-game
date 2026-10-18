@@ -160,6 +160,10 @@ native-Windows trials per build and compare medians as well as the worst
 sustained intervals; replay fixes simulation workload, not GPU scheduling or
 frame pacing.
 
+Overlay telemetry is also split into cached cockpit artwork, live cockpit
+instruments, aiming reticles, mission director, and remaining HUD work. These
+columns are additive diagnostic timing only; they do not affect rendering.
+
 Recording format 2 also captures the cockpit aim point used by weapon fire.
 Format-1 recordings cannot be replayed deterministically and must be
 re-recorded with the current executable.

@@ -25,6 +25,11 @@ type Frame struct {
 	BackgroundDuration time.Duration
 	SurfaceDuration    time.Duration
 	OverlayDuration    time.Duration
+	CockpitStatic      time.Duration
+	CockpitDynamic     time.Duration
+	Reticle            time.Duration
+	MissionDirector    time.Duration
+	HUD                time.Duration
 	ActualFPS          float64
 	ActualTPS          float64
 	Flow               string
@@ -78,6 +83,7 @@ type frameSums struct {
 	updateCalls                                                        int64
 	updateDuration, prepareDuration                                    time.Duration
 	backgroundDuration, surfaceDuration, overlayDuration               time.Duration
+	cockpitStatic, cockpitDynamic, reticle, missionDirector, hud       time.Duration
 	actualFPS, actualTPS                                               float64
 }
 
@@ -97,6 +103,7 @@ func NewCSV(path string) (*Recorder, error) {
 		"active_tiles_avg", "features_avg", "candidates_avg", "depth_domains_avg",
 		"depth_faces_avg", "depth_triangles_avg", "depth_pixels_tested_avg", "depth_pixels_written_avg", "line_depth_samples_avg",
 		"prepare_ms_avg", "background_ms_avg", "depth_raster_ms_avg", "geometry_ms_avg", "surface_ms_avg", "opaque_submit_ms_avg", "vector_submit_ms_avg", "overlay_ms_avg",
+		"cockpit_static_ms_avg", "cockpit_dynamic_ms_avg", "reticle_ms_avg", "mission_director_ms_avg", "hud_ms_avg",
 		"output_edges_avg", "render_jobs_avg",
 	}); err != nil {
 		_ = file.Close()
@@ -166,6 +173,7 @@ func (r *Recorder) writeSample(now time.Time) {
 		formatFloat(float64(r.sums.activeTiles) / frames), formatFloat(float64(r.sums.features) / frames), formatFloat(float64(r.sums.candidates) / frames), formatFloat(float64(r.sums.depthDomains) / frames),
 		formatFloat(float64(r.sums.depthFaces) / frames), formatFloat(float64(r.sums.depthTriangles) / frames), formatFloat(float64(r.sums.depthTested) / frames), formatFloat(float64(r.sums.depthWritten) / frames), formatFloat(float64(r.sums.lineSamples) / frames),
 		formatFloat(float64(r.sums.prepareDuration) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.backgroundDuration) / float64(time.Millisecond) / frames), formatFloat(r.sums.depthMS / frames), formatFloat(r.sums.geometryMS / frames), formatFloat(float64(r.sums.surfaceDuration) / float64(time.Millisecond) / frames), formatFloat(r.sums.opaqueMS / frames), formatFloat(r.sums.vectorMS / frames), formatFloat(float64(r.sums.overlayDuration) / float64(time.Millisecond) / frames),
+		formatFloat(float64(r.sums.cockpitStatic) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.cockpitDynamic) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.reticle) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.missionDirector) / float64(time.Millisecond) / frames), formatFloat(float64(r.sums.hud) / float64(time.Millisecond) / frames),
 		formatFloat(float64(r.sums.outputEdges) / frames), formatFloat(float64(r.sums.renderJobs) / frames),
 	}
 	if err := r.writer.Write(record); err != nil {
@@ -193,6 +201,11 @@ func (s *frameSums) add(frame Frame) {
 	s.backgroundDuration += frame.BackgroundDuration
 	s.surfaceDuration += frame.SurfaceDuration
 	s.overlayDuration += frame.OverlayDuration
+	s.cockpitStatic += frame.CockpitStatic
+	s.cockpitDynamic += frame.CockpitDynamic
+	s.reticle += frame.Reticle
+	s.missionDirector += frame.MissionDirector
+	s.hud += frame.HUD
 	s.actualFPS += frame.ActualFPS
 	s.actualTPS += frame.ActualTPS
 	s.activeTiles += int64(frame.ActiveTiles)
