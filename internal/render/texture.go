@@ -48,7 +48,10 @@ func (registry *TextureRegistry) Lookup(id string) (Texture, bool) {
 	return texture, ok
 }
 
-const DeathStarDeckTextureID = "builtin/death-star-deck"
+const (
+	DeathStarDeckTextureID        = "builtin/death-star-deck"
+	DeathStarHorizonDeckTextureID = "builtin/death-star-horizon-deck"
+)
 
 func DefaultTextureRegistry() *TextureRegistry {
 	registry := NewTextureRegistry()
@@ -71,5 +74,32 @@ func DefaultTextureRegistry() *TextureRegistry {
 	if err := registry.Register(DeathStarDeckTextureID, Texture{Width: size, Height: size, Pixels: pixels}); err != nil {
 		panic(err)
 	}
+	if err := registry.Register(DeathStarHorizonDeckTextureID, deathStarHorizonDeckTexture()); err != nil {
+		panic(err)
+	}
 	return registry
+}
+
+// deathStarHorizonDeckTexture preserves the distant deck grid without asking
+// the CPU vector pipeline to transform and clip every line on every streamed
+// horizon tile. Its dark texels multiply the deck-line material colour down to
+// the same deck grey used by the old opaque fill, while the bright grid texels
+// retain the familiar structural lines. The texture repeats once per 80-unit
+// horizon tile through the tile face's existing UVs.
+func deathStarHorizonDeckTexture() Texture {
+	const size, divisions = 64, 8
+	pixels := make([]byte, size*size*4)
+	for y := range size {
+		for x := range size {
+			shade := byte(99) // 108 * 99 / 255 ≈ the existing 42 deck fill.
+			if x%(size/divisions) == 0 || y%(size/divisions) == 0 {
+				shade = 255
+			} else if x%(size/divisions) == 4 && y%(size/divisions) == 4 {
+				shade = 112
+			}
+			offset := (y*size + x) * 4
+			pixels[offset], pixels[offset+1], pixels[offset+2], pixels[offset+3] = shade, shade, shade, 255
+		}
+	}
+	return Texture{Width: size, Height: size, Pixels: pixels}
 }

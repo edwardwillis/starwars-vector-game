@@ -9,6 +9,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
+	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 )
 
@@ -26,12 +27,12 @@ const (
 	// deliberate escape lane: after a successful shot the player has room to
 	// climb above the deck instead of having to pull up inside the few units
 	// between the port and an end wall.
-	trenchPortTileZ            = 2
-	trenchLastTileZ            = 3
-	deathStarTrenchHalf        = 14.0
-	deathStarTrenchDepth       = 14.0
-	deathStarAttackGateZ       = 108.0
-	deathStarFiringRange       = 40.0
+	trenchPortTileZ      = 2
+	trenchLastTileZ      = 3
+	deathStarTrenchHalf  = 14.0
+	deathStarTrenchDepth = 14.0
+	deathStarAttackGateZ = 108.0
+	deathStarFiringRange = 40.0
 )
 
 var deathStarTrenchRoute = [...]float64{
@@ -138,6 +139,9 @@ var (
 	deathStarSurfaceTexture = scene.SurfaceMaterial{
 		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 42, G: 42, B: 42, A: 255}, TextureID: "builtin/death-star-deck",
 	}
+	deathStarHorizonTexture = scene.SurfaceMaterial{
+		Mode: scene.SurfaceTexturedOpaque, Color: deathStarSurfaceLine, TextureID: render.DeathStarHorizonDeckTextureID,
+	}
 	deathStarTrenchFill = scene.SurfaceMaterial{
 		Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 30, G: 30, B: 30, A: 255},
 	}
@@ -210,18 +214,23 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	zCenter := float64(coordinate.Z) * deathStarTileSize
 	isTrench := coordinate.X == trenchTileX && coordinate.Z >= trenchFirstTileZ && coordinate.Z <= trenchLastTileZ
 	deck := gridPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines)
-	// The deck's grey opaque face covers the already-batched skyfield on
-	// the GPU while its grey grid remains additive vector line work. The same
-	// physical face writes shared depth so trench walls and other geometry
-	// cannot draw through it. The coplanar grid deliberately does not test
-	// against its own surface depth: that comparison is numerically unstable at
-	// shallow viewing angles and makes distant grid vectors sparkle.
+	if horizonOnly {
+		deck = texturedDeckPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize)
+	}
+	// The deck's grey opaque face covers the already-batched skyfield on the
+	// GPU. Nearby tiles retain vector grids; horizon tiles use equivalent static
+	// texture detail. The same physical face writes shared depth so trench walls
+	// and other geometry cannot draw through it. The coplanar grid deliberately
+	// does not test against its own surface depth: that comparison is numerically
+	// unstable at shallow viewing angles and makes distant grid vectors sparkle.
 	deck.SkipDepth = false
 	deck.DepthTestOnly = false
 	deck.PointOccluder = true
 	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: deathStarSurfaceLine, LineWidth: 1, Surface: deathStarSurfaceFill, DepthWriteProxy: true}}
 	if !horizonOnly {
 		parts[0].Surface = deathStarSurfaceTexture
+	} else {
+		parts[0].Surface = deathStarHorizonTexture
 	}
 	var planes []collision.FinitePlane
 	if !horizonOnly {
@@ -231,10 +240,17 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 		}}
 	}
 	if isTrench {
-		deck = model.Merge(
-			gridPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
-			gridPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
-		)
+		if horizonOnly {
+			deck = model.Merge(
+				texturedDeckPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize),
+				texturedDeckPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize),
+			)
+		} else {
+			deck = model.Merge(
+				gridPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
+				gridPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
+			)
+		}
 		deck.SkipDepth = false
 		deck.DepthTestOnly = false
 		deck.PointOccluder = true
@@ -393,6 +409,27 @@ func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Mode
 		for row := 0; row < divisions; row++ {
 			mesh.Edges = append(mesh.Edges, model.Edge{A: index(row, column), B: index(row+1, column), Kind: model.EdgeDecorative, Importance: .4})
 		}
+	}
+	return model.Prepare(mesh)
+}
+
+// texturedDeckPatch is the static far-distance equivalent of gridPatch. The
+// physical quad, UVs, bounds and depth behaviour remain the same, but the
+// repeated deck grid is supplied by the opaque GPU texture instead of dozens
+// of CPU-projected decorative vector edges.
+func texturedDeckPatch(minX, maxX, y, zCenter, length float64) model.Model {
+	halfLength := length / 2
+	mesh := model.Model{
+		Verts: []math3d.Vec3{
+			{X: minX, Y: y, Z: zCenter - halfLength},
+			{X: maxX, Y: y, Z: zCenter - halfLength},
+			{X: maxX, Y: y, Z: zCenter + halfLength},
+			{X: minX, Y: y, Z: zCenter + halfLength},
+		},
+		Faces: []model.Face{{
+			Vertices: []int{3, 2, 1, 0},
+			UVs:      []model.UV{{U: 0, V: 1}, {U: 1, V: 1}, {U: 1, V: 0}, {U: 0, V: 0}},
+		}},
 	}
 	return model.Prepare(mesh)
 }

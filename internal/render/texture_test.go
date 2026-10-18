@@ -27,3 +27,13 @@ func TestDefaultDeckTextureIsRegistered(t *testing.T) {
 		t.Fatalf("missing built-in deck texture: %+v", texture)
 	}
 }
+
+func TestDefaultHorizonDeckTextureIsRegistered(t *testing.T) {
+	texture, ok := DefaultTextureRegistry().Lookup(DeathStarHorizonDeckTextureID)
+	if !ok || texture.Width != 64 || texture.Height != 64 {
+		t.Fatalf("missing built-in horizon deck texture: %+v", texture)
+	}
+	if texture.Pixels[0] <= texture.Pixels[(texture.Width+1)*4] {
+		t.Fatal("horizon deck texture lost its brighter grid line")
+	}
+}

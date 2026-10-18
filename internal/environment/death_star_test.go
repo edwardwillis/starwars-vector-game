@@ -7,6 +7,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/model"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/view"
 )
@@ -35,8 +36,8 @@ func TestDeathStarTrenchTileSharesRenderAndCollisionFeatures(t *testing.T) {
 		t.Fatalf("physical deck lost subtle texture material: %+v", tile.Parts[0].Surface)
 	}
 	horizon := definition.HorizonTile(TileCoordinate{})
-	if horizon.Parts[0].Surface.Mode != scene.SurfaceFlatOpaque || horizon.Parts[0].Surface.TextureID != "" {
-		t.Fatalf("distant horizon unexpectedly uses textured material: %+v", horizon.Parts[0].Surface)
+	if horizon.Parts[0].Surface.Mode != scene.SurfaceTexturedOpaque || horizon.Parts[0].Surface.TextureID != "builtin/death-star-horizon-deck" {
+		t.Fatalf("distant horizon lost texture detail material: %+v", horizon.Parts[0].Surface)
 	}
 	surfaceFill, trenchFill := tile.Parts[0].Surface.Color, tile.Parts[1].Surface.Color
 	if surfaceFill.R != surfaceFill.G || surfaceFill.G != surfaceFill.B ||
@@ -68,6 +69,15 @@ func TestDeathStarHorizonTilesAreVisualOnly(t *testing.T) {
 		if !part.Mesh.SkipDepth || !part.Mesh.DepthTestOnly || part.Mesh.PointOccluder || part.SelfOccluding || part.SelfOcclusion != scene.SelfOcclusionNone {
 			t.Fatalf("horizon part does not use line-test-only depth: %+v", part)
 		}
+	}
+	deck := tile.Parts[0]
+	for _, edge := range deck.Mesh.Edges {
+		if edge.Kind == model.EdgeDecorative {
+			t.Fatalf("horizon deck retained CPU vector grid edge: %+v", edge)
+		}
+	}
+	if len(deck.Mesh.Verts) != 4 {
+		t.Fatalf("horizon deck verts=%d, want texture quad", len(deck.Mesh.Verts))
 	}
 }
 
