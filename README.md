@@ -33,11 +33,7 @@ vector game rather than a conventional filled 3D renderer.
 
 ## Beta 3 gameplay demo
 
-[Watch the Battle of Yavin Beta 3 gameplay recording](docs/media/star-wars-demo-beta3.mp4).
-
-<video controls muted playsinline src="docs/media/star-wars-demo-beta3.mp4">
-  Your browser does not support embedded video. Use the download link above.
-</video>
+https://github.com/user-attachments/assets/2bec4602-2c5e-41c8-a820-5c920f45ef79
 
 ## Prerequisites
 
