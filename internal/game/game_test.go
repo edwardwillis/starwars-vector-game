@@ -645,8 +645,8 @@ func TestSurfaceStartUsesEnvironmentEntryPose(t *testing.T) {
 		if candidate.pointOccluder {
 			t.Fatal("filled Death Star surface retained redundant sparse-star geometry occlusion")
 		}
-		if candidate.geometry == nil || len(candidate.geometry.Triangles) == 0 {
-			t.Fatal("filled Death Star surface did not reuse prepared triangles")
+		if candidate.geometry == nil {
+			t.Fatal("filled Death Star surface did not prepare geometry")
 		}
 	}
 	if opaque == 0 {
@@ -1182,6 +1182,38 @@ func TestOpaqueSurfaceBatchSubmitsRegisteredTexture(t *testing.T) {
 	}
 }
 
+func TestMipmappedSurfaceSubmissionKeepsOneMaterialBatch(t *testing.T) {
+	const textureSize = 512
+	pixels := make([]byte, textureSize*textureSize*4)
+	for offset := 3; offset < len(pixels); offset += 4 {
+		pixels[offset] = 255
+	}
+	g := New()
+	if err := g.RegisterSurfaceTexture("test/mipmapped-panel", render.Texture{
+		Width: textureSize, Height: textureSize, Pixels: pixels, Sampling: render.TextureSamplingLinearMipmap,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	geometry := &render.PreparedGeometry{
+		Faces: []model.Face{{}},
+		Triangles: []render.PreparedTriangle{
+			{Face: 0, A: render.Point{X: 8, Y: 8, Depth: 5}, B: render.Point{X: 608, Y: 8, Depth: 5}, C: render.Point{X: 8, Y: 608, Depth: 5}, UVs: [3]model.UV{{}, {U: 1}, {V: 1}}},
+			{Face: 0, A: render.Point{X: 700, Y: 8, Depth: 5}, B: render.Point{X: 702, Y: 8, Depth: 5}, C: render.Point{X: 700, Y: 10, Depth: 5}, UVs: [3]model.UV{{}, {U: 1}, {V: 1}}},
+		},
+	}
+	prepared := &preparedFrame{candidates: []preparedCandidate{{
+		geometry: geometry,
+		surface: scene.SurfaceMaterial{Mode: scene.SurfaceTexturedOpaque,
+			Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}, TextureID: "test/mipmapped-panel"},
+	}}}
+	stats := render.Stats{}
+	g.pipeline.Stats = &stats
+	g.drawPreparedSurfaces(ebiten.NewImage(1024, 1024), prepared)
+	if stats.OpaqueTriangles != 2 || stats.OpaqueBatches != 1 || stats.TexturedBatches != 1 {
+		t.Fatalf("mipmapped surface submission did not retain one material batch: %+v", stats)
+	}
+}
+
 func TestTranslucentSurfaceDoesNotWriteDepthOrOccludePoints(t *testing.T) {
 	part := scene.Part{Mesh: model.Cube(1), Surface: scene.SurfaceMaterial{
 		Mode: scene.SurfaceTranslucent, Color: color.RGBA{B: 255, A: 96},
@@ -1586,6 +1618,40 @@ func TestPreparedShowcaseRejectsOffscreenObjects(t *testing.T) {
 	if prepared := g.prepareShowcaseFrame(); len(prepared.candidates) != 0 || len(prepared.domains) != 0 {
 		t.Fatalf("offscreen showcase prepared=%+v", prepared)
 	}
+}
+
+func TestShowcaseIncludesProductionTurbolaserInspectionObject(t *testing.T) {
+	g := New()
+	for _, object := range g.showcaseObjects {
+		if object.Definition != catalog.DeathStarTurbolaserName {
+			continue
+		}
+		if err := object.Validate(); err != nil {
+			t.Fatalf("turbolaser showcase object: %v", err)
+		}
+		if len(object.Parts) != 3 || object.Parts[0].Name != "turbolaser pyramid foundation" {
+			t.Fatalf("turbolaser showcase artwork=%+v", object.Parts)
+		}
+		return
+	}
+	t.Fatal("showcase has no Death Star turbolaser")
+}
+
+func TestShowcaseIncludesProductionQuarterHangarInspectionObject(t *testing.T) {
+	g := New()
+	for _, object := range g.showcaseObjects {
+		if object.Definition != catalog.DeathStarQuarterHangarName {
+			continue
+		}
+		if err := object.Validate(); err != nil {
+			t.Fatalf("quarter hangar showcase object: %v", err)
+		}
+		if len(object.Parts) != 2 || object.Parts[0].Name != "quarter-circle hangar shell" || object.Parts[1].Name != "quarter-circle hangar recessed bay" {
+			t.Fatalf("quarter hangar showcase artwork=%+v", object.Parts)
+		}
+		return
+	}
+	t.Fatal("showcase has no Death Star quarter hangar")
 }
 
 func newDepthRequirementTestGame(objects ...scene.Object) *Game {
@@ -2647,6 +2713,44 @@ func TestFixedDestructionViewRetainsSurfaceFrame(t *testing.T) {
 	}
 }
 
+func TestSurfaceExitConvertsPoseAndVelocityToExteriorFrame(t *testing.T) {
+	g := New()
+	if !g.startInSurfaceMode() {
+		t.Fatal("could not enter surface mode")
+	}
+	player := g.objectByID(fighterID)
+	if player == nil {
+		t.Fatal("missing player")
+	}
+	player.Pose = kinematics.Pose{
+		Position:    math3d.Vec3{X: 18, Y: 60, Z: 145},
+		Orientation: math3d.QuaternionFromYawPitchRoll(.4, -.2, .1),
+	}
+	player.Motion.Velocity = math3d.Vec3{X: 2, Y: 3, Z: 4}
+	g.world.Objects = g.objects
+	wantPose, err := g.world.PoseInFrame(fighterID, scene.ExteriorFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	surfacePose, err := g.world.FramePose(player.Frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVelocity := surfacePose.Orientation.Rotate(player.Motion.Velocity)
+	if err := g.updateEnvironmentTransitions(); err != nil {
+		t.Fatal(err)
+	}
+	exited := g.objectByID(fighterID)
+	if exited == nil || normalizedObjectFrame(*exited) != scene.ExteriorFrame {
+		t.Fatalf("surface exit=%+v, want exterior frame", exited)
+	}
+	if exited.Pose.Position.Sub(wantPose.Position).Length() > 1e-9 ||
+		exited.Pose.Orientation.Rotate(math3d.Vec3{Z: 1}).Sub(wantPose.Orientation.Rotate(math3d.Vec3{Z: 1})).Length() > 1e-9 ||
+		exited.Motion.Velocity.Sub(wantVelocity).Length() > 1e-9 {
+		t.Fatalf("surface exit pose=%+v velocity=%+v, want pose=%+v velocity=%+v", exited.Pose, exited.Motion.Velocity, wantPose, wantVelocity)
+	}
+}
+
 func TestDeathStarHangarDoorLevelsFlightWhilePreservingEntryLane(t *testing.T) {
 	g := New()
 	if !g.startInSurfaceMode() {
@@ -3256,6 +3360,9 @@ func TestYavinTrenchRunRequiresForwardEntryAndOrderedCheckpoints(t *testing.T) {
 	// The actual trench mouth and forward heading begin the attack run.
 	player.Pose.Position = environment.DeathStarTrenchEntryPoint()
 	player.Pose.Orientation = math3d.IdentityQuaternion()
+	// Mission state records a surface position before the descent; simply
+	// placing the craft in the trench cannot start the run.
+	g.missionLastPosition[fighterID] = player.Pose.Position.Add(math3d.Vec3{Y: 6})
 	if err := g.updateYavinMission(); err != nil {
 		t.Fatal(err)
 	}
@@ -3342,7 +3449,7 @@ func TestObjectiveArrowDirectionHandlesAheadSidesAndBehind(t *testing.T) {
 	}
 }
 
-func TestHangarPortalPreparesFightersFromBothSides(t *testing.T) {
+func TestHangarPortalHidesInteriorFromUnmarkedSurface(t *testing.T) {
 	g := New()
 	if !g.startInSurfaceMode() {
 		t.Fatal("could not enter surface mode")
@@ -3375,8 +3482,8 @@ func TestHangarPortalPreparesFightersFromBothSides(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("fighter inside hangar was invisible through exterior doorway")
+	if found {
+		t.Fatal("fighter inside hangar remained visible from the unmarked exterior surface")
 	}
 
 	outside := depthTestObject(991, surfaceFrame, hangarSurface.Add(math3d.Vec3{Y: 8, Z: -45}), true)

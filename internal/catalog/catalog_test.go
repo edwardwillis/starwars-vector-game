@@ -234,6 +234,20 @@ func TestMillenniumFalconSpecificationUsesFullReferenceFields(t *testing.T) {
 	}
 }
 
+func TestDeathStarTurbolaserSpecificationSupportsShowcase(t *testing.T) {
+	spec, ok := SpecificationFor(DeathStarTurbolaserName)
+	if !ok || spec.Title != "DEATH STAR TURBOLASER" || spec.Weapons != "TWIN TURBOLASERS" {
+		t.Fatalf("turbolaser showcase specification=%+v, registered=%v", spec, ok)
+	}
+}
+
+func TestDeathStarQuarterHangarSpecificationSupportsShowcase(t *testing.T) {
+	spec, ok := SpecificationFor(DeathStarQuarterHangarName)
+	if !ok || spec.Title != "DEATH STAR QUARTER HANGAR" || spec.Description != "FOUR SECTION CURVED SERVICE BAY" {
+		t.Fatalf("quarter hangar showcase specification=%+v, registered=%v", spec, ok)
+	}
+}
+
 func TestTIEInterceptorInstancesShareImmutableGeometry(t *testing.T) {
 	first := TIEInterceptor(1, kinematics.Pose{})
 	second := TIEInterceptor(2, kinematics.Pose{})

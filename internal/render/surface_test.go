@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"testing"
 
+	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
 )
 
@@ -50,6 +51,33 @@ func TestOpaqueTrianglesRetainTextureAndUV(t *testing.T) {
 	got := AppendOpaqueTriangles(nil, &geometry, color.RGBA{A: 255}, "test/panel")
 	if len(got) != 1 || got[0].TextureID != "test/panel" || got[0].UVs != uvs {
 		t.Fatalf("textured surface lost material coordinates: %+v", got)
+	}
+}
+
+func TestDirectionalOpaqueTrianglesShadeEachFaceWithoutChangingBatchTexture(t *testing.T) {
+	geometry := PreparedGeometry{
+		Faces: []model.Face{
+			{Normal: math3d.Vec3{Y: 1}},
+			{Normal: math3d.Vec3{X: 1}},
+			{Normal: math3d.Vec3{Y: -1}},
+		},
+		Triangles: []PreparedTriangle{{Face: 0}, {Face: 1}, {Face: 2}},
+	}
+	fill := color.RGBA{R: 100, G: 100, B: 100, A: 255}
+	light := DirectionalLight{Direction: math3d.Vec3{Y: 1}, Ambient: 0.4, Diffuse: 0.8}
+	triangles := AppendDirectionalOpaqueTriangles(nil, &geometry, fill, "test/panel", light)
+	if len(triangles) != 3 {
+		t.Fatalf("shaded triangles=%d, want 3", len(triangles))
+	}
+	want := []color.RGBA{
+		{R: 120, G: 120, B: 120, A: 255}, // light-facing top
+		{R: 40, G: 40, B: 40, A: 255},    // ambient side
+		{R: 40, G: 40, B: 40, A: 255},    // turned away from light
+	}
+	for index, triangle := range triangles {
+		if triangle.Color != want[index] || triangle.TextureID != "test/panel" || triangle.Translucent {
+			t.Fatalf("triangle %d = %+v, want color=%v textured opaque", index, triangle, want[index])
+		}
 	}
 }
 

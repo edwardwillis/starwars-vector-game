@@ -104,7 +104,7 @@ from a clean session.
 
 The current Windows x64 beta is published as a GitHub prerelease:
 
-- [Download Battle of Yavin Beta 2](https://github.com/edwardwillis/starwars-vector-game/releases/tag/v0.4.0-beta.2)
+- [Download Battle of Yavin Beta 3](https://github.com/edwardwillis/starwars-vector-game/releases/tag/v0.4.0-beta.3)
 
 Download `starwars-vector.exe` from the release assets, then run it. This is
 an unsigned beta executable, so Windows SmartScreen may require an explicit

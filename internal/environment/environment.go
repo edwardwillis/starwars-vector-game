@@ -101,6 +101,12 @@ type Feature struct {
 	TurretPivot math3d.Vec3
 	BarrelPart  int
 	BarrelPivot math3d.Vec3
+	// VisualTurretPivot and VisualBarrelPivot optionally move only the rendered
+	// articulation centre. They let an installation's authored presentation
+	// evolve without silently changing its authoritative muzzle/aim geometry.
+	// A zero value retains the corresponding simulation pivot above.
+	VisualTurretPivot math3d.Vec3
+	VisualBarrelPivot math3d.Vec3
 	// WreckParts replace Parts after destruction. A visual-only remnant may
 	// persist without retaining the intact installation's collision boxes.
 	WreckParts []scene.Part
@@ -124,17 +130,35 @@ func (feature Feature) Matrix() math3d.Mat4 {
 	return feature.Pose.Matrix().Mul(math3d.Scaling(scale.X, scale.Y, scale.Z))
 }
 
-// TurretMatrix articulates a feature-local part about its mounting pivot.
-// The same transform is used for the visible turret and its muzzle anchors.
+// TurretMatrix articulates authoritative muzzle/aim geometry about its
+// simulation mounting pivot. Renderers use VisualTurretMatrix instead.
 func (feature Feature) TurretMatrix(yaw, pitch float64) math3d.Mat4 {
-	pivot := feature.TurretPivot
+	return feature.articulationMatrix(feature.TurretPivot, feature.BarrelPivot, yaw, pitch)
+}
+
+// VisualTurretMatrix applies an optional presentation-only mounting point.
+// Combat continues to use TurretMatrix so mesh proportion changes cannot
+// affect target leading, projectile origins, or deterministic replay.
+func (feature Feature) VisualTurretMatrix(yaw, pitch float64) math3d.Mat4 {
+	turretPivot, barrelPivot := feature.TurretPivot, feature.BarrelPivot
+	if feature.VisualTurretPivot != (math3d.Vec3{}) {
+		turretPivot = feature.VisualTurretPivot
+	}
+	if feature.VisualBarrelPivot != (math3d.Vec3{}) {
+		barrelPivot = feature.VisualBarrelPivot
+	}
+	return feature.articulationMatrix(turretPivot, barrelPivot, yaw, pitch)
+}
+
+func (feature Feature) articulationMatrix(turretPivot, barrelPivot math3d.Vec3, yaw, pitch float64) math3d.Mat4 {
+	pivot := turretPivot
 	yawMatrix := math3d.Translation(pivot.X, pivot.Y, pivot.Z).
 		Mul(math3d.QuaternionFromAxisAngle(math3d.Vec3{Y: 1}, yaw).Matrix()).
 		Mul(math3d.Translation(-pivot.X, -pivot.Y, -pivot.Z))
 	if pitch == 0 {
 		return yawMatrix
 	}
-	barrel := feature.BarrelPivot
+	barrel := barrelPivot
 	return yawMatrix.Mul(math3d.Translation(barrel.X, barrel.Y, barrel.Z)).
 		Mul(math3d.QuaternionFromAxisAngle(math3d.Vec3{X: 1}, pitch).Matrix()).
 		Mul(math3d.Translation(-barrel.X, -barrel.Y, -barrel.Z))
@@ -282,6 +306,11 @@ type Portal struct {
 	Name        string
 	Destination scene.FrameID
 	Boundary    []math3d.Vec3
+	// HideFromDestination preserves physical, bidirectional crossing while
+	// suppressing the room view when looking in from Destination. It is useful
+	// for an interior entered through an intentionally unmarked exterior deck:
+	// its large local shell must not read as a surface structure.
+	HideFromDestination bool
 }
 
 // CrossingPoint reports where a segment actually passes through a convex

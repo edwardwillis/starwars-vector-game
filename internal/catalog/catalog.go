@@ -96,6 +96,8 @@ const (
 	LaserBoltName               = "builtin/laser-bolt"
 	ProtonTorpedoName           = "builtin/proton-torpedo"
 	DeathStarName               = "builtin/death-star"
+	DeathStarTurbolaserName     = "builtin/death-star-turbolaser"
+	DeathStarQuarterHangarName  = "builtin/death-star-quarter-hangar"
 	TIEInterceptorAppearance    = "builtin/tie-interceptor-model"
 	RebelLaserBoltAppearance    = "builtin/laser-bolt-rebel"
 	ImperialLaserBoltAppearance = "builtin/laser-bolt-imperial"
@@ -136,6 +138,10 @@ func SpecificationFor(definition string) (Specification, bool) {
 		// speed and hyperdrive class. They describe the familiar modified YT-1300
 		// rather than every film-era configuration.
 		return Specification{Title: "MILLENNIUM FALCON", Type: "YT-1300F LIGHT FREIGHTER", Role: "REBEL ALLIANCE", Description: "MODIFIED CORELLIAN LIGHT FREIGHTER", Description2: "FASTEST HUNK OF JUNK IN THE GALAXY", Length: "34.75 METERS", Crew: "1 PILOT 1 CO-PILOT 2 GUNNERS", Passengers: "6", MaxSpeed: "1050 KM PER HOUR", Hyperdrive: "CLASS 0.5", Weapons: "2 CEC AG-2G QUAD LASER CANNONS", Ordnance: "2 CONCUSSION MISSILE TUBES", Shields: "YES"}, true
+	case DeathStarTurbolaserName:
+		return Specification{Title: "DEATH STAR TURBOLASER", Type: "IMPERIAL SURFACE DEFENCE", Role: "DEATH STAR BATTERY", Description: "THREE STAGE ARMOURED PEDESTAL", Description2: "TWIN ARTICULATED TURBOLASER", Length: "APPROX 6 METERS", Crew: "AUTOMATED", Passengers: "NONE", MaxSpeed: "TRACKING MOUNT", Hyperdrive: "NO", Weapons: "TWIN TURBOLASERS", Ordnance: "NONE", Shields: "NO"}, true
+	case DeathStarQuarterHangarName:
+		return Specification{Title: "DEATH STAR QUARTER HANGAR", Type: "EXTERIOR SERVICE FACILITY", Role: "IMPERIAL SURFACE INFRASTRUCTURE", Description: "FOUR SECTION CURVED SERVICE BAY", Description2: "RECESSED INNER APRON AND OUTER FASCIA", Length: "APPROX 24 METERS", Crew: "AUTOMATED", Passengers: "NONE", MaxSpeed: "STATIC INSTALLATION", Hyperdrive: "NO", Weapons: "NONE", Ordnance: "NONE", Shields: "NO"}, true
 	default:
 		return Specification{}, false
 	}

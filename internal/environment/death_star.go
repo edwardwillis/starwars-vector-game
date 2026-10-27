@@ -20,7 +20,14 @@ const (
 	deathStarTileSize          = 80.0
 	deathStarTileRadius        = 2
 	deathStarHorizonTileRadius = 4
-	deathStarGridLines         = 8
+	deathStarGridLines         = 4
+	// Opaque world fills use a painter order rather than a GPU depth buffer.
+	// The long trench must therefore be partitioned more finely than its
+	// deliberately sparse visible vector grid, so a wall or deck face cannot
+	// incorrectly overpaint nearby surface furniture at a grazing angle.
+	deathStarTrenchFillRows    = 16
+	deathStarTrenchFillColumns = deathStarGridLines
+	deathStarTrenchVectorRows  = 8
 	trenchTileX                = 0
 	trenchFirstTileZ           = -1
 	// The port occupies the penultimate physical tile.  The final tile is a
@@ -31,17 +38,20 @@ const (
 	trenchLastTileZ      = 3
 	deathStarTrenchHalf  = 14.0
 	deathStarTrenchDepth = 14.0
-	deathStarAttackGateZ = 108.0
 	deathStarFiringRange = 40.0
+	// The alliance run must carry at least eighty percent of the distance from
+	// the legal trench mouth to the exhaust port before the attack phase opens.
+	// This keeps a surface entrant from treating the first half of the trench as
+	// a cosmetic fly-by and makes the final targeting pass meaningful.
+	deathStarTrenchSuccessProgress = 0.80
 )
 
 var deathStarTrenchRoute = [...]float64{
 	float64(trenchFirstTileZ)*deathStarTileSize + deathStarTileSize/2 - 4,
 	0.5 * deathStarTileSize,
-	// This gate opens the attack run well before the port. It leaves enough
-	// distance both to establish the downward torpedo solution and to begin a
-	// safe climb after the hit.
-	deathStarAttackGateZ,
+	// This final gate enforces the eighty-percent run before the terminal port
+	// pass while retaining enough distance to establish a torpedo solution.
+	deathStarTrenchAttackGateZ(),
 }
 
 type DeathStarMissionRegion uint8
@@ -62,7 +72,7 @@ func DeathStarRegion(position math3d.Vec3) DeathStarMissionRegion {
 	}
 	// The attack run starts before the port tile. The actual port hit remains a
 	// later weapon/objective validation, not a positional shortcut.
-	attackStart := deathStarAttackGateZ
+	attackStart := deathStarTrenchAttackGateZ()
 	if position.Z >= attackStart {
 		return DeathStarExhaustAttackRegion
 	}
@@ -93,6 +103,65 @@ func DeathStarTrenchEntryContains(position math3d.Vec3) bool {
 		position.Z >= start+6 && position.Z <= entryEnd
 }
 
+// DeathStarTrenchEntryCrossed distinguishes a real descent from merely
+// appearing inside the trench. The mission accepts only a surface-to-trench
+// crossing through the marked mouth near the run's start.
+func DeathStarTrenchEntryCrossed(previous, current math3d.Vec3) bool {
+	return DeathStarRegion(previous) == DeathStarSurfaceRegion && DeathStarTrenchEntryContains(current)
+}
+
+// trenchEntryEnvelopePart draws the exact legal descent area as a bright,
+// non-colliding outline across the trench mouth. It is an approach aid, not a
+// physical gate: the open top remains freely flyable.
+func trenchEntryEnvelopePart() scene.Part {
+	start := (float64(trenchFirstTileZ) - 0.5) * deathStarTileSize
+	end := float64(trenchFirstTileZ)*deathStarTileSize + deathStarTileSize/2 - 12
+	halfWidth, y := deathStarTrenchHalf-2, 0.12
+	mesh := model.Model{}
+	addLine := func(a, b math3d.Vec3) {
+		index := len(mesh.Verts)
+		mesh.Verts = append(mesh.Verts, a, b)
+		mesh.Edges = append(mesh.Edges, model.Edge{A: index, B: index + 1, Kind: model.EdgeDecorative})
+	}
+	near, far := start+6, end
+	addLine(math3d.Vec3{X: -halfWidth, Y: y, Z: near}, math3d.Vec3{X: halfWidth, Y: y, Z: near})
+	addLine(math3d.Vec3{X: -halfWidth, Y: y, Z: near}, math3d.Vec3{X: -halfWidth, Y: y, Z: far})
+	addLine(math3d.Vec3{X: halfWidth, Y: y, Z: near}, math3d.Vec3{X: halfWidth, Y: y, Z: far})
+	addLine(math3d.Vec3{X: -halfWidth, Y: y, Z: far}, math3d.Vec3{X: halfWidth, Y: y, Z: far})
+	// A broad forward chevron makes the valid attack direction unambiguous.
+	addLine(math3d.Vec3{X: -5, Y: y, Z: far - 10}, math3d.Vec3{Y: y, Z: far})
+	addLine(math3d.Vec3{X: 5, Y: y, Z: far - 10}, math3d.Vec3{Y: y, Z: far})
+	return scene.Part{Name: "trench entry envelope", Mesh: model.Prepare(mesh), Color: color.RGBA{R: 96, G: 224, B: 255, A: 255}, LineWidth: 1.6}
+}
+
+// trenchEntryPathArrowsPart repeats the supplied red floor arrow through the
+// envelope. Each arrow points along local +Z, the only legal attack-run
+// direction, while remaining visual-only and clear of the flyable volume.
+func trenchEntryPathArrowsPart() scene.Part {
+	start := (float64(trenchFirstTileZ) - 0.5) * deathStarTileSize
+	near, y := start+6, 0.16
+	mesh := model.Model{}
+	addArrow := func(z float64) {
+		// This closed outline follows the supplied upright-arrow silhouette,
+		// rotated onto the trench floor so its tip leads down the run.
+		points := []math3d.Vec3{
+			{X: -3.5, Y: y, Z: z}, {X: -3.5, Y: y, Z: z + 7},
+			{X: -8, Y: y, Z: z + 7}, {Y: y, Z: z + 17},
+			{X: 8, Y: y, Z: z + 7}, {X: 3.5, Y: y, Z: z + 7},
+			{X: 3.5, Y: y, Z: z},
+		}
+		base := len(mesh.Verts)
+		mesh.Verts = append(mesh.Verts, points...)
+		for index := range points {
+			mesh.Edges = append(mesh.Edges, model.Edge{A: base + index, B: base + (index+1)%len(points), Kind: model.EdgeDecorative})
+		}
+	}
+	for _, z := range []float64{near + 2, near + 21, near + 40} {
+		addArrow(z)
+	}
+	return scene.Part{Name: "trench entry direction arrows", Mesh: model.Prepare(mesh), Color: color.RGBA{R: 236, G: 40, B: 48, A: 255}, LineWidth: 1.8}
+}
+
 // DeathStarTrenchCheckpoints returns forward route gates derived from the
 // same tile dimensions as the physical trench.  Crossing them in order is a
 // mission rule; their geometry never depends on rendered tile visibility.
@@ -118,6 +187,26 @@ func DeathStarExhaustPortPoint() math3d.Vec3 {
 	return math3d.Vec3{Y: -deathStarTrenchDepth + 0.03, Z: zCenter + deathStarTileSize/2 - 12}
 }
 
+// DeathStarTrenchRequiredProgress is the minimum fraction of the legal run
+// an Alliance fighter must complete before it may attack the exhaust port.
+func DeathStarTrenchRequiredProgress() float64 { return deathStarTrenchSuccessProgress }
+
+// DeathStarTrenchProgress reports clamped forward progress from the legal
+// trench entry point to the exhaust-port plane. It is shared presentation and
+// mission geometry, not a render-distance estimate.
+func DeathStarTrenchProgress(position math3d.Vec3) float64 {
+	start, end := DeathStarTrenchEntryPoint().Z, DeathStarExhaustPortPoint().Z
+	if end <= start {
+		return 0
+	}
+	return max(0, min(1, (position.Z-start)/(end-start)))
+}
+
+func deathStarTrenchAttackGateZ() float64 {
+	start, port := DeathStarTrenchEntryPoint().Z, DeathStarExhaustPortPoint().Z
+	return start + (port-start)*deathStarTrenchSuccessProgress
+}
+
 // DeathStarExhaustPortFiringRange is the range at which the targeting
 // computer's vertical guides meet. It is a clear preferred shot cue, not a
 // second hidden validity rule; the combat envelope remains authoritative.
@@ -132,18 +221,85 @@ func DeathStarTrenchEscapePoint() math3d.Vec3 {
 }
 
 var (
-	deathStarSurfaceLine = color.RGBA{R: 108, G: 108, B: 108, A: 255}
+	// The shared mapping stays world-anchored across tiles. The present deck is
+	// intentionally solid, but the same frame keeps future quiet materials and
+	// the trench's structural texture spatially coherent.
+	deathStarDeckTexturePeriod = deathStarTileSize
+	deathStarDeckPanelFamily   = PanelFamily{
+		ID: DeathStarExteriorPanelFamily, TextureID: render.DeathStarDeckTextureID, RepeatDistance: deathStarDeckTexturePeriod,
+	}
+	deathStarDeckPanelMapping = PanelSurfaceMapping{
+		Family: deathStarDeckPanelFamily, AxisU: math3d.Vec3{X: 1}, AxisV: math3d.Vec3{Z: 1},
+	}
+	// Horizon tiles deliberately use the same exterior pattern frame and
+	// material as near tiles. They omit only the CPU vector grid, so the panel
+	// artwork remains continuous where the visual-detail boundary moves.
+	deathStarHorizonPanelMapping = deathStarDeckPanelMapping
+	deathStarSurfaceLine         = color.RGBA{R: 78, G: 78, B: 82, A: 255}
+	// Trench seams are deliberately darker and finer than the exposed deck
+	// grid. Bright, heavy outlines made the repeated trench panels read as a
+	// synthetic wireframe rather than recessed armour.
+	deathStarTrenchLine        = color.RGBA{R: 48, G: 48, B: 51, A: 255}
+	deathStarDeckVectorWidth   = float32(.65)
+	deathStarTrenchVectorWidth = float32(.75)
+	// Installation surfaces are read primarily through their textured recesses
+	// rather than bright polygon borders. These strokes are intentionally below
+	// the material's average grey, so only silhouette/tier changes survive at
+	// close range.
+	deathStarInstallationLine       = color.RGBA{R: 42, G: 42, B: 42, A: 255}
+	deathStarInstallationBarrelLine = color.RGBA{R: 52, G: 52, B: 52, A: 255}
+	deathStarHangarBayLine          = color.RGBA{R: 28, G: 28, B: 30, A: 255}
+	deathStarInstallationLineWidth  = float32(.7)
+	// This fixed light direction is shared by passive furniture and active
+	// surface fixtures. It is evaluated against each already-authored face,
+	// not against the camera, so fixtures retain a coherent lit and shadowed
+	// side while the player flies past or a turret traverses.
+	deathStarFixtureDirectionalShading = scene.DirectionalShading{
+		Direction: math3d.Vec3{X: -0.60, Y: 0.70, Z: -0.40}.Normalize(),
+		Ambient:   0.48,
+		Diffuse:   1.20,
+	}
 	deathStarSurfaceFill = scene.SurfaceMaterial{
 		Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 42, G: 42, B: 42, A: 255},
 	}
 	deathStarSurfaceTexture = scene.SurfaceMaterial{
-		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 42, G: 42, B: 42, A: 255}, TextureID: "builtin/death-star-deck",
+		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 68, G: 68, B: 68, A: 255}, TextureID: "builtin/death-star-deck",
 	}
 	deathStarHorizonTexture = scene.SurfaceMaterial{
-		Mode: scene.SurfaceTexturedOpaque, Color: deathStarSurfaceLine, TextureID: render.DeathStarHorizonDeckTextureID,
+		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 68, G: 68, B: 68, A: 255}, TextureID: render.DeathStarDeckTextureID,
 	}
-	deathStarTrenchFill = scene.SurfaceMaterial{
-		Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 30, G: 30, B: 30, A: 255},
+	deathStarInstallationSurface = scene.SurfaceMaterial{
+		// A deliberately deep charcoal: low-rise furniture should read through
+		// its silhouette and restrained recesses, not as pale blocks sitting on
+		// top of the Death Star deck.
+		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 48, G: 48, B: 48, A: 255}, TextureID: render.DeathStarInstallationTextureID,
+		Directional: deathStarFixtureDirectionalShading,
+	}
+	deathStarPassiveInstallationSurface = scene.SurfaceMaterial{
+		// Passive surface furniture keeps the same charcoal material, but uses
+		// a fixed high/front-port light to make its real low-rise geometry read
+		// against the deck. This is deliberately per-face and static: it adds
+		// no shadows, view-dependent effects, or simulation state.
+		Mode:        scene.SurfaceTexturedOpaque,
+		Color:       color.RGBA{R: 48, G: 48, B: 48, A: 255},
+		TextureID:   render.DeathStarInstallationTextureID,
+		Directional: deathStarFixtureDirectionalShading,
+	}
+	deathStarHangarBaySurface = scene.SurfaceMaterial{
+		// The recessed lining is deliberately unlit: it is the visible opening
+		// of a service bay rather than a second raised piece of deck furniture.
+		Mode: scene.SurfaceFlatOpaque, Color: color.RGBA{R: 22, G: 22, B: 24, A: 255},
+	}
+	deathStarInstallationBarrelSurface = scene.SurfaceMaterial{
+		// Turret barrels deliberately remain untextured for range legibility,
+		// but receive the same fixed light so they belong to the same physical
+		// surface language as their foundations and gunhouses.
+		Mode:        scene.SurfaceFlatOpaque,
+		Color:       color.RGBA{R: 42, G: 42, B: 42, A: 255},
+		Directional: deathStarFixtureDirectionalShading,
+	}
+	deathStarTrenchTexture = scene.SurfaceMaterial{
+		Mode: scene.SurfaceTexturedOpaque, Color: color.RGBA{R: 42, G: 42, B: 42, A: 255}, TextureID: render.DeathStarTrenchTextureID,
 	}
 )
 
@@ -215,7 +371,7 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	isTrench := coordinate.X == trenchTileX && coordinate.Z >= trenchFirstTileZ && coordinate.Z <= trenchLastTileZ
 	deck := gridPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines)
 	if horizonOnly {
-		deck = texturedDeckPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize)
+		deck = texturedDeckPatch(xCenter-outerHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarHorizonPanelMapping)
 	}
 	// The deck's grey opaque face covers the already-batched skyfield on the
 	// GPU. Nearby tiles retain vector grids; horizon tiles use equivalent static
@@ -226,7 +382,7 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	deck.SkipDepth = false
 	deck.DepthTestOnly = false
 	deck.PointOccluder = true
-	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: deathStarSurfaceLine, LineWidth: 1, Surface: deathStarSurfaceFill, DepthWriteProxy: true}}
+	parts := []scene.Part{{Name: "surface deck", Mesh: deck, Color: deathStarSurfaceLine, LineWidth: deathStarDeckVectorWidth, Surface: deathStarSurfaceFill, DepthWriteProxy: true}}
 	if !horizonOnly {
 		parts[0].Surface = deathStarSurfaceTexture
 	} else {
@@ -242,23 +398,38 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	if isTrench {
 		if horizonOnly {
 			deck = model.Merge(
-				texturedDeckPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize),
-				texturedDeckPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize),
+				texturedDeckPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarHorizonPanelMapping),
+				texturedDeckPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarHorizonPanelMapping),
 			)
 		} else {
 			deck = model.Merge(
-				gridPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
-				gridPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize, deathStarGridLines),
+				trenchDeckPatch(xCenter-outerHalf, xCenter-trenchHalf, 0, zCenter, deathStarTileSize),
+				trenchDeckPatch(xCenter+trenchHalf, xCenter+outerHalf, 0, zCenter, deathStarTileSize),
 			)
 		}
 		deck.SkipDepth = false
 		deck.DepthTestOnly = false
 		deck.PointOccluder = true
 		parts[0].Mesh = deck
-		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: deathStarSurfaceLine, LineWidth: 2, Surface: deathStarTrenchFill, DepthWriteProxy: true})
+		parts = append(parts, scene.Part{Name: "trench", Mesh: trenchWireframe(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: deathStarTrenchLine, LineWidth: deathStarTrenchVectorWidth, Surface: deathStarTrenchTexture, DepthWriteProxy: true})
+		if !horizonOnly && coordinate.Z == trenchLastTileZ {
+			// The physical terminal collision wall has a matching rendered
+			// bulkhead. The escape objective climbs out before this wall; pilots
+			// cannot mistake an unrendered opening for a route through the end.
+			parts = append(parts, scene.Part{Name: "trench terminal bulkhead", Mesh: trenchTerminalBulkhead(xCenter, trenchHalf, depth, zCenter, deathStarTileSize), Color: deathStarTrenchLine, LineWidth: deathStarTrenchVectorWidth, Surface: deathStarTrenchTexture, DepthWriteProxy: true})
+		}
+		if !horizonOnly && coordinate.Z == trenchFirstTileZ {
+			parts = append(parts, trenchEntryEnvelopePart(), trenchEntryPathArrowsPart())
+		}
 		if !horizonOnly {
 			planes = trenchPlanes(xCenter, zCenter, outerHalf, trenchHalf, depth)
 		}
+	}
+	if horizonOnly {
+		// Horizon tiles deliberately have no Feature records, collision, or
+		// target state. This baked low-rise part gives every visible tile a
+		// little physical surface furniture while retaining that cheap contract.
+		parts = append(parts, horizonSurfaceFurniturePart(coordinate, xCenter, zCenter, isTrench))
 	}
 	var features []Feature
 	var boxes []collision.OrientedBox
@@ -266,8 +437,12 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	if !horizonOnly {
 		if coordinate == hangarSurfaceTile {
 			portalParts = []scene.Part{parts[0]}
-			parts = append(parts, sharedHangarEgressParts...)
-			boxes = hangarSurfaceBoxes()
+			// The interior transition has no exterior building or doorway frame.
+			// The old wide, thin egress lintel was a leftover from the former
+			// surface hangar and read as an implausible freestanding rectangle.
+			// This tile therefore keeps the ordinary passive population while the
+			// authored transition volume handles room entry invisibly.
+			features = appendPassiveDeathStarScenery(features, coordinate, xCenter, zCenter, false)
 		} else {
 			features, boxes = tileFeatures(coordinate, xCenter, zCenter, isTrench)
 		}
@@ -304,12 +479,12 @@ func buildDeathStarTile(coordinate TileCoordinate, horizonOnly bool) Tile {
 	})
 }
 
-// deathStarHorizonTile provides only the inexpensive visual shell used beyond
-// the nearby physical stream. It retains the surface/trench silhouette but
-// carries no installations, collision, targeting, point occlusion, or depth
-// writes. Its vectors still sample depth written by foreground structures, so
-// the extended grid cannot show through towers. Opaque surface fills cover the
-// batched skyfield on the GPU.
+// deathStarHorizonTile provides the inexpensive visual shell used beyond the
+// nearby physical stream. It retains the surface/trench silhouette and baked
+// low-rise furniture, but carries no addressable installations, collision,
+// targeting, point occlusion, or depth writes. Its vectors still sample depth
+// written by foreground structures, so the extended grid cannot show through
+// towers. Opaque surface fills cover the batched skyfield on the GPU.
 func deathStarHorizonTile(coordinate TileCoordinate) Tile {
 	return buildDeathStarTile(coordinate, true)
 }
@@ -351,8 +526,11 @@ func deathStarSurfaceDepthProxy(coordinates []TileCoordinate) []model.Model {
 		if right-left <= 1e-6 || far-near <= 1e-6 {
 			return
 		}
-		// +Y winding: near-left, near-right, far-right, far-left.
-		addFace([]math3d.Vec3{{X: left, Z: near}, {X: right, Z: near}, {X: right, Z: far}, {X: left, Z: far}}, false)
+		// +Y winding: near-left, far-left, far-right, near-right. These faces
+		// exist only in the CPU depth proxy, but their winding still matters:
+		// a downward-facing deck is back-face rejected before it can hide
+		// trench-wall vectors behind the nearer surface.
+		addFace([]math3d.Vec3{{X: left, Z: near}, {X: left, Z: far}, {X: right, Z: far}, {X: right, Z: near}}, false)
 	}
 
 	trenchStart := max(minZ, (float64(trenchFirstTileZ)-.5)*deathStarTileSize)
@@ -376,6 +554,11 @@ func deathStarSurfaceDepthProxy(coordinates []TileCoordinate) []model.Model {
 	addFace([]math3d.Vec3{{X: left, Z: trenchStart}, {X: left, Z: trenchEnd}, {X: left, Y: -depth, Z: trenchEnd}, {X: left, Y: -depth, Z: trenchStart}}, true)
 	addFace([]math3d.Vec3{{X: right, Z: trenchStart}, {X: right, Y: -depth, Z: trenchStart}, {X: right, Y: -depth, Z: trenchEnd}, {X: right, Z: trenchEnd}}, true)
 	addFace([]math3d.Vec3{{X: left, Y: -depth, Z: trenchStart}, {X: left, Y: -depth, Z: trenchEnd}, {X: right, Y: -depth, Z: trenchEnd}, {X: right, Y: -depth, Z: trenchStart}}, true)
+	if maxTileZ >= trenchLastTileZ {
+		// Match the terminal collision plane so the depth proxy cannot permit
+		// distant deck or wall vectors to appear through the bulkhead.
+		addFace([]math3d.Vec3{{X: left, Z: trenchEnd}, {X: left, Y: -depth, Z: trenchEnd}, {X: right, Y: -depth, Z: trenchEnd}, {X: right, Z: trenchEnd}}, true)
+	}
 	return []model.Model{model.Prepare(mesh)}
 }
 
@@ -390,13 +573,13 @@ func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Mode
 			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: x, Y: y, Z: z})
 		}
 	}
-	// The grid strokes are detailed, but the physical surface is one planar
-	// patch. A single face gives depth and point-occlusion stages the correct
-	// solid footprint without rasterizing every small line cell.
-	mesh.Faces = append(mesh.Faces, model.Face{Vertices: []int{
-		index(divisions, 0), index(divisions, divisions),
-		index(0, divisions), index(0, 0),
-	}, UVs: []model.UV{{U: 0, V: 1}, {U: 1, V: 1}, {U: 1, V: 0}, {U: 0, V: 0}}})
+	// The deck is a quiet solid material, so it needs only one physical face.
+	// The existing decorative grid owns its structural subdivision; keeping the
+	// fill whole avoids extra triangles and avoids implying baked furniture.
+	mesh.Faces = append(mesh.Faces, model.Face{
+		Vertices: []int{index(rows-1, 0), index(rows-1, columns-1), index(0, columns-1), index(0, 0)},
+		UVs:      deckPatchUVs(minX, maxX, y, zCenter, length, deathStarDeckPanelMapping),
+	})
 	// Grid markings are intentional surface-associated detail. They remain
 	// eligible for face visibility and depth tests but are not mistaken for
 	// coplanar construction seams by the hidden-line policy.
@@ -413,11 +596,52 @@ func gridPatch(minX, maxX, y, zCenter, length float64, divisions int) model.Mode
 	return model.Prepare(mesh)
 }
 
+// trenchDeckPatch is the same quiet side-deck surface as gridPatch, but its
+// opaque face is partitioned into small invisible cells. The visible grid
+// stays deliberately sparse; the extra faces exist only to give the painter
+// sort sufficiently local depth values around the trench walls.
+func trenchDeckPatch(minX, maxX, y, zCenter, length float64) model.Model {
+	columns, rows := deathStarTrenchFillColumns, deathStarTrenchFillRows
+	mesh := model.Model{}
+	index := func(row, column int) int { return row*(columns+1) + column }
+	for row := 0; row <= rows; row++ {
+		z := zCenter - length/2 + length*float64(row)/float64(rows)
+		for column := 0; column <= columns; column++ {
+			x := minX + (maxX-minX)*float64(column)/float64(columns)
+			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: x, Y: y, Z: z})
+		}
+	}
+	for row := 0; row < rows; row++ {
+		for column := 0; column < columns; column++ {
+			vertices := []int{index(row+1, column), index(row+1, column+1), index(row, column+1), index(row, column)}
+			points := make([]math3d.Vec3, len(vertices))
+			for pointIndex, vertex := range vertices {
+				points[pointIndex] = mesh.Verts[vertex]
+			}
+			mesh.Faces = append(mesh.Faces, model.Face{Vertices: vertices, UVs: deathStarDeckPanelMapping.UVs(points)})
+		}
+	}
+
+	// Preserve the existing four-by-four decorative grid. The fill has sixteen
+	// rows for stable ordering, but its additional cell boundaries are never
+	// emitted as vector strokes.
+	rowStep := rows / deathStarGridLines
+	for row := 0; row <= rows; row += rowStep {
+		for column := 0; column < columns; column++ {
+			mesh.Edges = append(mesh.Edges, model.Edge{A: index(row, column), B: index(row, column+1), Kind: model.EdgeDecorative, Importance: .4})
+		}
+	}
+	for column := 0; column <= columns; column++ {
+		mesh.Edges = append(mesh.Edges, model.Edge{A: index(0, column), B: index(rows, column), Kind: model.EdgeDecorative, Importance: .4})
+	}
+	return model.Prepare(mesh)
+}
+
 // texturedDeckPatch is the static far-distance equivalent of gridPatch. The
 // physical quad, UVs, bounds and depth behaviour remain the same, but the
 // repeated deck grid is supplied by the opaque GPU texture instead of dozens
 // of CPU-projected decorative vector edges.
-func texturedDeckPatch(minX, maxX, y, zCenter, length float64) model.Model {
+func texturedDeckPatch(minX, maxX, y, zCenter, length float64, mapping PanelSurfaceMapping) model.Model {
 	halfLength := length / 2
 	mesh := model.Model{
 		Verts: []math3d.Vec3{
@@ -428,48 +652,106 @@ func texturedDeckPatch(minX, maxX, y, zCenter, length float64) model.Model {
 		},
 		Faces: []model.Face{{
 			Vertices: []int{3, 2, 1, 0},
-			UVs:      []model.UV{{U: 0, V: 1}, {U: 1, V: 1}, {U: 1, V: 0}, {U: 0, V: 0}},
+			UVs:      deckPatchUVs(minX, maxX, y, zCenter, length, mapping),
 		}},
 	}
 	return model.Prepare(mesh)
 }
 
+// deckPatchUVs maps a rectangular Death Star deck patch through a shared
+// exterior-family frame. Adjacent tiles therefore meet without a visible
+// reset, while near and horizon materials can select their own repeat scale.
+func deckPatchUVs(minX, maxX, y, zCenter, length float64, mapping PanelSurfaceMapping) []model.UV {
+	minZ, maxZ := zCenter-length/2, zCenter+length/2
+	return mapping.UVs([]math3d.Vec3{
+		{X: minX, Y: y, Z: maxZ}, {X: maxX, Y: y, Z: maxZ},
+		{X: maxX, Y: y, Z: minZ}, {X: minX, Y: y, Z: minZ},
+	})
+}
+
 func trenchWireframe(centerX, halfWidth, depth, zCenter, length float64) model.Model {
+	nearZ := zCenter - length/2
+	leftX, rightX := centerX-halfWidth, centerX+halfWidth
+	period := deathStarDeckTexturePeriod
+	wallDepthV := depth / period
+	mesh := model.Model{}
+	section := func(row int) int { return row * 4 }
+	for row := 0; row <= deathStarTrenchFillRows; row++ {
+		z := nearZ + length*float64(row)/float64(deathStarTrenchFillRows)
+		mesh.Verts = append(mesh.Verts,
+			math3d.Vec3{X: leftX, Z: z},
+			math3d.Vec3{X: leftX, Y: -depth, Z: z},
+			math3d.Vec3{X: rightX, Z: z},
+			math3d.Vec3{X: rightX, Y: -depth, Z: z},
+		)
+	}
+	for row := 0; row < deathStarTrenchFillRows; row++ {
+		near, far := section(row), section(row+1)
+		nearZ := mesh.Verts[near].Z
+		farZ := mesh.Verts[far].Z
+		mesh.Faces = append(mesh.Faces,
+			model.Face{ // left wall, outward normal +X
+				Vertices: []int{near, far, far + 1, near + 1}, DoubleSided: true,
+				UVs: []model.UV{{U: nearZ / period}, {U: farZ / period}, {U: farZ / period, V: wallDepthV}, {U: nearZ / period, V: wallDepthV}},
+			},
+			model.Face{ // right wall, outward normal -X
+				Vertices: []int{near + 2, near + 3, far + 3, far + 2}, DoubleSided: true,
+				UVs: []model.UV{{U: nearZ / period}, {U: nearZ / period, V: wallDepthV}, {U: farZ / period, V: wallDepthV}, {U: farZ / period}},
+			},
+			model.Face{ // floor, navigable side +Y
+				Vertices: []int{near + 1, far + 1, far + 3, near + 3}, DoubleSided: true,
+				UVs: []model.UV{{U: leftX / period, V: nearZ / period}, {U: leftX / period, V: farZ / period}, {U: rightX / period, V: farZ / period}, {U: rightX / period, V: nearZ / period}},
+			},
+		)
+	}
+
+	// Retain the original sparse construction strokes. The extra opaque faces
+	// above deliberately add no visible ribs or bands.
+	near, far := section(0), section(deathStarTrenchFillRows)
+	mesh.Edges = append(mesh.Edges,
+		model.Edge{A: near, B: far, Kind: model.EdgeDecorative},
+		model.Edge{A: near + 2, B: far + 2, Kind: model.EdgeDecorative},
+		model.Edge{A: near + 1, B: far + 1, Kind: model.EdgeDecorative},
+		model.Edge{A: near + 3, B: far + 3, Kind: model.EdgeDecorative},
+	)
+	vectorStep := deathStarTrenchFillRows / deathStarTrenchVectorRows
+	for row := 0; row <= deathStarTrenchFillRows; row += vectorStep {
+		base := section(row)
+		mesh.Edges = append(mesh.Edges,
+			model.Edge{A: base, B: base + 1, Kind: model.EdgeDecorative},
+			model.Edge{A: base + 2, B: base + 3, Kind: model.EdgeDecorative},
+		)
+	}
+	mesh.Edges = append(mesh.Edges,
+		model.Edge{A: near + 1, B: near + 3, Kind: model.EdgeDecorative},
+		model.Edge{A: far + 1, B: far + 3, Kind: model.EdgeDecorative},
+	)
+	return model.Prepare(mesh)
+}
+
+// trenchTerminalBulkhead is the visible counterpart to the terminal finite
+// plane. It closes the trench with textured armour while leaving its top open
+// for the post-shot climb-out route.
+func trenchTerminalBulkhead(centerX, halfWidth, depth, zCenter, length float64) model.Model {
+	z := zCenter + length/2
+	period := deathStarDeckTexturePeriod
 	mesh := model.Model{
 		Verts: []math3d.Vec3{
-			{X: centerX - halfWidth, Z: zCenter - length/2},
-			{X: centerX - halfWidth, Z: zCenter + length/2},
-			{X: centerX + halfWidth, Z: zCenter - length/2},
-			{X: centerX + halfWidth, Z: zCenter + length/2},
-			{X: centerX - halfWidth, Y: -depth, Z: zCenter - length/2},
-			{X: centerX - halfWidth, Y: -depth, Z: zCenter + length/2},
-			{X: centerX + halfWidth, Y: -depth, Z: zCenter - length/2},
-			{X: centerX + halfWidth, Y: -depth, Z: zCenter + length/2},
+			{X: centerX - halfWidth, Z: z}, {X: centerX - halfWidth, Y: -depth, Z: z},
+			{X: centerX + halfWidth, Y: -depth, Z: z}, {X: centerX + halfWidth, Z: z},
 		},
+		Faces: []model.Face{{
+			Vertices:    []int{0, 1, 2, 3},
+			DoubleSided: true,
+			UVs: []model.UV{
+				{U: (centerX - halfWidth) / period}, {U: (centerX - halfWidth) / period, V: depth / period},
+				{U: (centerX + halfWidth) / period, V: depth / period}, {U: (centerX + halfWidth) / period},
+			},
+		}},
 		Edges: []model.Edge{
-			{A: 0, B: 1, Kind: model.EdgeDecorative}, {A: 2, B: 3, Kind: model.EdgeDecorative}, {A: 4, B: 5, Kind: model.EdgeDecorative}, {A: 6, B: 7, Kind: model.EdgeDecorative},
-			{A: 0, B: 4, Kind: model.EdgeDecorative}, {A: 1, B: 5, Kind: model.EdgeDecorative}, {A: 2, B: 6, Kind: model.EdgeDecorative}, {A: 3, B: 7, Kind: model.EdgeDecorative},
-			{A: 4, B: 6, Kind: model.EdgeDecorative}, {A: 5, B: 7, Kind: model.EdgeDecorative},
+			{A: 0, B: 1, Kind: model.EdgeDecorative}, {A: 1, B: 2, Kind: model.EdgeDecorative},
+			{A: 2, B: 3, Kind: model.EdgeDecorative}, {A: 3, B: 0, Kind: model.EdgeDecorative},
 		},
-	}
-	mesh.Faces = []model.Face{
-		{Vertices: []int{0, 1, 5, 4}, DoubleSided: true}, // left wall, outward normal +X
-		{Vertices: []int{2, 6, 7, 3}, DoubleSided: true}, // right wall, outward normal -X
-		{Vertices: []int{4, 5, 7, 6}, DoubleSided: true}, // floor, navigable side +Y
-	}
-	for i := 1; i < 8; i++ {
-		z := zCenter - length/2 + length*float64(i)/8
-		base := len(mesh.Verts)
-		mesh.Verts = append(mesh.Verts,
-			math3d.Vec3{X: centerX - halfWidth, Z: z},
-			math3d.Vec3{X: centerX - halfWidth, Y: -depth, Z: z},
-			math3d.Vec3{X: centerX + halfWidth, Z: z},
-			math3d.Vec3{X: centerX + halfWidth, Y: -depth, Z: z},
-		)
-		mesh.Edges = append(mesh.Edges,
-			model.Edge{A: base, B: base + 1},
-			model.Edge{A: base + 2, B: base + 3},
-		)
 	}
 	return model.Prepare(mesh)
 }
@@ -498,7 +780,7 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 	}
 	zOffsets := [...]float64{-18, 15, 27}
 	boxes := make([]collision.OrientedBox, 0, 12)
-	features := make([]Feature, 0, 4)
+	features := make([]Feature, 0, 10)
 	for index := range xOffsets {
 		seed := installationSeed(coordinate, index)
 		kind := "tower"
@@ -539,7 +821,96 @@ func tileFeatures(coordinate TileCoordinate, xCenter, zCenter float64, trench bo
 			boxes = append(boxes, aerialBoxes...)
 		}
 	}
-	return features, boxes
+	return appendPassiveDeathStarScenery(features, coordinate, xCenter, zCenter, trench), boxes
+}
+
+// passiveSceneryPlacement is an authored tile-local slot for low-rise surface
+// furniture. The slots give the exterior a deliberate industrial rhythm;
+// installationSeed adds only small deterministic variation so the deck does
+// not devolve into random procedural noise.
+type passiveSceneryPlacement struct {
+	kind     string
+	x, z     float64
+	scale    math3d.Vec3
+	fixedYaw bool
+	yaw      float64
+}
+
+const passiveSceneryFeatureIndex = 4 // 0..3 are reserved for active tile installations.
+
+// appendPassiveDeathStarScenery gives every ordinary surface tile a dense,
+// deliberately authored field of low-rise equipment. These are visual-only
+// instances of shared prepared prototypes: no colliders, combat targets,
+// mission events, or replay-relevant state are introduced. Keeping the
+// population in fixed local slots means no streamed tile can accidentally read
+// as a bare grey square merely because a random placement was skipped.
+//
+// Trench tiles deliberately receive furniture only on their two raised side
+// decks. The central corridor, its walls, and its floor remain completely free
+// of passive scenery for flight clarity and to preserve the authored trench
+// silhouette.
+func appendPassiveDeathStarScenery(features []Feature, coordinate TileCoordinate, xCenter, zCenter float64, trench bool) []Feature {
+	placements := []passiveSceneryPlacement{
+		{kind: "equipment-bank", x: -29, z: -29, scale: math3d.Vec3{X: 12, Y: 2.5, Z: 8}},
+		{kind: "vent-cluster", x: 29, z: -29, scale: math3d.Vec3{X: 10.5, Y: 2.2, Z: 9}},
+	}
+	if trench {
+		// The compact clusters fit wholly within their respective 26-unit-wide
+		// side decks. Their conservative render bounds therefore cannot reach
+		// the central 28-unit trench opening.
+		placements = []passiveSceneryPlacement{
+			{kind: "equipment-bank", x: 29, z: -29, scale: math3d.Vec3{X: 12, Y: 2.5, Z: 8}},
+			{kind: "vent-cluster", x: -29, z: 3, scale: math3d.Vec3{X: 10.5, Y: 2.2, Z: 9}},
+			{kind: "deck-cluster", x: 27, z: -4, scale: math3d.Vec3{X: 17, Y: 2.5, Z: 16}},
+			{kind: "deck-cluster", x: -27, z: 24, scale: math3d.Vec3{X: 17, Y: 2.4, Z: 16}},
+		}
+	} else {
+		placements = append(placements,
+			// Keep the compact power pod away from the distinctive rear-port
+			// hangar bay, so both silhouettes remain separately readable.
+			passiveSceneryPlacement{kind: "power-pod", x: -10, z: -29, scale: math3d.Vec3{X: 8, Y: 2.4, Z: 8}},
+			passiveSceneryPlacement{kind: "service-conduit", x: 2, z: -29, scale: math3d.Vec3{X: 13, Y: 2, Z: 7}},
+			// This shared cluster fills the central area with several real
+			// low-rise forms while adding only one render candidate per tile.
+			passiveSceneryPlacement{kind: "deck-cluster", x: 0, z: 0, scale: math3d.Vec3{X: 64, Y: 3.2, Z: 64}},
+			// These three rearward pieces close the formerly empty half of the
+			// tile without becoming a second set of active combat installations.
+			passiveSceneryPlacement{kind: "equipment-bank", x: -29, z: 5, scale: math3d.Vec3{X: 12, Y: 2.4, Z: 8}},
+			passiveSceneryPlacement{kind: "vent-cluster", x: 29, z: -4, scale: math3d.Vec3{X: 10.5, Y: 2.1, Z: 9}},
+			passiveSceneryPlacement{kind: "service-conduit", x: 1, z: 29, scale: math3d.Vec3{X: 13, Y: 2, Z: 7}},
+			// Three quarter-bent service buildings add a recognisable curved
+			// language to the otherwise rectangular equipment field. Their fixed
+			// orientations create a deliberate staggered rhythm while keeping the
+			// trench route and its side decks free of passive furniture.
+			passiveSceneryPlacement{kind: "quarter-hangar", x: -25, z: 26, scale: math3d.Vec3{X: 24, Y: 4.0, Z: 24}, fixedYaw: true, yaw: 0},
+			passiveSceneryPlacement{kind: "quarter-hangar", x: 27, z: 24, scale: math3d.Vec3{X: 24, Y: 4.0, Z: 24}, fixedYaw: true, yaw: math.Pi / 2},
+			passiveSceneryPlacement{kind: "quarter-hangar", x: -15, z: -22, scale: math3d.Vec3{X: 22, Y: 3.8, Z: 22}, fixedYaw: true, yaw: -math.Pi / 2},
+		)
+	}
+
+	for index, placement := range placements {
+		seed := installationSeed(coordinate, passiveSceneryFeatureIndex+index)
+		// Keep all variation deliberately subordinate to the authored slots:
+		// it breaks repeated silhouettes without moving a piece toward a
+		// trench corridor or into a neighboring tile.
+		jitterX := (float64((seed>>12)&3) - 1.5) * 0.6
+		jitterZ := (float64((seed>>16)&3) - 1.5) * 0.6
+		scale := placement.scale
+		scale.X += float64((seed>>4)&1) * 0.6
+		scale.Y += float64((seed>>6)&1) * 0.2
+		scale.Z += float64((seed>>8)&1) * 0.5
+		yaw := installationYaw(seed)
+		if placement.fixedYaw {
+			yaw = placement.yaw
+		}
+		feature, _ := newDeathStarInstallation(
+			featureID(coordinate, placement.kind, passiveSceneryFeatureIndex+index), placement.kind,
+			math3d.Vec3{X: xCenter + placement.x + jitterX, Y: scale.Y / 2, Z: zCenter + placement.z + jitterZ},
+			scale, yaw,
+		)
+		features = append(features, feature)
+	}
+	return features
 }
 
 func featureID(coordinate TileCoordinate, kind string, index int) string {
@@ -548,12 +919,24 @@ func featureID(coordinate TileCoordinate, kind string, index int) string {
 
 func exhaustPort() model.Model {
 	const segments = 12
-	const radius = 2.4
 	mesh := model.Model{}
-	for index := 0; index < segments; index++ {
-		angle := 2 * math.Pi * float64(index) / segments
-		mesh.Verts = append(mesh.Verts, math3d.Vec3{X: math.Cos(angle) * radius, Z: math.Sin(angle) * radius})
-		mesh.Edges = append(mesh.Edges, model.Edge{A: index, B: (index + 1) % segments})
+	addRing := func(radius float64) int {
+		start := len(mesh.Verts)
+		for index := 0; index < segments; index++ {
+			angle := 2 * math.Pi * float64(index) / segments
+			mesh.Verts = append(mesh.Verts, math3d.Vec3{X: math.Cos(angle) * radius, Z: math.Sin(angle) * radius})
+			mesh.Edges = append(mesh.Edges, model.Edge{A: start + index, B: start + (index+1)%segments})
+		}
+		return start
+	}
+	outer, aperture, core := addRing(3.6), addRing(2.4), addRing(0.72)
+	// Four radial index marks turn the small floor aperture into a recognisable
+	// bullseye without inflating its physical impact radius.
+	for _, index := range []int{0, 3, 6, 9} {
+		mesh.Edges = append(mesh.Edges,
+			model.Edge{A: outer + index, B: aperture + index},
+			model.Edge{A: aperture + index, B: core + index},
+		)
 	}
 	return mesh
 }

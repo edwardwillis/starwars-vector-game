@@ -542,6 +542,7 @@ func (g *Game) hideHostBillboardDuringTransition(object scene.Object) bool {
 type portalPass struct {
 	destination scene.FrameID
 	boundary    []math3d.Vec3
+	render      bool
 }
 
 func (g *Game) portalPasses(frame scene.FrameID) []portalPass {
@@ -562,8 +563,9 @@ func (g *Game) portalPasses(frame scene.FrameID) []portalPass {
 			if frame != room.Frame && frame != portal.Destination {
 				continue
 			}
-			pass := portalPass{destination: portal.Destination, boundary: portal.Boundary}
+			pass := portalPass{destination: portal.Destination, boundary: portal.Boundary, render: true}
 			if frame != room.Frame {
+				pass.render = !portal.HideFromDestination
 				roomPose, err := g.world.FramePose(room.Frame)
 				if err != nil {
 					continue
@@ -593,7 +595,7 @@ func (g *Game) appendPortalCandidates(prepared *preparedFrame) {
 		return
 	}
 	for _, portal := range g.portalPasses(prepared.frame) {
-		if len(portal.boundary) == 0 {
+		if !portal.render || len(portal.boundary) == 0 {
 			continue
 		}
 		center := math3d.Vec3{}
@@ -820,10 +822,10 @@ func (g *Game) appendEnvironmentTileCandidates(prepared *preparedFrame, runtime 
 			partWorld := world
 			if partIndex == feature.TurretPart && feature.TurretPart > 0 && !state.Destroyed {
 				aim := runtime.encounter.cannonAim[feature.ID]
-				partWorld = world.Mul(feature.TurretMatrix(aim.yaw, 0))
+				partWorld = world.Mul(feature.VisualTurretMatrix(aim.yaw, 0))
 			} else if partIndex == feature.BarrelPart && feature.BarrelPart > 0 && !state.Destroyed {
 				aim := runtime.encounter.cannonAim[feature.ID]
-				partWorld = world.Mul(feature.TurretMatrix(aim.yaw, aim.pitch))
+				partWorld = world.Mul(feature.VisualTurretMatrix(aim.yaw, aim.pitch))
 			}
 			if !g.meshInView(part.Mesh, partWorld) {
 				if g.pipeline.Stats != nil {
@@ -1292,7 +1294,7 @@ func nameVaderX1(fighter *scene.Object) {
 }
 
 func (g *Game) createShowcaseObjects() []scene.Object {
-	objects := make([]scene.Object, 0, 6)
+	objects := make([]scene.Object, 0, 8)
 	for index, definition := range []string{catalog.XWingName, catalog.TIEFighterName, catalog.TIEInterceptorName, catalog.TIEAdvancedX1Name, catalog.MillenniumFalconName, catalog.TIEWreckageWheelName} {
 		object, err := g.catalogRegistry.Create(definition, scene.ObjectID(900000+index), kinematics.Pose{
 			Position: math3d.Vec3{X: float64(index*2-1) * 5.5, Z: -40},
@@ -1317,6 +1319,21 @@ func (g *Game) createShowcaseObjects() []scene.Object {
 			objects = append(objects, object)
 		}
 	}
+	// Surface installations normally inherit their scale from streamed Death
+	// Star tiles. The carousel uses the same production parts at a reviewable
+	// scale, without introducing a separate display mesh or combat object.
+	turbolaser := environment.TurbolaserInspection(scene.ObjectID(900000+len(objects)), kinematics.Pose{})
+	turbolaser.Definition = catalog.DeathStarTurbolaserName
+	for partIndex := range turbolaser.Parts {
+		turbolaser.Parts[partIndex].Mesh = modelpkg.Transform(turbolaser.Parts[partIndex].Mesh, math3d.Scaling(9, 9, 9))
+	}
+	objects = append(objects, turbolaser)
+	quarterHangar := environment.QuarterCircleHangarInspection(scene.ObjectID(900000+len(objects)), kinematics.Pose{})
+	quarterHangar.Definition = catalog.DeathStarQuarterHangarName
+	for partIndex := range quarterHangar.Parts {
+		quarterHangar.Parts[partIndex].Mesh = modelpkg.Transform(quarterHangar.Parts[partIndex].Mesh, math3d.Scaling(12, 12, 12))
+	}
+	objects = append(objects, quarterHangar)
 	return objects
 }
 
@@ -1931,7 +1948,7 @@ func (g *Game) updateYavinMission() error {
 			AssaultDeadlineTick: g.yavinDeadlineTick(g.profile.Yavin.AssaultDeadlineSeconds),
 		})
 	case sim.MissionSurfaceAssault:
-		if g.deathStarSurfaceRuntime(frame) == nil || !environment.DeathStarTrenchEntryContains(player.Pose.Position) || player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) <= 0.2 {
+		if g.deathStarSurfaceRuntime(frame) == nil || !environment.DeathStarTrenchEntryCrossed(previous, player.Pose.Position) || player.Pose.Forward().Dot(math3d.Vec3{Z: 1}) <= 0.2 {
 			return nil
 		}
 		return g.world.Apply(sim.AdvanceMission{To: sim.MissionTrenchRun, Reason: "trench-entry"})
@@ -2319,9 +2336,28 @@ func (g *Game) updateEnvironmentTransitions() error {
 				runtime.bound.Definition.ExitVolume.Contains(object.Pose.Position) {
 				continue
 			}
+			// Transfer changes only frame ownership. Convert the local surface
+			// pose and velocity first so a craft climbing out of the trench does
+			// not retain tangent-frame coordinates in exterior space (which puts
+			// it underneath the Death Star and leaves its controls disoriented).
+			exteriorPose, err := g.world.PoseInFrame(object.ID, scene.ExteriorFrame)
+			if err != nil {
+				return err
+			}
+			sourcePose, err := g.world.FramePose(runtime.bound.FrameID)
+			if err != nil {
+				return err
+			}
+			exteriorVelocity := sourcePose.Orientation.Rotate(object.Motion.Velocity)
 			if err := g.world.Apply(sim.Transfer{ObjectID: object.ID, Destination: scene.ExteriorFrame, Anchor: "exit"}); err != nil {
 				return err
 			}
+			exited := g.worldObjectByID(object.ID)
+			if exited == nil {
+				return fmt.Errorf("exit transition object %d disappeared", object.ID)
+			}
+			exited.Pose = exteriorPose
+			exited.Motion.Velocity = exteriorVelocity
 		}
 	}
 	g.objects = g.world.Objects
@@ -5206,6 +5242,78 @@ func (g *Game) drawMissionDirector(screen *ebiten.Image) {
 	drawMissionDirectorCrawl(screen, title, detail, crawl, primary, detailColor)
 }
 
+// drawTrenchTargetingAid keeps the two facts that matter during the run on
+// screen continuously: how much of the required trench has been flown and
+// how far remains to the actual exhaust port. The director crawl intentionally
+// fades, so it cannot be the sole source of this tactical information.
+func (g *Game) drawTrenchTargetingAid(screen *ebiten.Image) {
+	if g.flow != flowPlaying || g.world == nil || g.world.Mission.ID != yavinMissionID {
+		return
+	}
+	phase := g.world.Mission.Phase
+	if phase != sim.MissionTrenchRun && phase != sim.MissionExhaustPortAttack {
+		return
+	}
+	player := g.objectByID(g.world.Mission.PlayerID)
+	if player == nil || normalizedObjectFrame(*player) != environment.DeathStarTrenchFrame {
+		return
+	}
+	port := environment.DeathStarExhaustPortPoint()
+	distance := player.Pose.Position.Sub(port).Length()
+	progress := environment.DeathStarTrenchProgress(player.Pose.Position)
+	progressColor := color.RGBA{R: 64, G: 220, B: 255, A: 255}
+	portColor := color.RGBA{R: 255, G: 208, B: 48, A: 255}
+	if phase == sim.MissionTrenchRun {
+		drawVectorText(screen, 150, 72,
+			fmt.Sprintf("TRENCH %02d%%  /  %02d%% REQUIRED", int(math.Round(progress*100)), int(math.Round(environment.DeathStarTrenchRequiredProgress()*100))), progressColor)
+		left, right, y := float32(38), float32(262), float32(94)
+		vector.StrokeLine(screen, left, y, right, y, 1.5, progressColor, true)
+		requiredX := left + (right-left)*float32(environment.DeathStarTrenchRequiredProgress())
+		vector.StrokeLine(screen, requiredX, y-5, requiredX, y+5, 2, portColor, true)
+		currentX := left + (right-left)*float32(progress)
+		vector.StrokeLine(screen, left, y, currentX, y, 3, progressColor, true)
+	} else {
+		drawVectorText(screen, 150, 72, fmt.Sprintf("EXHAUST PORT %03d M", int(math.Round(distance))), portColor)
+		drawVectorText(screen, 150, 90, fmt.Sprintf("TORPEDO RANGE %03d M", int(math.Round(environment.DeathStarExhaustPortFiringRange()))), progressColor)
+	}
+
+	// The physical port is small and floor-mounted. Project a stable target
+	// bezel over it rather than relying on normal aim acquisition to happen to
+	// hit a two-metre opening at speed.
+	cameraPoint := g.pipeline.View.TransformPoint(port)
+	if -cameraPoint.Z <= g.pipeline.Near {
+		return
+	}
+	projected, projectable := g.pipeline.ProjectPointUnclipped(port)
+	if !projectable {
+		return
+	}
+	x, y := float32(projected.X), float32(projected.Y)
+	if x >= 18 && x <= ScreenWidth-18 && y >= 18 && y <= ScreenHeight-18 {
+		radius := float32(math.Max(16, math.Min(36, 260/max(distance, 1))))
+		const arm = float32(10)
+		for _, segment := range [][4]float32{
+			{x - radius, y - radius, x - radius + arm, y - radius}, {x - radius, y - radius, x - radius, y - radius + arm},
+			{x + radius, y - radius, x + radius - arm, y - radius}, {x + radius, y - radius, x + radius, y - radius + arm},
+			{x - radius, y + radius, x - radius + arm, y + radius}, {x - radius, y + radius, x - radius, y + radius - arm},
+			{x + radius, y + radius, x + radius - arm, y + radius}, {x + radius, y + radius, x + radius, y + radius - arm},
+		} {
+			vector.StrokeLine(screen, segment[0], segment[1], segment[2], segment[3], 2, portColor, true)
+		}
+		vector.StrokeLine(screen, x-6, y, x+6, y, 1.5, portColor, true)
+		vector.StrokeLine(screen, x, y-6, x, y+6, 1.5, portColor, true)
+		drawVectorText(screen, x, y-radius-18, "EXHAUST PORT", portColor)
+		return
+	}
+
+	// When it is outside the view, an edge arrow preserves the direction cue
+	// and the range label above explains exactly what it is pointing toward.
+	dx, dy := objectiveArrowDirection(cameraPoint)
+	centerX, centerY := float32(ScreenWidth/2), float32(ScreenHeight/2)
+	tipX, tipY := centerX+float32(dx)*210, centerY+float32(dy)*130
+	drawCockpitArrow(screen, tipX-float32(dx)*22, tipY-float32(dy)*22, tipX, tipY, portColor)
+}
+
 func (g *Game) drawMissionDeadline(screen *ebiten.Image, mission sim.MissionState) {
 	if g.xWingDashboardActive() {
 		return
@@ -6758,6 +6866,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	} else {
 		g.drawMissionDirector(screen)
 	}
+	g.drawTrenchTargetingAid(screen)
 	if g.mouseFlight {
 		if g.telemetry != nil {
 			started := time.Now()
@@ -7384,6 +7493,8 @@ func (g *Game) drawPreparedSurfaces(screen *ebiten.Image, prepared *preparedFram
 		before := len(g.surfaceTriangles)
 		if candidate.surface.Translucent() {
 			g.surfaceTriangles = render.AppendTranslucentTriangles(g.surfaceTriangles, candidate.geometry, candidate.surface.Color, candidate.surface.TextureID)
+		} else if light := g.surfaceDirectionalLight(candidate.surface); light.Enabled() {
+			g.surfaceTriangles = render.AppendDirectionalOpaqueTriangles(g.surfaceTriangles, candidate.geometry, candidate.surface.Color, candidate.surface.TextureID, light)
 		} else {
 			g.surfaceTriangles = render.AppendOpaqueTriangles(g.surfaceTriangles, candidate.geometry, candidate.surface.Color, candidate.surface.TextureID)
 		}
@@ -7405,15 +7516,19 @@ func (g *Game) drawPreparedSurfaces(screen *ebiten.Image, prepared *preparedFram
 	for first := 0; first < len(g.surfaceTriangles); {
 		textureID := g.surfaceTriangles[first].TextureID
 		translucent := g.surfaceTriangles[first].Translucent
-		end := first + 1
-		for end < len(g.surfaceTriangles) && end-first < maxTrianglesPerBatch && g.surfaceTriangles[end].TextureID == textureID && g.surfaceTriangles[end].Translucent == translucent {
-			end++
-		}
 		var batchStart time.Time
 		if g.pipeline.Stats != nil {
 			batchStart = time.Now()
 		}
 		source, textureWidth, textureHeight := g.surfaceSource(textureID)
+		sampling := render.TextureSamplingNearest
+		if g.textureRegistry != nil {
+			sampling = g.textureRegistry.Sampling(textureID)
+		}
+		end := first + 1
+		for end < len(g.surfaceTriangles) && end-first < maxTrianglesPerBatch && g.surfaceTriangles[end].TextureID == textureID && g.surfaceTriangles[end].Translucent == translucent {
+			end++
+		}
 		count := end - first
 		g.surfaceVertices = resizeEbitenVertices(g.surfaceVertices, count*3)
 		g.surfaceIndices = resizeUint16(g.surfaceIndices, count*3)
@@ -7437,7 +7552,11 @@ func (g *Game) drawPreparedSurfaces(screen *ebiten.Image, prepared *preparedFram
 				g.surfaceIndices[vertex+corner] = uint16(vertex + corner)
 			}
 		}
-		options := &ebiten.DrawTrianglesOptions{Filter: ebiten.FilterNearest}
+		filter := ebiten.FilterNearest
+		if textureID != "" && sampling == render.TextureSamplingLinearMipmap {
+			filter = ebiten.FilterLinear
+		}
+		options := &ebiten.DrawTrianglesOptions{Filter: filter}
 		if textureID != "" && source != g.whitePixel {
 			options.Address = ebiten.AddressRepeat
 		}
@@ -7458,6 +7577,22 @@ func (g *Game) drawPreparedSurfaces(screen *ebiten.Image, prepared *preparedFram
 			}
 		}
 		first = end
+	}
+}
+
+// surfaceDirectionalLight converts an authored world-space material light to
+// the same camera space as PreparedGeometry face normals. The conversion is
+// performed once per rendered candidate, not once per triangle, and has no
+// dependency on simulation or live presentation input.
+func (g *Game) surfaceDirectionalLight(material scene.SurfaceMaterial) render.DirectionalLight {
+	shading := material.Directional
+	if !shading.Enabled() {
+		return render.DirectionalLight{}
+	}
+	return render.DirectionalLight{
+		Direction: g.pipeline.View.TransformNormal(shading.Direction).Normalize(),
+		Ambient:   shading.Ambient,
+		Diffuse:   shading.Diffuse,
 	}
 }
 

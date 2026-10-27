@@ -33,8 +33,7 @@ func DeathStarHangarSurfacePosition() math3d.Vec3 {
 }
 
 var (
-	sharedHangarEgressParts = hangarEgressParts()
-	sharedHangarRoomParts   = append(hangarShellParts(math3d.Vec3{}, true), hangarGuidePart())
+	sharedHangarRoomParts = append(hangarShellParts(math3d.Vec3{}, true), hangarGuidePart())
 )
 
 // DeathStarHangar is one enclosed room attached to the same host as the
@@ -67,6 +66,10 @@ func DeathStarHangarRoom(frame, surfaceFrame scene.FrameID) Room {
 		Parts:      append([]scene.Part(nil), sharedHangarRoomParts...),
 		Portals: []Portal{{
 			Name: "surface-door", Destination: surfaceFrame,
+			// The surface no longer carries a visual hangar. Keep the transition
+			// and interior-to-surface view, but do not project this room's large
+			// floor, roof and walls onto the exterior through an invisible door.
+			HideFromDestination: true,
 			Boundary: []math3d.Vec3{{X: -hangarHalfWidth, Z: -hangarHalfLength}, {X: hangarHalfWidth, Z: -hangarHalfLength},
 				{X: hangarHalfWidth, Y: hangarHeight, Z: -hangarHalfLength}, {X: -hangarHalfWidth, Y: hangarHeight, Z: -hangarHalfLength}},
 		}},
@@ -112,27 +115,6 @@ func hangarShellParts(offset math3d.Vec3, floor bool) []scene.Part {
 		hangarBoxPart("hangar back wall", offset.Add(math3d.Vec3{Y: 9, Z: 34.4}), math3d.Vec3{X: 50, Y: 18, Z: 0.8}),
 	)
 	return parts
-}
-
-// hangarEgressParts marks the entrance at the surface with a thin three-sided
-// frame. The former roof, side walls and rear wall were a long freestanding
-// structure; the room now exists behind this opening in its own local frame.
-func hangarEgressParts() []scene.Part {
-	origin := math3d.Vec3{X: hangarSurfaceX, Z: -hangarHalfLength}
-	return []scene.Part{
-		hangarBoxPart("hangar entry port jamb", origin.Add(math3d.Vec3{X: -hangarHalfWidth, Y: hangarHeight / 2}), math3d.Vec3{X: 1.2, Y: hangarHeight, Z: 1.2}),
-		hangarBoxPart("hangar entry starboard jamb", origin.Add(math3d.Vec3{X: hangarHalfWidth, Y: hangarHeight / 2}), math3d.Vec3{X: 1.2, Y: hangarHeight, Z: 1.2}),
-		hangarBoxPart("hangar entry lintel", origin.Add(math3d.Vec3{Y: hangarHeight}), math3d.Vec3{X: hangarHalfWidth * 2, Y: 1.2, Z: 1.2}),
-	}
-}
-
-func hangarSurfaceBoxes() []collision.OrientedBox {
-	origin := math3d.Vec3{X: hangarSurfaceX, Z: -hangarHalfLength}
-	return []collision.OrientedBox{
-		{Center: origin.Add(math3d.Vec3{X: -hangarHalfWidth, Y: hangarHeight / 2}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.6, Y: hangarHeight / 2, Z: 0.6}, FeatureID: "hangar-entry-port-jamb"},
-		{Center: origin.Add(math3d.Vec3{X: hangarHalfWidth, Y: hangarHeight / 2}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: 0.6, Y: hangarHeight / 2, Z: 0.6}, FeatureID: "hangar-entry-starboard-jamb"},
-		{Center: origin.Add(math3d.Vec3{Y: hangarHeight}), Orientation: math3d.IdentityQuaternion(), HalfExtents: math3d.Vec3{X: hangarHalfWidth, Y: 0.6, Z: 0.6}, FeatureID: "hangar-entry-lintel"},
-	}
 }
 
 func deathStarHangarCollisionTile(coordinate TileCoordinate) Tile {

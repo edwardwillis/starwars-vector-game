@@ -24,12 +24,17 @@ func TestDeathStarHangarHasOpenDoorAndPhysicalInterior(t *testing.T) {
 		t.Fatal("hangar collision leaked into adjacent tile")
 	}
 	surface := DeathStarTrench().Tile(hangarSurfaceTile)
-	if len(surface.Parts) != 4 || len(surface.Boxes) != 3 || len(surface.Features) != 0 {
-		t.Fatalf("hangar entrance tile parts=%d boxes=%d features=%d", len(surface.Parts), len(surface.Boxes), len(surface.Features))
+	if len(surface.Parts) != 1 || len(surface.Boxes) != 0 || len(surface.Features) != 11 {
+		t.Fatalf("hangar surface tile parts=%d boxes=%d features=%d", len(surface.Parts), len(surface.Boxes), len(surface.Features))
+	}
+	for _, feature := range surface.Features {
+		if feature.Targetable || feature.Hittable || len(feature.Boxes) != 0 {
+			t.Fatalf("hangar surround scenery gained gameplay state: %+v", feature)
+		}
 	}
 	for _, part := range surface.Parts {
-		if part.Name == "hangar roof" || part.Name == "hangar back wall" || part.Name == "hangar port wall" || part.Name == "hangar starboard wall" {
-			t.Fatalf("obsolete freestanding hangar shell part remained: %q", part.Name)
+		if part.Name != "surface deck" {
+			t.Fatalf("obsolete exterior hangar part remained: %q", part.Name)
 		}
 	}
 	var entry Transition

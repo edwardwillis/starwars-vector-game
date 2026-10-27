@@ -55,9 +55,28 @@ const (
 // Translucent fills may optionally use a registered texture; their alpha is
 // supplied by Color and they never act as solid depth/point occluders.
 type SurfaceMaterial struct {
-	Mode      SurfaceMode
-	Color     color.RGBA
-	TextureID string
+	Mode        SurfaceMode
+	Color       color.RGBA
+	TextureID   string
+	Directional DirectionalShading
+}
+
+// DirectionalShading describes a fixed world-space light used to give a
+// surface's already-authored flat faces readable form. It is deliberately
+// small in scope: it shades submitted polygon fills per face, without dynamic
+// lights, cast shadows, or a dependency on the camera direction.
+//
+// Direction points from a surface towards the light. Ambient is retained even
+// on faces turned away from the light; Diffuse is added in proportion to how
+// directly the face points at it. The zero value keeps the existing unlit
+// material path.
+type DirectionalShading struct {
+	Direction        math3d.Vec3
+	Ambient, Diffuse float64
+}
+
+func (shading DirectionalShading) Enabled() bool {
+	return shading.Direction.Length() > 1e-9 && (shading.Ambient > 0 || shading.Diffuse > 0)
 }
 
 func (material SurfaceMaterial) Opaque() bool {
