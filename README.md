@@ -22,14 +22,22 @@ Mission select → briefing → hyperspace launch → orbital combat
 The game includes curated `Cadet`, `Pilot`, `Ace`, and `Nightmare` profiles,
 autonomous Imperial fighters and surface installations, proton torpedoes,
 authoritative mission phases, a clean retry lifecycle, and a capped score
-breakdown. The Death Star remains a performant orbital vector representation
-that transfers the player into its local surface environment for near-surface
-flight.
+breakdown. The Death Star has a scalable orbital presentation that transfers
+the player into a textured, low-rise local surface environment for
+near-surface flight, including a flyable trench and optional interior hangar.
 
 The renderer retains five graduated vector-realism profiles, compiled model
 topology, culling/LOD, clipping, hidden-line processing, and profiling HUD and
 CSV telemetry support. The project deliberately remains a sparse Atari-style
 vector game rather than a conventional filled 3D renderer.
+
+## Beta 3 gameplay demo
+
+[Watch the Battle of Yavin Beta 3 gameplay recording](docs/media/star-wars-demo-beta3.mp4).
+
+<video controls muted playsinline src="docs/media/star-wars-demo-beta3.mp4">
+  Your browser does not support embedded video. Use the download link above.
+</video>
 
 ## Prerequisites
 
@@ -99,6 +107,30 @@ Yavin briefing, and an explicit launch through the hyperspace arrival into the
 existing mission. Battle of Hoth and Battle of Endor are visible future
 missions but cannot be launched. A newly launched Yavin mission always starts
 from a clean session.
+
+## Flying the trench
+
+The trench run begins only when the Alliance fighter descends through the
+marked entry envelope at the trench mouth while travelling forward. A cyan
+outline identifies the envelope and three red floor arrows show the direction
+of travel.
+
+The attack phase unlocks after at least 80% of the legal run from that entry
+point to the exhaust port. During the run, the HUD shows both progress toward
+the requirement and the exact distance to the port. The port itself has a
+concentric floor bezel and an `EXHAUST PORT` target marker or edge arrow.
+
+After a successful proton-torpedo hit, climb out before the terminal bulkhead:
+the end wall is solid and deliberately closes the trench rather than providing
+an escape route through it.
+
+## Model showcase
+
+Press `C` during play to open the inspection carousel. Use `Left` / `Right`
+or `A` / `D` to select an item, `Space` to pause rotation, `T` for a top view,
+and the mouse wheel to zoom. It includes the playable fighters, TIE wreckage,
+a Death Star turbolaser, and the curved low-rise quarter-hangar surface
+structure. Press `C` or `Escape` to return to the game.
 
 ## Windows beta download
 
@@ -227,6 +259,8 @@ red, with a flashing red marker for immediate danger.
 - Firing automatically returns the camera to the player cockpit
 - Opposing laser bolts can intercept each other in flight
 - `P`: pause or resume simulation
+- `Escape`: skip an approach transition; outside the showcase it also opens the
+  quit prompt
 - `R`: reset the fighter during development/play; mission failure normally
   proceeds to the outcome and result screens
 - `L`: toggle automatic roll-leveling during near-surface flight
