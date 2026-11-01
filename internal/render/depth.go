@@ -65,6 +65,32 @@ func (buffer *DepthBuffer) depthAt(x, y int) float64 {
 	return buffer.depthAtPixel(x, y)
 }
 
+// OccludesScreenPoint reports whether an already-rasterized opaque surface is
+// closer than a projected world-space point. It is used by presentation
+// effects which have no mesh of their own but must obey the same terrain and
+// structure occlusion as the vector scene.
+func (buffer *DepthBuffer) OccludesScreenPoint(x, y, depth, bias float64) bool {
+	if buffer == nil || depth <= 0 {
+		return false
+	}
+	return buffer.depthAt(int(math.Round(x)), int(math.Round(y))) < depth-bias
+}
+
+// NearestScreenPoint returns the nearest opaque sample and its stable owner at
+// a full-resolution screen point. Presentation effects can use this to avoid
+// treating their own physical debris as an external occluder.
+func (buffer *DepthBuffer) NearestScreenPoint(x, y float64) (float64, uint64) {
+	if buffer == nil {
+		return math.Inf(1), 0
+	}
+	xi, yi := buffer.screenToBuffer(int(math.Round(x)), int(math.Round(y)))
+	if xi < 0 || yi < 0 || xi >= buffer.Width || yi >= buffer.Height {
+		return math.Inf(1), 0
+	}
+	index := yi*buffer.Width + xi
+	return buffer.Values[index], buffer.Owners[index]
+}
+
 func (buffer *DepthBuffer) depthAtPixel(x, y int) float64 {
 	if buffer == nil || x < 0 || y < 0 || x >= buffer.Width || y >= buffer.Height {
 		return math.Inf(1)

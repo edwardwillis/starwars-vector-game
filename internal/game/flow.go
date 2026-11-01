@@ -221,6 +221,7 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.controllerTargets = fresh.controllerTargets
 	g.debris = fresh.debris
 	g.surfaceEffects = fresh.surfaceEffects
+	g.shipExplosions = fresh.shipExplosions
 	g.environmentContacts = fresh.environmentContacts
 	g.respawns = fresh.respawns
 	g.respawnSequence = fresh.respawnSequence
@@ -231,6 +232,7 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.visibleObjects = 0
 	g.renderStats = fresh.renderStats
 	g.depthBuffer = fresh.depthBuffer
+	g.explosionDepth = fresh.explosionDepth
 	g.billboardBatches = g.billboardBatches[:0]
 	g.worldBatches = g.worldBatches[:0]
 	g.worldJobs = g.worldJobs[:0]
@@ -242,6 +244,8 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.surfaceTriangles = g.surfaceTriangles[:0]
 	g.surfaceVertices = g.surfaceVertices[:0]
 	g.surfaceIndices = g.surfaceIndices[:0]
+	g.explosionVertices = g.explosionVertices[:0]
+	g.explosionIndices = g.explosionIndices[:0]
 	g.starPoints = g.starPoints[:0]
 	g.starOccluders = fresh.starOccluders
 	g.world = fresh.world

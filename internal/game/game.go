@@ -482,7 +482,7 @@ func (g *Game) prepareGameplayFrame() *preparedFrame {
 			}
 			prepared.candidates = append(prepared.candidates, preparedCandidate{
 				mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID,
-				color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group,
+				color: g.debrisColor(object, part.Color), lineWidth: part.LineWidth, surface: part.Surface, group: group,
 				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
 				writesDepth:   depthWriteCandidate(part), testsDepth: depthTestCandidate(part),
 				pointOccluder: pointOcclusionCandidate(part) && !(hasAppearance && definition.PointOccluder == "sphere"),
@@ -693,7 +693,7 @@ func (g *Game) appendPortalObjectCandidates(prepared *preparedFrame, destination
 			}
 			prepared.candidates = append(prepared.candidates, preparedCandidate{
 				mesh: part.Mesh, world: world, owner: renderOwner(object.ID, partIndex), objectID: object.ID,
-				color: part.Color, lineWidth: part.LineWidth, surface: part.Surface, group: group, portalClip: aperture,
+				color: g.debrisColor(object, part.Color), lineWidth: part.LineWidth, surface: part.Surface, group: group, portalClip: aperture,
 				selfOcclusion: partSelfOcclusionMode(part, object.DestructionStage >= scene.DestructionComponent),
 				writesDepth:   depthWriteCandidate(part), testsDepth: depthTestCandidate(part), pointOccluder: pointOcclusionCandidate(part),
 			})
@@ -1039,6 +1039,9 @@ type Game struct {
 	controllerTargets        map[scene.ObjectID]scene.ObjectID
 	debris                   map[scene.ObjectID]destructionTransient
 	surfaceEffects           map[scene.ObjectID]surfaceEffect
+	// shipExplosions are cosmetic fixed-tick state. They intentionally stay
+	// outside the authoritative/replay checksum path.
+	shipExplosions           []shipExplosion
 	environmentContacts      map[scene.ObjectID]float64
 	respawns                 []autonomousRespawn
 	respawnSequence          uint64
@@ -1049,6 +1052,7 @@ type Game struct {
 	visibleObjects           int
 	renderStats              render.Stats
 	depthBuffer              *render.DepthBuffer
+	explosionDepth           *render.DepthBuffer
 	billboardLineCache       map[string]map[int][]appearance.Line
 	billboardBatches         []vectorLineBatch
 	worldBatches             []vectorLineBatch
@@ -1065,6 +1069,8 @@ type Game struct {
 	surfaceTriangles         []render.FlatTriangle
 	surfaceVertices          []ebiten.Vertex
 	surfaceIndices           []uint16
+	explosionVertices        []ebiten.Vertex
+	explosionIndices         []uint16
 	starPoints               []starfield.Point
 	starOccluders            render.PointOccluderSet
 	showcaseStarPoints       []starfield.Point
@@ -1206,6 +1212,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		owners:                 make(map[scene.ObjectID]scene.ObjectID),
 		starField:              starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
 		controllers:            controllers,
+		shipExplosions:         make([]shipExplosion, 0, maxShipExplosions),
 		controllerOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		transitionOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		controllerTargets:      make(map[scene.ObjectID]scene.ObjectID),
@@ -1724,6 +1731,7 @@ func (g *Game) Update() error {
 			// Keep the authoritative tick and unrelated world objects moving while
 			// the controlled craft follows its presentation path. The transitioning
 			// object's motion was cleared when the transition began.
+			g.updateShipExplosions(seconds)
 			g.world.Objects = g.objects
 			if err := g.world.Step(seconds * g.profile.Simulation.MotionScale); err != nil {
 				return err
@@ -1798,6 +1806,7 @@ func (g *Game) Update() error {
 	g.refreshEnvironmentTiles()
 	g.refreshTransitionEnvironmentTiles()
 	g.updateDebris(seconds)
+	g.updateShipExplosions(seconds)
 	g.updateSurfaceEffects(seconds)
 	g.resolveLaserCollisions(previousPositions)
 	g.resolveSolidCollisions(previousPositions)
@@ -3463,6 +3472,7 @@ func (g *Game) fixPlayerDestructionView(object scene.Object) {
 }
 
 func (g *Game) spawnDisintegration(object scene.Object) {
+	g.spawnShipExplosion(object)
 	inheritedVelocity := object.Pose.Forward().Scale(object.Motion.Speed).Add(object.Motion.Velocity)
 	for index := range 3 {
 		seed := uint64(object.ID)*0x9e3779b97f4a7c15 + uint64(index+1)*0x517cc1b727220a95
@@ -4645,6 +4655,7 @@ func (g *Game) updateProjectiles(seconds float64) {
 }
 
 func (g *Game) resetFighter() {
+	g.clearShipExplosions()
 	fighter := g.objectByID(fighterID)
 	if fighter == nil {
 		g.respawnPlayer()
@@ -4783,6 +4794,7 @@ func (g *Game) updateShield(seconds float64) {
 }
 
 func (g *Game) respawnPlayer() {
+	g.clearShipExplosions()
 	pose := g.safePlayerRespawnPose()
 	fighter, err := g.catalogRegistry.Create(g.profile.Player.Object, fighterID, pose)
 	if err != nil {
@@ -6841,6 +6853,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.renderStats.GeometryMS = time.Since(geometryStart).Seconds() * 1000
 	vectorSubmitStart := time.Now()
 	g.renderStats.WorldBatches = g.flushWorldBatch(screen)
+	g.drawShipExplosions(screen, g.explosionDepthForPrepared(prepared))
 	g.renderStats.VectorSubmitMS = time.Since(vectorSubmitStart).Seconds() * 1000
 	g.visibleObjects = visibleObjects
 	g.drawImpactFlash(screen)
