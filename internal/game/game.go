@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
+	gameaudio "github.com/edwardwillis/starwars-vector-game/internal/audio"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
 	"github.com/edwardwillis/starwars-vector-game/internal/cockpit"
@@ -53,6 +54,9 @@ const missionDirectorFadeSeconds = 0.65
 const missionDirectorVanishY = 34.0
 const impactFlashDuration = 0.16
 const coordinatedTurnBankMix = 0.42
+const imperialFlybyDistance = 22.0
+const imperialFlybyReleaseDistance = 30.0
+const imperialFlybyCueCooldown = 1.25
 
 const transitionEnvironmentTileRadius = 2
 
@@ -980,65 +984,65 @@ func (mode flightMode) String() string {
 
 // Game owns the simulation state and wireframe rendering pipeline.
 type Game struct {
-	profile                  profile.GameProfile
-	controllerRegistry       *control.Registry
-	catalogRegistry          *catalog.Registry
-	appearanceRegistry       *appearance.Registry
-	cockpitRegistry          *cockpit.Registry
-	environmentRegistry      *environment.Registry
-	environmentDefinitions   []environment.Definition
-	environments             []localEnvironment
-	transitions              map[scene.ObjectID]environmentTransition
-	transitionCommitments    map[scene.ObjectID]bool
-	missionLastPosition      map[scene.ObjectID]math3d.Vec3
-	objects                  []scene.Object
-	pipeline                 render.Pipeline
-	initialPose              kinematics.Pose
-	autoMotion               kinematics.Motion
-	mode                     flightMode
-	paused                   bool
-	quitPrompt               bool
-	flow                     applicationFlow
-	selectedMission          int
-	selectedDifficulty       int
-	curatedDifficulties      []profile.GameProfile
-	launchProfile            profile.GameProfile
-	swarmLaunched            bool
-	showHUD                  bool
-	surfaceAutoLevel         bool
-	coordinatedTurnBank      bool
-	showcaseActive           bool
-	showcaseTime             float64
-	showcaseObjects          []scene.Object
-	showcaseStarField        *starfield.Field
-	showcaseDistance         float64
-	showcaseRotating         bool
-	showcaseTopDown          bool
-	showcaseSelected         int
-	showcaseSlide            float64
-	showcasePreviousMode     camera.Mode
-	viewCamera               *camera.Camera
-	nextObjectID             scene.ObjectID
-	projectiles              map[scene.ObjectID]float64
-	owners                   map[scene.ObjectID]scene.ObjectID
-	fireCooldown             float64
-	torpedoCooldown          float64
-	torpedoesRemaining       int
-	simulationTime           float64
-	fireHistory              []float64
-	nextMuzzlePair           int
-	laserBeamTime            float64
-	laserBeamPair            int
-	mouseFlight              bool
-	mouseNeutralX            int
-	mouseNeutralY            int
-	starField                *starfield.Field
-	controllers              map[scene.ObjectID]control.Strategy
-	controllerOrder          []scene.ObjectID
-	transitionOrder          []scene.ObjectID
-	controllerTargets        map[scene.ObjectID]scene.ObjectID
-	debris                   map[scene.ObjectID]destructionTransient
-	surfaceEffects           map[scene.ObjectID]surfaceEffect
+	profile                profile.GameProfile
+	controllerRegistry     *control.Registry
+	catalogRegistry        *catalog.Registry
+	appearanceRegistry     *appearance.Registry
+	cockpitRegistry        *cockpit.Registry
+	environmentRegistry    *environment.Registry
+	environmentDefinitions []environment.Definition
+	environments           []localEnvironment
+	transitions            map[scene.ObjectID]environmentTransition
+	transitionCommitments  map[scene.ObjectID]bool
+	missionLastPosition    map[scene.ObjectID]math3d.Vec3
+	objects                []scene.Object
+	pipeline               render.Pipeline
+	initialPose            kinematics.Pose
+	autoMotion             kinematics.Motion
+	mode                   flightMode
+	paused                 bool
+	quitPrompt             bool
+	flow                   applicationFlow
+	selectedMission        int
+	selectedDifficulty     int
+	curatedDifficulties    []profile.GameProfile
+	launchProfile          profile.GameProfile
+	swarmLaunched          bool
+	showHUD                bool
+	surfaceAutoLevel       bool
+	coordinatedTurnBank    bool
+	showcaseActive         bool
+	showcaseTime           float64
+	showcaseObjects        []scene.Object
+	showcaseStarField      *starfield.Field
+	showcaseDistance       float64
+	showcaseRotating       bool
+	showcaseTopDown        bool
+	showcaseSelected       int
+	showcaseSlide          float64
+	showcasePreviousMode   camera.Mode
+	viewCamera             *camera.Camera
+	nextObjectID           scene.ObjectID
+	projectiles            map[scene.ObjectID]float64
+	owners                 map[scene.ObjectID]scene.ObjectID
+	fireCooldown           float64
+	torpedoCooldown        float64
+	torpedoesRemaining     int
+	simulationTime         float64
+	fireHistory            []float64
+	nextMuzzlePair         int
+	laserBeamTime          float64
+	laserBeamPair          int
+	mouseFlight            bool
+	mouseNeutralX          int
+	mouseNeutralY          int
+	starField              *starfield.Field
+	controllers            map[scene.ObjectID]control.Strategy
+	controllerOrder        []scene.ObjectID
+	transitionOrder        []scene.ObjectID
+	controllerTargets      map[scene.ObjectID]scene.ObjectID
+	debris                 map[scene.ObjectID]destructionTransient
+	surfaceEffects         map[scene.ObjectID]surfaceEffect
 	// shipExplosions are cosmetic fixed-tick state. They intentionally stay
 	// outside the authoritative/replay checksum path.
 	shipExplosions           []shipExplosion
@@ -1095,6 +1099,10 @@ type Game struct {
 	telemetryUpdateCalls     int
 	recording                *gameplayRecorder
 	replay                   *gameplayReplay
+	soundPlayer              gameaudio.Player
+	imperialFlybys           map[scene.ObjectID]bool
+	imperialFlybyFrame       scene.FrameID
+	imperialFlybyCueCooldown float64
 	// checksumObserver is test instrumentation only. It deliberately does not
 	// participate in simulation state or normal gameplay.
 	checksumObserver func()
@@ -1108,6 +1116,13 @@ func New() *Game {
 		panic(err)
 	}
 	return game
+}
+
+// SetSoundPlayer installs a local presentation-only sound sink. It is kept
+// outside simulation state so sound availability and timing cannot alter a
+// mission, recording, or replay.
+func (g *Game) SetSoundPlayer(player gameaudio.Player) {
+	g.soundPlayer = player
 }
 
 // NewWithProfile creates a game from a validated snapshot of the supplied
@@ -1212,12 +1227,12 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		owners:                 make(map[scene.ObjectID]scene.ObjectID),
 		starField:              starfield.New(gameProfile.Starfield.Count, gameProfile.Starfield.Seed, gameProfile.Starfield.Radius, initialPose.Position),
 		controllers:            controllers,
-		shipExplosions:         make([]shipExplosion, 0, maxShipExplosions),
 		controllerOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		transitionOrder:        make([]scene.ObjectID, 0, gameProfile.Swarm.Count),
 		controllerTargets:      make(map[scene.ObjectID]scene.ObjectID),
 		debris:                 make(map[scene.ObjectID]destructionTransient),
 		surfaceEffects:         make(map[scene.ObjectID]surfaceEffect),
+		shipExplosions:         make([]shipExplosion, 0, maxShipExplosions),
 		environmentContacts:    make(map[scene.ObjectID]float64),
 		transitions:            make(map[scene.ObjectID]environmentTransition),
 		transitionCommitments:  make(map[scene.ObjectID]bool),
@@ -1237,6 +1252,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		billboardLineCache:     make(map[string]map[int][]appearance.Line),
 		textureRegistry:        render.DefaultTextureRegistry(),
 		textureImages:          make(map[string]*ebiten.Image),
+		imperialFlybys:         make(map[scene.ObjectID]bool),
 	}
 	starfieldMode := gameProfile.Starfield.Mode
 	if starfieldMode == "" {
@@ -1572,6 +1588,9 @@ func (g *Game) completeGameplayTick(input gameplayInput) (bool, error) {
 }
 
 func (g *Game) Update() error {
+	if g.soundPlayer != nil {
+		g.soundPlayer.Update()
+	}
 	if g.telemetry != nil {
 		updateStarted := time.Now()
 		defer func() { g.recordTelemetryUpdate(time.Since(updateStarted)) }()
@@ -1731,13 +1750,13 @@ func (g *Game) Update() error {
 			// Keep the authoritative tick and unrelated world objects moving while
 			// the controlled craft follows its presentation path. The transitioning
 			// object's motion was cleared when the transition began.
-			g.updateShipExplosions(seconds)
 			g.world.Objects = g.objects
 			if err := g.world.Step(seconds * g.profile.Simulation.MotionScale); err != nil {
 				return err
 			}
 			g.objects = g.world.Objects
 			g.advanceEnvironmentTransitions(seconds, input.SkipEnvironmentTransition)
+			g.updateShipExplosions(seconds)
 			if err := g.updateYavinMission(); err != nil {
 				return err
 			}
@@ -1803,6 +1822,7 @@ func (g *Game) Update() error {
 	if err := g.updateEnvironmentTransitions(); err != nil {
 		return err
 	}
+	g.updateImperialFlybys(previousPositions, seconds)
 	g.refreshEnvironmentTiles()
 	g.refreshTransitionEnvironmentTiles()
 	g.updateDebris(seconds)
@@ -1832,6 +1852,71 @@ func (g *Game) Update() error {
 		return ebiten.Termination
 	}
 	return nil
+}
+
+// updateImperialFlybys emits a presentation cue once as a controlled Imperial
+// fighter sweeps close to the player. It deliberately observes only completed
+// movement and never writes to the simulation world or mission state.
+func (g *Game) updateImperialFlybys(previous map[scene.ObjectID]math3d.Vec3, seconds float64) {
+	if g.soundPlayer == nil {
+		return
+	}
+	if g.imperialFlybys == nil {
+		g.imperialFlybys = make(map[scene.ObjectID]bool)
+	}
+	player := g.objectByID(fighterID)
+	if player == nil {
+		return
+	}
+	frame := normalizedObjectFrame(*player)
+	if frame != g.imperialFlybyFrame {
+		clear(g.imperialFlybys)
+		g.imperialFlybyFrame = frame
+		g.imperialFlybyCueCooldown = 0
+		return
+	}
+	g.imperialFlybyCueCooldown = max(0, g.imperialFlybyCueCooldown-seconds)
+	previousPlayer, found := previous[player.ID]
+	if !found {
+		return
+	}
+	for _, fighter := range g.objects {
+		if fighter.Team != scene.TeamEmpire || normalizedObjectFrame(fighter) != frame {
+			continue
+		}
+		if _, controlled := g.controllers[fighter.ID]; !controlled {
+			continue
+		}
+		previousFighter, found := previous[fighter.ID]
+		if !found {
+			continue
+		}
+		relativeStart := previousFighter.Sub(previousPlayer)
+		relativeEnd := fighter.Pose.Position.Sub(player.Pose.Position)
+		closestDistance := closestRelativePassDistance(relativeStart, relativeEnd)
+		currentDistance := relativeEnd.Length()
+		wasNear := g.imperialFlybys[fighter.ID]
+		if closestDistance <= imperialFlybyDistance {
+			g.imperialFlybys[fighter.ID] = true
+			if !wasNear && g.imperialFlybyCueCooldown == 0 {
+				g.soundPlayer.Trigger(gameaudio.CueTIEFlyby)
+				g.imperialFlybyCueCooldown = imperialFlybyCueCooldown
+			}
+		}
+		if currentDistance > imperialFlybyReleaseDistance {
+			delete(g.imperialFlybys, fighter.ID)
+		}
+	}
+}
+
+func closestRelativePassDistance(start, end math3d.Vec3) float64 {
+	delta := end.Sub(start)
+	lengthSquared := delta.Dot(delta)
+	if lengthSquared <= 1e-9 {
+		return start.Length()
+	}
+	progress := min(1, max(0, -start.Dot(delta)/lengthSquared))
+	return start.Add(delta.Scale(progress)).Length()
 }
 
 // enterTerminalMissionFlow bridges authoritative mission outcomes into the
@@ -2885,6 +2970,11 @@ func (g *Game) resolveLaserCollisions(previous map[scene.ObjectID]math3d.Vec3) {
 			} else if nearest.Destructible {
 				g.spawnFighterLaserImpact(projectile.Frame, impactPoint)
 				destroyed[nearest.ID] = nearest
+				if ownerObject := g.objectByID(owner); ownerObject != nil && ownerObject.Team == scene.TeamAlliance && nearest.Team == scene.TeamEmpire {
+					if _, imperialFighter := g.controllers[nearest.ID]; imperialFighter && g.soundPlayer != nil {
+						g.soundPlayer.Trigger(gameaudio.CueImperialFighterExplosion)
+					}
+				}
 			}
 			if owner == fighterID {
 				if _, autonomous := g.controllers[nearest.ID]; autonomous {
@@ -3649,6 +3739,46 @@ func (g *Game) updateDebris(seconds float64) {
 		g.debris[id] = transient
 	}
 	g.removeObjects(remove)
+}
+
+// advancePlayerDestructionView continues only the player breakup and the
+// destroyer's camera target after a terminal failure. It is presentation-only:
+// the terminal mission state, world tick, controllers, and collisions remain
+// frozen while the player sees the intended three-second disintegration.
+func (g *Game) advancePlayerDestructionView(seconds float64) {
+	if seconds <= 0 || g.destructionViewRemaining <= 0 {
+		return
+	}
+	seconds = min(seconds, g.destructionViewRemaining)
+	for index := range g.objects {
+		object := &g.objects[index]
+		if transient, debris := g.debris[object.ID]; debris && transient.rootObjectID == fighterID {
+			object.Pose = kinematics.Integrate(object.Pose, object.Motion, seconds)
+			continue
+		}
+		if object.ID == g.viewCamera.TargetID && g.viewCamera.Mode == camera.Chase {
+			object.Pose = kinematics.Integrate(object.Pose, object.Motion, seconds)
+		}
+	}
+	remove := make(map[scene.ObjectID]bool)
+	for id, transient := range g.debris {
+		if transient.rootObjectID != fighterID {
+			continue
+		}
+		if transient.remaining <= seconds+1e-9 {
+			remove[id] = true
+			continue
+		}
+		transient.remaining -= seconds
+		g.debris[id] = transient
+	}
+	g.removeObjects(remove)
+	g.destructionViewRemaining = max(0, g.destructionViewRemaining-seconds)
+	g.viewCamera.Update(seconds)
+	if reference := g.starfieldReferencePosition(); reference != nil {
+		g.starField.Wrap(*reference)
+	}
+	g.refreshViewContext()
 }
 
 func (g *Game) removeObjects(remove map[scene.ObjectID]bool) {
@@ -4568,6 +4698,9 @@ func (g *Game) fireLaserAt(aimTarget math3d.Vec3, aimed bool) bool {
 	g.nextMuzzlePair = (pair + 1) % len(muzzlePairs)
 	g.fireCooldown = g.profile.Combat.FireInterval
 	g.fireHistory = append(g.fireHistory, g.simulationTime)
+	if g.soundPlayer != nil {
+		g.soundPlayer.Trigger(gameaudio.CueXWingLaser)
+	}
 	return true
 }
 
@@ -4763,6 +4896,9 @@ func (g *Game) applyShieldDamage(amount int) bool {
 	g.shieldQuietTime = 0
 	g.impactFlashUntil = g.simulationTime + impactFlashDuration
 	g.setCombatFeedback(fmt.Sprintf("SHIELDS HIT -%d", amount), color.RGBA{R: 255, G: 80, B: 64, A: 255})
+	if g.soundPlayer != nil {
+		g.soundPlayer.Trigger(gameaudio.CueShieldImpact)
+	}
 	return g.shieldStrength < 0
 }
 
@@ -7317,29 +7453,49 @@ func (g *Game) drawBillboard(screen *ebiten.Image, object scene.Object, billboar
 		g.pipeline.Stats.BillboardObjects++
 		g.pipeline.Stats.BillboardLines += len(lines) + len(billboard.Foreground)
 	}
-	batchCount := g.drawBillboardLines(screen, lines, center.X, center.Y, projectedRadius)
-	batchCount += g.drawBillboardOpaqueEllipses(screen, billboard.OpaqueEllipses, center.X, center.Y, projectedRadius)
-	batchCount += g.drawBillboardLines(screen, billboard.Foreground, center.X, center.Y, projectedRadius)
+	rotation := billboardArtworkRotation(object, g.pipeline.View)
+	batchCount := g.drawBillboardLines(screen, lines, center.X, center.Y, projectedRadius, rotation)
+	batchCount += g.drawBillboardOpaqueEllipses(screen, billboard.OpaqueEllipses, center.X, center.Y, projectedRadius, rotation)
+	batchCount += g.drawBillboardLines(screen, billboard.Foreground, center.X, center.Y, projectedRadius, rotation)
 	if g.pipeline.Stats != nil {
 		g.pipeline.Stats.BillboardBatches += batchCount
 	}
 	return true
 }
 
+// billboardArtworkRotation aligns camera-facing artwork with its object's
+// local up axis in screen space. A billboard's centre already follows the view
+// transform, but without this rotation its authored details remain screen-upright
+// while every world-space object rolls around them.
+func billboardArtworkRotation(object scene.Object, view math3d.Mat4) float64 {
+	localUp := object.Pose.Orientation.Rotate(math3d.Vec3{Y: 1})
+	cameraUp := view.TransformDirection(localUp)
+	if math.Hypot(cameraUp.X, cameraUp.Y) <= 1e-9 {
+		// Looking directly along the artwork's up axis leaves no stable screen
+		// orientation. Keeping the authored orientation avoids frame-to-frame
+		// flips at that singularity.
+		return 0
+	}
+	// Artwork coordinates have +Y upward whereas screen coordinates have +Y
+	// downward. The signs therefore differ from a conventional screen rotation.
+	return math.Atan2(-cameraUp.X, cameraUp.Y)
+}
+
 // drawBillboardOpaqueEllipses supplies small authored physical backings such
 // as the Death Star superlaser dish. It is intentionally separate from the
 // analytic occluder path: these ellipses are local presentation features, not
 // a broad background fill or a substitute for scene depth.
-func (g *Game) drawBillboardOpaqueEllipses(screen *ebiten.Image, ellipses []appearance.BillboardEllipse, centerX, centerY, radius float64) int {
+func (g *Game) drawBillboardOpaqueEllipses(screen *ebiten.Image, ellipses []appearance.BillboardEllipse, centerX, centerY, radius, artworkRotation float64) int {
+	artworkCosine, artworkSine := math.Cos(artworkRotation), math.Sin(artworkRotation)
 	for _, ellipse := range ellipses {
 		const segments = 24
-		cosine, sine := math.Cos(ellipse.Rotation), math.Sin(ellipse.Rotation)
+		cosine, sine := math.Cos(ellipse.Rotation+artworkRotation), math.Sin(ellipse.Rotation+artworkRotation)
 		var path vector.Path
 		for index := 0; index <= segments; index++ {
 			angle := 2 * math.Pi * float64(index) / segments
 			localX, localY := ellipse.RadiusX*math.Cos(angle), ellipse.RadiusY*math.Sin(angle)
-			x := ellipse.Center.X + localX*cosine - localY*sine
-			y := ellipse.Center.Y + localX*sine + localY*cosine
+			x := ellipse.Center.X*artworkCosine - ellipse.Center.Y*artworkSine + localX*cosine - localY*sine
+			y := ellipse.Center.X*artworkSine + ellipse.Center.Y*artworkCosine + localX*sine + localY*cosine
 			screenX, screenY := float32(centerX+x*radius), float32(centerY-y*radius)
 			if index == 0 {
 				path.MoveTo(screenX, screenY)
@@ -7407,15 +7563,18 @@ type vectorLineBatch struct {
 
 // drawBillboardLines batches independent lines by colour and width, reducing
 // the number of vector draw submissions without joining unrelated strokes.
-func (g *Game) drawBillboardLines(screen *ebiten.Image, lines []appearance.Line, centerX, centerY, radius float64) int {
+func (g *Game) drawBillboardLines(screen *ebiten.Image, lines []appearance.Line, centerX, centerY, radius, artworkRotation float64) int {
 	for index := range g.billboardBatches {
 		g.billboardBatches[index].path.Reset()
 	}
 	batches := g.billboardBatches[:0]
+	cosine, sine := math.Cos(artworkRotation), math.Sin(artworkRotation)
 	for _, line := range lines {
+		firstX, firstY := line.A.X*cosine-line.A.Y*sine, line.A.X*sine+line.A.Y*cosine
+		secondX, secondY := line.B.X*cosine-line.B.Y*sine, line.B.X*sine+line.B.Y*cosine
 		candidate := render.Line{
-			X1: centerX + line.A.X*radius, Y1: centerY - line.A.Y*radius,
-			X2: centerX + line.B.X*radius, Y2: centerY - line.B.Y*radius,
+			X1: centerX + firstX*radius, Y1: centerY - firstY*radius,
+			X2: centerX + secondX*radius, Y2: centerY - secondY*radius,
 		}
 		clipped, visible := render.ClipLineToViewport(candidate, float64(screen.Bounds().Dx()), float64(screen.Bounds().Dy()))
 		if !visible {

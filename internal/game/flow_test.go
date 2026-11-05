@@ -485,6 +485,26 @@ func TestSuccessfulTerminalMissionFramesDeathStarAndAnimatesOutcome(t *testing.T
 	}
 }
 
+func TestPlayerDestructionPresentationMustFinishBeforeOutcomeCanContinue(t *testing.T) {
+	g := New()
+	g.outcomePresentation = &yavinOutcomePresentation{success: false}
+	g.destructionViewRemaining = 0.01
+	if g.canContinueYavinOutcome() {
+		t.Fatal("outcome controls were enabled while player destruction presentation was active")
+	}
+
+	g.destructionViewRemaining = 0
+	if !g.canContinueYavinOutcome() {
+		t.Fatal("outcome controls were still disabled after player destruction presentation finished")
+	}
+
+	g.outcomePresentation.success = true
+	g.destructionViewRemaining = 0.01
+	if !g.canContinueYavinOutcome() {
+		t.Fatal("success outcome should not be blocked by the player destruction presentation")
+	}
+}
+
 func TestResultCanReturnToTitleWithoutReconstructingSession(t *testing.T) {
 	g := New()
 	if err := g.startYavinMission(false); err != nil {

@@ -4,10 +4,12 @@ import (
 	"flag"
 	"log"
 
+	gameaudio "github.com/edwardwillis/starwars-vector-game/internal/audio"
 	"github.com/edwardwillis/starwars-vector-game/internal/game"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/telemetry"
 	"github.com/hajimehoshi/ebiten/v2"
+	ebitenaudio "github.com/hajimehoshi/ebiten/v2/audio"
 )
 
 func main() {
@@ -34,6 +36,13 @@ func main() {
 	}
 	if err != nil {
 		log.Fatal(err)
+	}
+	if soundboard, audioErr := gameaudio.New(ebitenaudio.NewContext(gameaudio.SampleRate)); audioErr != nil {
+		// Audio is a local presentation enhancement. A corrupt or unsupported
+		// effect must not prevent the deterministic game from launching.
+		log.Printf("audio disabled: %v", audioErr)
+	} else {
+		runningGame.SetSoundPlayer(soundboard)
 	}
 	var recorder *telemetry.Recorder
 	if *telemetryPath != "" {

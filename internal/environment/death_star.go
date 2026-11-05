@@ -139,7 +139,10 @@ func trenchEntryEnvelopePart() scene.Part {
 // direction, while remaining visual-only and clear of the flyable volume.
 func trenchEntryPathArrowsPart() scene.Part {
 	start := (float64(trenchFirstTileZ) - 0.5) * deathStarTileSize
-	near, y := start+6, 0.16
+	// The approach envelope is intentionally drawn on the open deck at Y=0,
+	// but these arrows guide the pilot after the descent. Keep them just above
+	// the recessed trench floor, not hovering across the mouth.
+	near, y := start+6, -deathStarTrenchDepth+0.12
 	mesh := model.Model{}
 	addArrow := func(z float64) {
 		// This closed outline follows the supplied upright-arrow silhouette,

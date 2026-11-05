@@ -317,6 +317,11 @@ func TestDeathStarTrenchEntryEnvelopeMarksTheLegalMouth(t *testing.T) {
 			if len(part.Mesh.Edges) != 21 || part.Color.R < 220 || part.Color.G > 64 || part.Color.B > 64 {
 				t.Fatalf("entry arrows=%+v, want three bright red floor arrows", part)
 			}
+			for vertexIndex, vertex := range part.Mesh.Verts {
+				if math.Abs(vertex.Y-(-deathStarTrenchDepth+0.12)) > 1e-9 {
+					t.Fatalf("entry arrow vertex %d y=%f, want trench floor", vertexIndex, vertex.Y)
+				}
+			}
 			foundArrows = true
 		}
 	}

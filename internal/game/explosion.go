@@ -92,7 +92,9 @@ func (g *Game) spawnShipExplosion(object scene.Object) {
 	random := newCosmeticPRNG(destructionEffectSeed(object, tick))
 	velocity := object.Pose.Forward().Scale(object.Motion.Speed).Add(object.Motion.Velocity)
 	size := max(0.8, object.VisualRadius)
-	effect := shipExplosion{rootID: object.ID, frame: object.Frame, position: object.Pose.Position, velocity: velocity, size: size}
+	// Catalog space ships use the zero frame as shorthand for the exterior;
+	// normalise it before comparing against the camera's explicit active frame.
+	effect := shipExplosion{rootID: object.ID, frame: normalizedObjectFrame(object), position: object.Pose.Position, velocity: velocity, size: size}
 	effect.lobeCount = 3 + int(random.unit()*4)
 	for index := 0; index < effect.lobeCount; index++ {
 		lobe := explosionLobe{

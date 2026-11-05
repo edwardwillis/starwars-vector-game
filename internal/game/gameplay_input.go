@@ -149,7 +149,10 @@ func (g *Game) applyGameplayControlModes(input gameplayInput) {
 	if input.ManualOverride {
 		g.mode = modeManual
 	}
-	if !input.CockpitSteeringPressed || g.viewCamera.Mode != camera.Cockpit {
+	// A button can already be held when a launch/briefing transition hands off
+	// to gameplay. Treat the held state as steering activation as well as the
+	// press edge, otherwise the ship remains in autopilot until release/repress.
+	if !input.CockpitSteeringHeld || g.viewCamera.Mode != camera.Cockpit {
 		return
 	}
 	g.mode = modeManual

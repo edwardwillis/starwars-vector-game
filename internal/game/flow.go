@@ -261,6 +261,9 @@ func (g *Game) adoptYavinSession(fresh *Game) {
 	g.controlsRemaining = 0
 	g.hyperspaceArrival = fresh.hyperspaceArrival
 	g.outcomePresentation = nil
+	clear(g.imperialFlybys)
+	g.imperialFlybyFrame = ""
+	g.imperialFlybyCueCooldown = 0
 
 	// Pipeline construction follows the selected gameplay profile, while the
 	// user's runtime realism choice remains an application preference.
@@ -345,7 +348,7 @@ func (g *Game) updateApplicationFlow(seconds float64) (bool, error) {
 		}
 		return true, nil
 	case flowOutcome:
-		if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		if g.canContinueYavinOutcome() && (inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)) {
 			return true, g.applyShellAction(shellActionOutcomeContinue)
 		}
 		g.advanceYavinOutcomePresentation(seconds)
@@ -478,10 +481,24 @@ func (g *Game) advanceYavinOutcomePresentation(seconds float64) {
 	if g.outcomePresentation == nil || seconds <= 0 {
 		return
 	}
+	if g.playerDestructionPresentationActive() {
+		g.advancePlayerDestructionView(seconds)
+	}
 	// The visual effect reaches its full composition quickly then remains
 	// available for the player to acknowledge. There is no presentation timer
 	// that can silently advance the application flow.
 	g.outcomePresentation.elapsed += seconds
+}
+
+// canContinueYavinOutcome keeps the player-destruction view on screen for its
+// complete duration. Outcome controls become available only after the
+// three-second breakup presentation has finished.
+func (g *Game) canContinueYavinOutcome() bool {
+	return !g.playerDestructionPresentationActive()
+}
+
+func (g *Game) playerDestructionPresentationActive() bool {
+	return g.outcomePresentation != nil && !g.outcomePresentation.success && g.destructionViewRemaining > 0
 }
 
 func (g *Game) drawYavinOutcomePresentation(screen *ebiten.Image) {
@@ -496,6 +513,10 @@ func (g *Game) drawYavinOutcomePresentation(screen *ebiten.Image) {
 	}
 	if completed {
 		g.drawDeathStarDestructionEffect(screen, elapsed)
+	}
+	if g.playerDestructionPresentationActive() {
+		drawVectorText(screen, ScreenWidth/2, ScreenHeight-38, "X-WING DESTROYED", color.RGBA{R: 255, G: 64, B: 64, A: 255})
+		return
 	}
 	primary := color.RGBA{R: 255, G: 224, B: 32, A: 255}
 	if !completed {

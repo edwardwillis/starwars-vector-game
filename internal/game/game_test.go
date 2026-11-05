@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/edwardwillis/starwars-vector-game/internal/appearance"
+	gameaudio "github.com/edwardwillis/starwars-vector-game/internal/audio"
 	"github.com/edwardwillis/starwars-vector-game/internal/camera"
 	"github.com/edwardwillis/starwars-vector-game/internal/catalog"
 	"github.com/edwardwillis/starwars-vector-game/internal/cockpit"
@@ -29,6 +30,19 @@ import (
 
 type recordingFiringController struct {
 	order *[]scene.ObjectID
+}
+
+type recordingSoundPlayer struct {
+	cues    []gameaudio.Cue
+	updates int
+}
+
+func (player *recordingSoundPlayer) Trigger(cue gameaudio.Cue) {
+	player.cues = append(player.cues, cue)
+}
+
+func (player *recordingSoundPlayer) Update() {
+	player.updates++
 }
 
 func (controller recordingFiringController) Decide(context control.Context) control.Decision {
@@ -543,6 +557,17 @@ func TestBillboardAngularRadiusDoesNotInflateAtViewEdge(t *testing.T) {
 	}
 	if math.Abs(frontRadius/frontRange-edgeRadius/edgeRange) > 1e-12 {
 		t.Fatalf("angular billboard radius inflated at edge: front=%v edge=%v", frontRadius/frontRange, edgeRadius/edgeRange)
+	}
+}
+
+func TestBillboardArtworkRotationFollowsCameraRoll(t *testing.T) {
+	object := catalog.DeathStar(40, kinematics.Pose{})
+	if rotation := billboardArtworkRotation(object, math3d.Identity()); math.Abs(rotation) > 1e-12 {
+		t.Fatalf("unrolled artwork rotation = %v, want 0", rotation)
+	}
+	rolledView := (kinematics.Pose{Orientation: math3d.QuaternionFromYawPitchRoll(0, 0, math.Pi/2)}).ViewMatrix()
+	if rotation := billboardArtworkRotation(object, rolledView); math.Abs(rotation+math.Pi/2) > 1e-12 {
+		t.Fatalf("rolled artwork rotation = %v, want %v", rotation, -math.Pi/2)
 	}
 }
 
@@ -1854,6 +1879,25 @@ func TestCombatFeedbackExpiresFromSimulationTime(t *testing.T) {
 	}
 }
 
+func TestAcceptedShieldDamageTriggersOneImpactCue(t *testing.T) {
+	g := New()
+	sounds := &recordingSoundPlayer{}
+	g.SetSoundPlayer(sounds)
+
+	if destroyed := g.applyShieldDamage(1); destroyed {
+		t.Fatal("ordinary shield damage destroyed the player")
+	}
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueShieldImpact}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("shield impact cues=%v, want %v", got, want)
+	}
+	if destroyed := g.applyShieldDamage(0); destroyed {
+		t.Fatal("zero shield damage destroyed the player")
+	}
+	if got := len(sounds.cues); got != 1 {
+		t.Fatalf("rejected shield damage triggered %d cues, want 1", got)
+	}
+}
+
 func TestShieldHitStartsAndFadesImpactFlash(t *testing.T) {
 	g := New()
 	g.simulationTime = 12
@@ -2220,6 +2264,72 @@ func TestFireLaserSpawnsTrackedBolt(t *testing.T) {
 	}
 }
 
+func TestPlayerLaserVolleyTriggersOneXWingSoundCue(t *testing.T) {
+	g := New()
+	sounds := &recordingSoundPlayer{}
+	g.SetSoundPlayer(sounds)
+
+	if !g.fireLaser() {
+		t.Fatal("player laser volley was rejected")
+	}
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueXWingLaser}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sound cues=%v, want %v", got, want)
+	}
+	if g.fireLaser() {
+		t.Fatal("cooldown rejected no laser volley")
+	}
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueXWingLaser}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rejected volley triggered sound cues=%v, want %v", got, want)
+	}
+}
+
+func TestHeldCockpitSteeringEntersManualModeWithoutPressEdge(t *testing.T) {
+	g := New()
+	g.mode = modeAutopilot
+	g.viewCamera.Mode = camera.Cockpit
+
+	g.applyGameplayControlModes(gameplayInput{CockpitSteeringHeld: true})
+
+	if g.mode != modeManual {
+		t.Fatalf("held cockpit steering mode=%v, want manual", g.mode)
+	}
+}
+
+func TestImperialClosePassTriggersOneFlybyCue(t *testing.T) {
+	g := New()
+	sounds := &recordingSoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	player := g.objectByID(fighterID)
+	imperial := g.objectByID(2)
+	player.Pose.Position = math3d.Vec3{}
+	imperial.Pose.Position = math3d.Vec3{X: 48}
+
+	// The first observation establishes the active frame without treating the
+	// fighter's spawn position as a flyby.
+	g.updateImperialFlybys(map[scene.ObjectID]math3d.Vec3{
+		fighterID:   player.Pose.Position,
+		imperial.ID: imperial.Pose.Position,
+	}, g.profile.Simulation.TickSeconds)
+	imperial.Pose.Position = math3d.Vec3{X: 8}
+	g.updateImperialFlybys(map[scene.ObjectID]math3d.Vec3{
+		fighterID:   player.Pose.Position,
+		imperial.ID: {X: -48},
+	}, g.profile.Simulation.TickSeconds)
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueTIEFlyby}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("flyby cues=%v, want %v", got, want)
+	}
+
+	// Remaining nearby does not retrigger the same pass.
+	imperial.Pose.Position = math3d.Vec3{X: 14}
+	g.updateImperialFlybys(map[scene.ObjectID]math3d.Vec3{
+		fighterID:   player.Pose.Position,
+		imperial.ID: {X: 8},
+	}, g.profile.Simulation.TickSeconds)
+	if got := len(sounds.cues); got != 1 {
+		t.Fatalf("nearby Imperial fighter triggered %d flyby cues, want 1", got)
+	}
+}
+
 func TestFireRateAllowsOnlyConfiguredVolleysInRollingWindow(t *testing.T) {
 	g := New()
 	for volley := range g.profile.Combat.MaxFireEvents {
@@ -2475,6 +2585,8 @@ func TestLaserInterceptionUsesProfileForgivenessWithoutChangingBoltHitboxes(t *t
 
 func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	g := New()
+	sounds := &recordingSoundPlayer{}
+	g.SetSoundPlayer(sounds)
 	if err := g.startYavinMission(false); err != nil {
 		t.Fatal(err)
 	}
@@ -2524,6 +2636,9 @@ func TestSweptLaserHitDisintegratesFighterAndConsumesBolt(t *testing.T) {
 	}
 	if score := g.world.Mission.Score; score.FighterKills != 1 || score.CombatPoints != sim.FighterKillPoints {
 		t.Fatalf("fighter kill score=%+v", score)
+	}
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueImperialFighterExplosion}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fighter destruction cues=%v, want %v", got, want)
 	}
 	for id, transient := range g.debris {
 		fragment := g.objectByID(id)
@@ -2695,6 +2810,60 @@ func TestResetRespawnsDestroyedPlayerAndRestoresView(t *testing.T) {
 	}
 	if fighter := g.objectByID(fighterID); fighter == nil || fighter.Motion.Speed != g.profile.Player.Flight.MaxForward {
 		t.Fatalf("respawn speed is not maximum: %+v", fighter)
+	}
+}
+
+func TestFailureOutcomeAnimatesPlayerDisintegrationFromDestroyerView(t *testing.T) {
+	g := New()
+	player := *g.objectByID(fighterID)
+	var attacker scene.ObjectID
+	for id := range g.controllers {
+		if candidate := g.objectByID(id); candidate != nil && candidate.Team != player.Team && sameFrame(*candidate, player) {
+			attacker = id
+			candidate.Motion.Velocity = math3d.Vec3{X: 3}
+			break
+		}
+	}
+	if attacker == 0 {
+		t.Fatal("no hostile fighter available for destruction follow view")
+	}
+	g.destroyAndDisintegrateWithAttacker(map[scene.ObjectID]scene.Object{fighterID: player}, nil, attacker)
+	g.outcomePresentation = &yavinOutcomePresentation{}
+
+	var fragmentID scene.ObjectID
+	for id, transient := range g.debris {
+		if transient.rootObjectID == fighterID {
+			fragmentID = id
+			break
+		}
+	}
+	if fragmentID == 0 {
+		t.Fatal("player destruction did not create a visible fragment")
+	}
+	fragmentBefore := g.objectByID(fragmentID).Pose
+	attackerBefore := g.objectByID(attacker).Pose
+	worldTick := g.world.Tick
+
+	g.advanceYavinOutcomePresentation(g.profile.Simulation.TickSeconds)
+
+	if fragmentAfter := g.objectByID(fragmentID); fragmentAfter == nil || fragmentAfter.Pose == fragmentBefore {
+		t.Fatalf("player fragment did not animate: before=%+v after=%+v", fragmentBefore, fragmentAfter)
+	}
+	if attackerAfter := g.objectByID(attacker); attackerAfter == nil || attackerAfter.Pose == attackerBefore {
+		t.Fatalf("destroyer did not continue moving: before=%+v after=%+v", attackerBefore, attackerAfter)
+	}
+	if g.world.Tick != worldTick {
+		t.Fatalf("failure presentation advanced authoritative world tick from %d to %d", worldTick, g.world.Tick)
+	}
+
+	g.advanceYavinOutcomePresentation(g.profile.Simulation.PlayerDestructionViewTime)
+	if g.destructionViewRemaining != 0 {
+		t.Fatalf("destruction presentation remaining=%v, want zero", g.destructionViewRemaining)
+	}
+	for _, transient := range g.debris {
+		if transient.rootObjectID == fighterID {
+			t.Fatal("player debris remained after the destruction presentation")
+		}
 	}
 }
 

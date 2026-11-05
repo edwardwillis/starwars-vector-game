@@ -80,6 +80,14 @@ func TestShipExplosionBudgetEvictsOldest(t *testing.T) {
 	}
 }
 
+func TestShipExplosionNormalizesTheExteriorFrame(t *testing.T) {
+	g := New()
+	g.spawnShipExplosion(scene.Object{ID: 42, Definition: "builtin/test", VisualRadius: 1, Pose: kinematics.Pose{Orientation: math3d.IdentityQuaternion()}})
+	if got := g.shipExplosions[0].frame; got != scene.ExteriorFrame {
+		t.Fatalf("explosion frame=%q, want exterior frame", got)
+	}
+}
+
 func TestShipExplosionIgnoresOnlyItsOwnDebrisDepth(t *testing.T) {
 	const rootID = scene.ObjectID(77)
 	const fragmentID = scene.ObjectID(91)
