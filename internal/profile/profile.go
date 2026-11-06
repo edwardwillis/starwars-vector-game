@@ -220,9 +220,9 @@ func Pilot() GameProfile {
 	pursuit.AttackFireMinGap = 0.90
 	pursuit.AttackFireMaxGap = 1.60
 	pursuit.AttackRange = 68.0
-	// Attack runs may fire throughout the arc; projectile aiming applies the
-	// configured deterministic error independently.
-	pursuit.AttackAimDot = -1.0
+	// TIE laser cannons are fixed forward weapons, not turrets. A 0.96 dot
+	// product limits a firing solution to roughly a 16-degree forward cone.
+	pursuit.AttackAimDot = 0.96
 
 	return GameProfile{
 		Name:    PilotName,

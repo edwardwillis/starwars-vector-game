@@ -8,6 +8,7 @@ import (
 
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/overlay"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
@@ -34,8 +35,9 @@ const (
 // Keeping it here avoids turning the Yavin ending into a reusable cut-scene
 // framework before a second mission establishes those requirements.
 type yavinOutcomePresentation struct {
-	elapsed float64
-	success bool
+	elapsed                float64
+	success                bool
+	failurePortraitStarted bool
 }
 
 func (flow applicationFlow) String() string {
@@ -135,22 +137,26 @@ func (g *Game) applyShellAction(action shellAction) error {
 	case flowBriefing:
 		switch action {
 		case shellActionBack:
+			g.cancelCharacterOverlay()
 			g.flow = flowTitle
 		case shellActionLaunch:
 			return g.launchYavinSession(false)
 		}
 	case flowOutcome:
 		if action == shellActionOutcomeContinue {
+			g.cancelCharacterOverlay()
 			g.flow = flowResult
 			g.outcomePresentation = nil
 		}
 	case flowResult:
 		switch action {
 		case shellActionRetryMission:
+			g.cancelCharacterOverlay()
 			// Session construction remains at the explicit Launch boundary.
 			g.selectedMission = 0
 			g.flow = flowBriefing
 		case shellActionReturnToTitle:
+			g.cancelCharacterOverlay()
 			g.flow = flowTitle
 		}
 	}
@@ -190,6 +196,7 @@ func (g *Game) constructYavinSession() (*Game, error) {
 // application shell, selected launch profile, renderer/input preferences, and
 // reusable presentation caches owned by the application.
 func (g *Game) adoptYavinSession(fresh *Game) {
+	g.cancelCharacterOverlay()
 	g.profile = fresh.profile
 	g.environmentRegistry = fresh.environmentRegistry
 	g.environments = fresh.environments
@@ -352,6 +359,7 @@ func (g *Game) updateApplicationFlow(seconds float64) (bool, error) {
 			return true, g.applyShellAction(shellActionOutcomeContinue)
 		}
 		g.advanceYavinOutcomePresentation(seconds)
+		g.updateCharacterOverlay(seconds)
 		return true, nil
 	case flowResult:
 		action := shellActionNone
@@ -481,8 +489,20 @@ func (g *Game) advanceYavinOutcomePresentation(seconds float64) {
 	if g.outcomePresentation == nil || seconds <= 0 {
 		return
 	}
-	if g.playerDestructionPresentationActive() {
+	destructionWasActive := g.playerDestructionPresentationActive()
+	if destructionWasActive {
 		g.advancePlayerDestructionView(seconds)
+	}
+	// The portrait is a final presentation beat after the frozen wreck view,
+	// rather than part of the authoritative destruction event. The flag keeps
+	// it one-shot while the outcome screen remains open for acknowledgement.
+	if destructionWasActive && !g.playerDestructionPresentationActive() && !g.outcomePresentation.failurePortraitStarted {
+		// Impact-flash timing normally advances with simulation time. Terminal
+		// outcomes intentionally freeze simulation time, so retire its red wash
+		// explicitly before showing the final hologram.
+		g.impactFlashUntil = g.simulationTime
+		g.outcomePresentation.failurePortraitStarted = true
+		g.ShowCharacterOverlay(overlay.Jabba)
 	}
 	// The visual effect reaches its full composition quickly then remains
 	// available for the player to acknowledge. There is no presentation timer
@@ -518,6 +538,12 @@ func (g *Game) drawYavinOutcomePresentation(screen *ebiten.Image) {
 		drawVectorText(screen, ScreenWidth/2, ScreenHeight-38, "X-WING DESTROYED", color.RGBA{R: 255, G: 64, B: 64, A: 255})
 		return
 	}
+	// Let the frozen gameplay view provide the backdrop for Jabba's final
+	// hologram. The ordinary failure-result panel returns after the portrait
+	// completes, so the player still has an unambiguous continuation prompt.
+	if !completed && g.failureHologramActive() {
+		return
+	}
 	primary := color.RGBA{R: 255, G: 224, B: 32, A: 255}
 	if !completed {
 		primary = color.RGBA{R: 255, G: 64, B: 64, A: 255}
@@ -533,6 +559,13 @@ func (g *Game) drawYavinOutcomePresentation(screen *ebiten.Image) {
 	}
 	drawVectorText(screen, ScreenWidth/2, 122, missionResultReason(mission.Reason), muted)
 	drawVectorText(screen, ScreenWidth/2, ScreenHeight-42, "ENTER MISSION RESULT", primary)
+}
+
+func (g *Game) failureHologramActive() bool {
+	return g.outcomePresentation != nil &&
+		g.outcomePresentation.failurePortraitStarted &&
+		g.characterOverlay != nil &&
+		g.characterOverlay.State() != overlay.Hidden
 }
 
 // drawDeathStarDestructionEffect is intentionally bounded screen-space vector

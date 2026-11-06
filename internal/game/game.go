@@ -22,6 +22,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	modelpkg "github.com/edwardwillis/starwars-vector-game/internal/model"
+	"github.com/edwardwillis/starwars-vector-game/internal/overlay"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
@@ -1065,6 +1066,9 @@ type Game struct {
 	viewContext              view.Context
 	visibleObjectIDs         map[scene.ObjectID]bool
 	whitePixel               *ebiten.Image
+	characterOverlay         *overlay.Manager
+	characterOverlayPlayback gameaudio.Playback
+	characterOverlayPolicy   overlay.PlaybackPolicy
 	cockpitArtwork           cockpitArtwork
 	textureRegistry          *render.TextureRegistry
 	textureImages            map[string]*ebiten.Image
@@ -1169,6 +1173,10 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 	if appearanceRegistry == nil {
 		return nil, fmt.Errorf("create game: appearance registry is nil")
 	}
+	characterOverlay, err := overlay.NewDefaultManager()
+	if err != nil {
+		return nil, fmt.Errorf("create character overlays: %w", err)
+	}
 	initialPose := gameProfile.Player.InitialPose
 	autoMotion := gameProfile.Player.AutopilotMotion
 	fighter, err := catalogRegistry.Create(gameProfile.Player.Object, fighterID, initialPose)
@@ -1252,6 +1260,7 @@ func NewWithRegistriesAndAppearances(gameProfile profile.GameProfile, registry *
 		billboardLineCache:     make(map[string]map[int][]appearance.Line),
 		textureRegistry:        render.DefaultTextureRegistry(),
 		textureImages:          make(map[string]*ebiten.Image),
+		characterOverlay:       characterOverlay,
 		imperialFlybys:         make(map[scene.ObjectID]bool),
 	}
 	starfieldMode := gameProfile.Starfield.Mode
@@ -1702,6 +1711,24 @@ func (g *Game) Update() error {
 	if !hasInput {
 		return ebiten.Termination
 	}
+	// Portrait previews are presentation-only, deliberately unavailable during
+	// recording/replay, and never enter gameplayInput.
+	if !replaying && g.recording == nil && g.showHUD {
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyJ):
+			g.ShowCharacterOverlay(overlay.Jabba)
+		case inpututil.IsKeyJustPressed(ebiten.KeyH):
+			g.showCharacterOverlayOverride(overlay.Jabba, overlay.JabbaHologramPresentation, overlay.FromBottom)
+		case inpututil.IsKeyJustPressed(ebiten.Key1):
+			g.showCharacterOverlayOverride(overlay.Jabba, overlay.JabbaSlidePresentation, overlay.FromBottom)
+		case inpututil.IsKeyJustPressed(ebiten.Key2):
+			g.showCharacterOverlayOverride(overlay.Jabba, overlay.JabbaSlidePresentation, overlay.FromLeft)
+		case inpututil.IsKeyJustPressed(ebiten.Key3):
+			g.showCharacterOverlayOverride(overlay.Jabba, overlay.JabbaSlidePresentation, overlay.FromTop)
+		case inpututil.IsKeyJustPressed(ebiten.Key4):
+			g.showCharacterOverlayOverride(overlay.Jabba, overlay.JabbaSlidePresentation, overlay.FromRight)
+		}
+	}
 	g.applyGameplayModeToggle(input)
 	if !replaying && inpututil.IsKeyJustPressed(ebiten.KeyP) {
 		g.paused = !g.paused
@@ -1836,6 +1863,7 @@ func (g *Game) Update() error {
 		return err
 	}
 	g.enterTerminalMissionFlow()
+	g.updateCharacterOverlay(seconds)
 	if g.playerDestroyed && g.viewCamera.Mode == camera.Chase && g.objectByID(g.viewCamera.TargetID) == nil {
 		g.switchToEnemyDestructionFollowView(g.destructionVictim, 0)
 	}
@@ -4623,6 +4651,13 @@ func (g *Game) fireAutonomousLaser(shooter, target scene.Object) bool {
 	errorX := deterministicSigned(&seed) * g.profile.Swarm.AimError
 	errorY := deterministicSigned(&seed) * g.profile.Swarm.AimError * 0.7
 	aimPoint = aimPoint.Add(target.Pose.Orientation.Rotate(math3d.Vec3{X: errorX, Y: errorY}))
+	// Controllers normally apply this same gate before requesting fire, but
+	// retain it at the weapon boundary so no autonomous caller can rotate a
+	// fixed TIE cannon into an all-direction turret.
+	toAim := aimPoint.Sub(shooter.Pose.Position).Normalize()
+	if toAim == (math3d.Vec3{}) || shooter.Pose.Forward().Normalize().Dot(toAim) < g.profile.Swarm.Pursuit.AttackAimDot {
+		return false
+	}
 	spawned := false
 	for _, muzzle := range []string{"muzzle-upper-left", "muzzle-upper-right"} {
 		spawn, err := combat.FireLaserTowardWithConfig(shooter, g.nextObjectID, muzzle, aimPoint, g.profile.Combat.Laser)
@@ -4788,6 +4823,7 @@ func (g *Game) updateProjectiles(seconds float64) {
 }
 
 func (g *Game) resetFighter() {
+	g.cancelCharacterOverlay()
 	g.clearShipExplosions()
 	fighter := g.objectByID(fighterID)
 	if fighter == nil {
@@ -4889,6 +4925,7 @@ func (g *Game) applyShieldDamage(amount int) bool {
 	if amount <= 0 || g.shieldStrength < 0 {
 		return g.shieldStrength < 0
 	}
+	previousShield := g.shieldStrength
 	g.shieldStrength -= amount
 	if g.benchmarkSafe && g.shieldStrength < 1 {
 		g.shieldStrength = 1
@@ -4898,6 +4935,9 @@ func (g *Game) applyShieldDamage(amount int) bool {
 	g.setCombatFeedback(fmt.Sprintf("SHIELDS HIT -%d", amount), color.RGBA{R: 255, G: 80, B: 64, A: 255})
 	if g.soundPlayer != nil {
 		g.soundPlayer.Trigger(gameaudio.CueShieldImpact)
+	}
+	if (g.shieldStrength == 2 || g.shieldStrength == 1) && g.shieldStrength != previousShield {
+		g.ShowCharacterOverlay(overlay.R2D2)
 	}
 	return g.shieldStrength < 0
 }
@@ -4930,6 +4970,7 @@ func (g *Game) updateShield(seconds float64) {
 }
 
 func (g *Game) respawnPlayer() {
+	g.cancelCharacterOverlay()
 	g.clearShipExplosions()
 	pose := g.safePlayerRespawnPose()
 	fighter, err := g.catalogRegistry.Create(g.profile.Player.Object, fighterID, pose)
@@ -7052,6 +7093,7 @@ func (g *Game) drawOverlayHUD(screen *ebiten.Image) {
 		ebitenutil.DebugPrint(screen, g.hudText())
 		g.drawRealismSlider(screen)
 	}
+	g.drawCharacterOverlay(screen)
 }
 
 func (g *Game) renderDiagnosticsEnabled() bool {
@@ -8060,6 +8102,7 @@ func controlsText(playerActive bool) string {
 		"F / left mouse  fire    G  mouse flight\n" +
 		"T  proton torpedo\n" +
 		"V  view   Shift  follow fighter   Space  HUD\n" +
+		"HUD + J  random Jabba   H  hologram   1/2/3/4  bottom/left/top/right\n" +
 		"L  toggle surface auto-level\n" +
 		"C  fighter showcase\n" +
 		"[ / ]  rendering realism\n" +

@@ -128,6 +128,37 @@ and the mouse wheel to zoom. It includes the playable fighters, TIE wreckage,
 a Death Star turbolaser, and the curved low-rise quarter-hangar surface
 structure. Press `C` or `Escape` to return to the game.
 
+## Character portrait overlays
+
+Portraits are transparent PNG artwork rendered as a final, presentation-only
+screen overlay. The initial Jabba portrait appears when the pilot's X-wing is
+destroyed, after a short entrance delay, with an optional cached MP3 laugh; it
+is not used for ordinary Imperial-fighter destruction. While the development
+HUD is visible (`Space`), press `J` to preview Jabba from a deterministic
+random edge without changing gameplay. Press `H` for the upright cyan
+hologram materialization. Use `1` / `2` / `3` / `4` to force bottom / left /
+top / right slide entrances. These shortcuts are disabled while recording or
+replaying.
+
+To add a character, place its PNG in `internal/overlay/assets/` and any MP3
+in `internal/audio/assets/sfx/`, embed/register both, then add a
+`CharacterPortrait` definition. Its `Presentation` owns the effect, anchor,
+timings, optional audio, and effect-specific settings. Call
+`Game.ShowCharacterOverlay(characterID)` from a presentation event boundary;
+gameplay callers never select a transition. Definitions may be registered
+before their assets arrive, but cannot display until the matching image is
+available. Keep these calls outside authoritative simulation input and replay
+checksums.
+
+Set `Presentation.Effect` to `overlay.EffectHologram` for the upright fixed
+transmission treatment. Its `Hologram` fields tune cyan tint, phase flicker,
+8–16 strips, relative strip displacement, and interference refresh rate.
+`EffectSlide` retains deterministic per-appearance edge selection. Jabba is
+configured as a hologram; R2-D2 is a slide and appears when an accepted hit
+reduces shields to two or one. Chewbacca and Han Solo are preconfigured as
+slides pending their portrait assets. HUD preview `J` uses Jabba's configured
+effect, while `H` and `1`–`4` remain development-only hologram/slide overrides.
+
 ## Windows beta download
 
 The current Windows x64 beta is published as a GitHub prerelease:

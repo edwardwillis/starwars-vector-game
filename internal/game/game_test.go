@@ -18,6 +18,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
 	"github.com/edwardwillis/starwars-vector-game/internal/model"
+	"github.com/edwardwillis/starwars-vector-game/internal/overlay"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/render"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
@@ -36,6 +37,30 @@ type recordingSoundPlayer struct {
 	cues    []gameaudio.Cue
 	updates int
 }
+
+type overlayPlayback struct{ stopped bool }
+
+func (playback *overlayPlayback) Stop() { playback.stopped = true }
+
+type overlaySoundPlayer struct {
+	cues      []gameaudio.Cue
+	volumes   []float64
+	playbacks []*overlayPlayback
+}
+
+func (player *overlaySoundPlayer) Trigger(cue gameaudio.Cue) {
+	player.cues = append(player.cues, cue)
+}
+
+func (player *overlaySoundPlayer) TriggerWithVolume(cue gameaudio.Cue, volume float64) gameaudio.Playback {
+	player.cues = append(player.cues, cue)
+	player.volumes = append(player.volumes, volume)
+	playback := &overlayPlayback{}
+	player.playbacks = append(player.playbacks, playback)
+	return playback
+}
+
+func (*overlaySoundPlayer) Update() {}
 
 func (player *recordingSoundPlayer) Trigger(cue gameaudio.Cue) {
 	player.cues = append(player.cues, cue)
@@ -1898,6 +1923,53 @@ func TestAcceptedShieldDamageTriggersOneImpactCue(t *testing.T) {
 	}
 }
 
+func TestLowShieldHitShowsConfiguredR2D2SlideOverlay(t *testing.T) {
+	g := New()
+	g.shieldStrength = 3
+	if destroyed := g.applyShieldDamage(1); destroyed {
+		t.Fatal("nonlethal low-shield hit destroyed player")
+	}
+	if g.characterOverlay.State() == overlay.Hidden {
+		t.Fatal("low-shield hit did not show R2-D2 overlay")
+	}
+	g.characterOverlay.Update(overlay.DefaultSlidePresentation.Animation.StartDelay + .01)
+	frame, visible := g.characterOverlay.Frame(ScreenWidth, ScreenHeight)
+	if !visible || frame.Effect != overlay.EffectSlide {
+		t.Fatalf("R2-D2 frame=%+v visible=%t", frame, visible)
+	}
+
+	highShield := New()
+	highShield.shieldStrength = 4
+	highShield.applyShieldDamage(1)
+	if highShield.characterOverlay.State() != overlay.Hidden {
+		t.Fatal("shield hit ending above R2-D2 warning states showed overlay")
+	}
+
+	lethal := New()
+	lethal.shieldStrength = 1
+	lethal.applyShieldDamage(3)
+	if lethal.characterOverlay.State() != overlay.Hidden {
+		t.Fatal("lethal shield hit showed R2-D2 overlay")
+	}
+}
+
+func TestLowShieldR2D2OverlayTriggersItsConfiguredAudioOnce(t *testing.T) {
+	g := New()
+	g.flow = flowPlaying
+	sounds := &overlaySoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	g.shieldStrength = 3
+	g.applyShieldDamage(1)
+	g.updateCharacterOverlay(overlay.R2D2SlidePresentation.Animation.StartDelay + .01)
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueShieldImpact, gameaudio.CueR2D2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("low-shield cues=%v, want %v", got, want)
+	}
+	g.updateCharacterOverlay(1)
+	if got := len(sounds.cues); got != 2 {
+		t.Fatalf("R2-D2 audio repeated %d cues", got)
+	}
+}
+
 func TestShieldHitStartsAndFadesImpactFlash(t *testing.T) {
 	g := New()
 	g.simulationTime = 12
@@ -2058,6 +2130,17 @@ func newAutonomousFiringSession(t *testing.T, insertionOrder []scene.ObjectID) (
 	order := []scene.ObjectID{}
 	g.controllers = make(map[scene.ObjectID]control.Strategy, len(insertionOrder))
 	for _, id := range insertionOrder {
+		fighter := g.objectByID(id)
+		player := g.objectByID(fighterID)
+		if fighter == nil || player == nil {
+			t.Fatalf("missing firing-session fighter %d or player", id)
+		}
+		direction := player.Pose.Position.Sub(fighter.Pose.Position).Normalize()
+		fighter.Pose.Orientation = math3d.QuaternionFromYawPitchRoll(
+			math.Atan2(direction.X, direction.Z),
+			-math.Asin(max(-1, min(1, direction.Y))),
+			0,
+		)
 		g.controllers[id] = recordingFiringController{order: &order}
 	}
 	return g, &order
@@ -2482,6 +2565,9 @@ func TestAutonomousFighterFiresPairedBoltsAtPlayer(t *testing.T) {
 	g := New()
 	shooter := *g.objectByID(2)
 	target := *g.objectByID(fighterID)
+	shooter.Frame = target.Frame
+	shooter.Pose.Position = target.Pose.Position.Add(math3d.Vec3{Z: -10})
+	shooter.Pose.Orientation = math3d.IdentityQuaternion()
 	before := len(g.objects)
 
 	if !g.fireAutonomousLaser(shooter, target) {
@@ -2500,10 +2586,30 @@ func TestAutonomousFighterFiresPairedBoltsAtPlayer(t *testing.T) {
 	}
 }
 
+func TestAutonomousFighterCannotFireOutsideForwardCannonCone(t *testing.T) {
+	g := New()
+	shooter := *g.objectByID(2)
+	target := *g.objectByID(fighterID)
+	shooter.Frame = target.Frame
+	shooter.Pose.Position = target.Pose.Position.Add(math3d.Vec3{X: -10})
+	shooter.Pose.Orientation = math3d.IdentityQuaternion()
+	before := len(g.objects)
+
+	if g.fireAutonomousLaser(shooter, target) {
+		t.Fatal("autonomous fighter fired a fixed cannon at a side target")
+	}
+	if len(g.objects) != before {
+		t.Fatalf("side-target fire added %d projectile objects", len(g.objects)-before)
+	}
+}
+
 func TestAutonomousAimErrorVariesByShooterAndTick(t *testing.T) {
 	g := New()
 	shooter := *g.objectByID(2)
 	target := *g.objectByID(fighterID)
+	shooter.Frame = target.Frame
+	shooter.Pose.Position = target.Pose.Position.Add(math3d.Vec3{Z: -10})
+	shooter.Pose.Orientation = math3d.IdentityQuaternion()
 	g.simulationTime = 1
 	if !g.fireAutonomousLaser(shooter, target) {
 		t.Fatal("first autonomous volley failed")
@@ -3446,6 +3552,154 @@ func TestYavinMissionFailsOnPlayerDestructionAndRestarts(t *testing.T) {
 	g.resetFighter()
 	if g.world.Mission.Phase != sim.MissionOrbitalBattle || g.world.Mission.Reason != "restart" {
 		t.Fatalf("restarted mission=%+v", g.world.Mission)
+	}
+}
+
+func TestPilotDestructionShowsJabbaAfterFrozenOutcomeOnlyOnce(t *testing.T) {
+	g := New()
+	sounds := &overlaySoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	g.impactFlashUntil = g.simulationTime + 1
+	victim := *g.objectByID(fighterID)
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{fighterID: victim}, nil)
+	if g.characterOverlay.State() != overlay.Hidden {
+		t.Fatal("pilot destruction showed Jabba before the destruction view finished")
+	}
+	if len(sounds.cues) != 0 {
+		t.Fatalf("pilot destruction started character audio before the frozen outcome: %v", sounds.cues)
+	}
+	g.flow = flowOutcome
+	g.outcomePresentation = &yavinOutcomePresentation{}
+	g.advanceYavinOutcomePresentation(g.profile.Simulation.PlayerDestructionViewTime)
+	if g.characterOverlay.State() == overlay.Hidden {
+		t.Fatal("completed pilot-destruction view did not show Jabba")
+	}
+	if opacity := g.impactFlashOpacity(); opacity != 0 {
+		t.Fatalf("frozen destruction flash opacity=%d, want zero before Jabba", opacity)
+	}
+
+	g.updateCharacterOverlay(overlay.JabbaHologramPresentation.Animation.StartDelay + .15)
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueJabbaLaugh}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("frozen outcome audio=%v, want %v", got, want)
+	}
+	before, visible := g.characterOverlay.Frame(ScreenWidth, ScreenHeight)
+	if !visible {
+		t.Fatal("Jabba overlay was not drawable during entry")
+	}
+	// Further outcome ticks must not restart the final presentation while the
+	// frozen result remains on screen.
+	g.advanceYavinOutcomePresentation(g.profile.Simulation.TickSeconds)
+	after, visible := g.characterOverlay.Frame(ScreenWidth, ScreenHeight)
+	if !visible || math.Abs(after.Rect.Y-before.Rect.Y) > 1e-9 || after.Opacity != before.Opacity {
+		t.Fatalf("repeated destruction restarted overlay: before=%+v after=%+v visible=%t", before, after, visible)
+	}
+}
+
+func TestNPCDestructionDoesNotShowCharacterOverlay(t *testing.T) {
+	g := New()
+	npc := *g.objectByID(scene.ObjectID(2))
+	g.destroyAndDisintegrate(map[scene.ObjectID]scene.Object{npc.ID: npc}, nil)
+	if g.characterOverlay.State() != overlay.Hidden {
+		t.Fatalf("NPC destruction showed overlay state=%v", g.characterOverlay.State())
+	}
+}
+
+func TestCharacterOverlayCancelsOnResetAndOutcomeTransition(t *testing.T) {
+	g := New()
+	if !g.ShowCharacterOverlay(overlay.Jabba) {
+		t.Fatal("could not start configured Jabba overlay")
+	}
+	g.resetFighter()
+	if g.characterOverlay.State() != overlay.Hidden {
+		t.Fatal("fighter reset retained character overlay")
+	}
+
+	if !g.ShowCharacterOverlay(overlay.Jabba) {
+		t.Fatal("could not restart configured Jabba overlay")
+	}
+	g.flow = flowOutcome
+	if err := g.applyShellAction(shellActionOutcomeContinue); err != nil {
+		t.Fatal(err)
+	}
+	if g.characterOverlay.State() != overlay.Hidden || g.flow != flowResult {
+		t.Fatalf("outcome transition left overlay state=%v flow=%v", g.characterOverlay.State(), g.flow)
+	}
+}
+
+func TestCharacterOverlayAudioStartsOnceAfterEntranceDelay(t *testing.T) {
+	g := New()
+	g.flow = flowPlaying
+	sounds := &overlaySoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	if !g.ShowCharacterOverlay(overlay.Jabba) {
+		t.Fatal("could not show Jabba overlay")
+	}
+	g.updateCharacterOverlay(.39)
+	if len(sounds.cues) != 0 {
+		t.Fatalf("laugh started before entrance delay: %v", sounds.cues)
+	}
+	g.updateCharacterOverlay(.02)
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueJabbaLaugh}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("overlay cues=%v, want %v", got, want)
+	}
+	if len(sounds.volumes) != 1 || sounds.volumes[0] != 1 {
+		t.Fatalf("overlay volumes=%v, want [1]", sounds.volumes)
+	}
+	g.updateCharacterOverlay(1)
+	if len(sounds.cues) != 1 {
+		t.Fatalf("overlay replayed laugh %d times", len(sounds.cues))
+	}
+}
+
+func TestHologramOverlayUsesTheSameOneShotAudio(t *testing.T) {
+	g := New()
+	g.flow = flowPlaying
+	sounds := &overlaySoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	if !g.ShowCharacterOverlay(overlay.Jabba) {
+		t.Fatal("could not show Jabba hologram")
+	}
+	g.updateCharacterOverlay(overlay.JabbaHologramPresentation.Animation.StartDelay + .01)
+	if got, want := sounds.cues, []gameaudio.Cue{gameaudio.CueJabbaLaugh}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("hologram cues=%v, want %v", got, want)
+	}
+	g.updateCharacterOverlay(1)
+	if len(sounds.cues) != 1 {
+		t.Fatalf("hologram replayed laugh %d times", len(sounds.cues))
+	}
+}
+
+func TestCharacterOverlayAudioIgnoresMissingAssetAndHonorsCancelPolicy(t *testing.T) {
+	g := New()
+	g.flow = flowPlaying
+	sounds := &overlaySoundPlayer{}
+	g.SetSoundPlayer(sounds)
+	missing := overlay.JabbaSlidePresentation
+	missing.Animation.StartDelay = 0
+	missing.Audio.Asset = "missing-line"
+	if !g.showCharacterOverlayOverride(overlay.Jabba, missing, missing.Animation.Edge) || len(sounds.cues) != 0 {
+		t.Fatal("missing audio asset prevented portrait or emitted an unknown cue")
+	}
+
+	stoppable := overlay.JabbaSlidePresentation
+	stoppable.Animation.StartDelay = 0
+	stoppable.Audio.Policy = overlay.StopOnCancel
+	if !g.showCharacterOverlayOverride(overlay.Jabba, stoppable, stoppable.Animation.Edge) || len(sounds.playbacks) != 1 {
+		t.Fatal("stoppable character audio did not start")
+	}
+	g.cancelCharacterOverlay()
+	if !sounds.playbacks[0].stopped {
+		t.Fatal("stop-on-cancel character audio was not stopped")
+	}
+
+	finishNaturally := stoppable
+	finishNaturally.Audio.Policy = overlay.FinishNaturally
+	if !g.showCharacterOverlayOverride(overlay.Jabba, finishNaturally, finishNaturally.Animation.Edge) || len(sounds.playbacks) != 2 {
+		t.Fatal("finish-naturally character audio did not start")
+	}
+	g.cancelCharacterOverlay()
+	if sounds.playbacks[1].stopped {
+		t.Fatal("finish-naturally character audio was stopped on cancellation")
 	}
 }
 

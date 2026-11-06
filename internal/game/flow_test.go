@@ -9,6 +9,7 @@ import (
 	"github.com/edwardwillis/starwars-vector-game/internal/environment"
 	"github.com/edwardwillis/starwars-vector-game/internal/kinematics"
 	"github.com/edwardwillis/starwars-vector-game/internal/math3d"
+	"github.com/edwardwillis/starwars-vector-game/internal/overlay"
 	"github.com/edwardwillis/starwars-vector-game/internal/profile"
 	"github.com/edwardwillis/starwars-vector-game/internal/scene"
 	"github.com/edwardwillis/starwars-vector-game/internal/sim"
@@ -502,6 +503,24 @@ func TestPlayerDestructionPresentationMustFinishBeforeOutcomeCanContinue(t *test
 	g.destructionViewRemaining = 0.01
 	if !g.canContinueYavinOutcome() {
 		t.Fatal("success outcome should not be blocked by the player destruction presentation")
+	}
+}
+
+func TestFailureHologramTemporarilyHidesOutcomePanel(t *testing.T) {
+	g := New()
+	g.outcomePresentation = &yavinOutcomePresentation{failurePortraitStarted: true}
+	if g.failureHologramActive() {
+		t.Fatal("hidden portrait suppressed the failure outcome panel")
+	}
+	if !g.ShowCharacterOverlay(overlay.Jabba) {
+		t.Fatal("could not start Jabba hologram")
+	}
+	if !g.failureHologramActive() {
+		t.Fatal("active Jabba hologram did not suppress the failure outcome panel")
+	}
+	g.cancelCharacterOverlay()
+	if g.failureHologramActive() {
+		t.Fatal("cancelled Jabba hologram continued suppressing the failure outcome panel")
 	}
 }
 
